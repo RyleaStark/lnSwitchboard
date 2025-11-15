@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+logs/
+secrets/
+.pytest_cache/
+/LUDS/
+/WIKI/
+.DS_Store

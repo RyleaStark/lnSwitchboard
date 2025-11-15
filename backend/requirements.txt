@@ -1,0 +1,7 @@
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+grpcio==1.60.0
+protobuf==4.25.1
+httpx==0.26.0
+python-dotenv==1.0.1
+pydantic-settings==2.2.1

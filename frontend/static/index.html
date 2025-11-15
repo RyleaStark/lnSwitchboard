@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>lnSwitchboard</title>
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div class="hero-inner">
+          <div class="hero-heading">
+            <img class="hero-icon" src="./icon.svg" alt="" />
+            <div class="hero-copy">
+              <h1>lnSwitchboard</h1>
+              <p class="subtitle">Self-hosted Lightning Addresses</p>
+            </div>
+          </div>
+          <div class="status" id="service-status">Checking status…</div>
+        </div>
+      </header>
+
+      <main class="content">
+        <div class="card-grid">
+          <section class="card" id="macaroon-card">
+            <div class="card-heading">
+              <h2>Invoice Access</h2>
+              <span id="macaroon-status" class="badge badge-warn">Not configured</span>
+            </div>
+            <p class="muted">
+              Add an invoice macaroon with create and read permissions. It stays on your node at
+              <code>secrets/macaroon.hex</code>.
+            </p>
+            <button id="macaroon-reveal" class="ghost-btn hidden" type="button">Replace macaroon</button>
+            <div id="macaroon-form-wrapper" class="macaroon-form">
+              <form id="macaroon-form">
+                <label for="macaroon-input" class="sr-only">Invoice macaroon (hex)</label>
+                <textarea
+                  id="macaroon-input"
+                  name="macaroon"
+                  rows="4"
+                  placeholder="020103000258..."
+                  spellcheck="false"
+                ></textarea>
+                <div class="form-actions">
+                  <button type="submit" class="primary-btn">Save macaroon</button>
+                  <span id="macaroon-feedback" class="feedback"></span>
+                </div>
+              </form>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-heading">
+              <h2>Serve LNURL from your domain</h2>
+            </div>
+            <p class="muted">
+              Forward visitors from every domain you want to offer Lightning addresses on to the lnSwitchboard
+              endpoint. The admin panel stays local on port <code>22121</code>.
+            </p>
+            <button
+              id="lnurl-toggle"
+              class="ghost-btn ghost-btn-inline"
+              type="button"
+              aria-expanded="false"
+              aria-controls="lnurl-instructions"
+            >
+              <span class="toggle-label">Show setup details</span>
+              <span class="toggle-icon" aria-hidden="true"></span>
+            </button>
+            <div id="lnurl-instructions" class="collapsible collapsed">
+              <div class="callout">
+                Copy the <code>/.well-known/lnurlp/</code> path to each domain and point it at this service.
+              </div>
+              <pre class="code"><code>
+server {
+    listen 443 ssl;
+    server_name your.domain;
+
+    location ~ ^/\.well-known/lnurlp/[a-z0-9._+-]+$ {
+        proxy_pass http://127.0.0.1:22121$request_uri;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+}
+              </code></pre>
+            </div>
+          </section>
+        </div>
+
+        <section class="card logs-card">
+          <div class="card-heading">
+            <div>
+              <h2>Recent activity</h2>
+              <p class="muted">Latest LNURL requests served by this node.</p>
+            </div>
+            <button id="logs-clear" class="ghost-btn ghost-btn-danger" type="button">
+              Clear logs
+            </button>
+          </div>
+          <div class="logs-toolbar">
+            <label class="logs-search">
+              <span class="sr-only">Search logs</span>
+              <input
+                type="search"
+                id="logs-search"
+                placeholder="Search logs…"
+                autocomplete="off"
+              />
+            </label>
+            <div class="logs-pagination-controls">
+              <button
+                type="button"
+                id="logs-prev"
+                class="ghost-btn ghost-btn-inline"
+                aria-label="Previous page"
+              >
+                ‹ Prev
+              </button>
+              <span id="logs-page-indicator" class="logs-page-indicator">Page 1</span>
+              <button
+                type="button"
+                id="logs-next"
+                class="ghost-btn ghost-btn-inline"
+                aria-label="Next page"
+              >
+                Next ›
+              </button>
+            </div>
+          </div>
+          <div class="table-wrapper">
+            <table id="log-table">
+              <thead>
+                <tr>
+                  <th>Timestamp (Local)</th>
+                  <th>Username</th>
+                  <th>Domain</th>
+                  <th>Amount (sats)</th>
+                  <th>Paid</th>
+                  <th>IP</th>
+                  <th>Status</th>
+                  <th>Event</th>
+                  <th>Message</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="log-body">
+                <tr>
+                  <td colspan="10" class="placeholder">No activity yet.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <div class="footer-content">
+          <p class="footer-copy">
+            © <span id="copyright-year"></span>
+            <a href="https://github.com/RyleaStark" target="_blank" rel="noopener noreferrer">Rylea Stark</a>
+            · Tip Sats ❤️
+            <a href="lnurlp://lnSwitchboard+tips@bigbones.net">lnSwitchboard+tips@bigbones.net</a>
+          </p>
+        </div>
+      </footer>
+    </div>
+
+    <div id="details-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="details-title">
+      <div class="modal-backdrop" data-close="true"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 id="details-title">Log Details</h2>
+          <button id="details-close" class="modal-close" aria-label="Close details">&times;</button>
+        </div>
+        <pre id="details-json" class="modal-body"></pre>
+      </div>
+    </div>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

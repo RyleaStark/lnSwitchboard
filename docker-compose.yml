@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  lnswitchboard:
+    build: .
+    image: lnswitchboard:local
+    container_name: lnswitchboard
+    restart: unless-stopped
+    environment:
+      SERVICE_PORT: 22121
+      LND_HOST: umbrel-lnd
+      LND_GRPC_PORT: 10009
+      LND_TLS_PATH: /lnd/tls.cert
+    volumes:
+      - ./secrets:/app/secrets:rw
+      - ./logs:/app/logs:rw
+      - /app-data/lightning/data/lnd:/lnd:ro
+    ports:
+      - "22121:22121"
