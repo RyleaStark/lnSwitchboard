@@ -1,6 +1,6 @@
 .venv/
 __pycache__/
-logs/
+/logs/
 secrets/
 .pytest_cache/
 /LUDS/

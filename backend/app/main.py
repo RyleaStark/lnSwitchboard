@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -63,6 +64,18 @@ app.include_router(ui_router.router)
 app.include_router(nip05_router.api_router)
 app.include_router(nip05_router.public_router)
 app.include_router(lnurl_router.router)
+
+def _register_client_redirect(path: str) -> None:
+    target = f"{path.strip('/')}/"
+    target = f"/{target}" if not target.startswith("/") else target
+
+    @app.get(path, include_in_schema=False)
+    async def _redirect_to_trailing_slash() -> RedirectResponse:
+        return RedirectResponse(url=target, status_code=307)
+
+
+for _client_path in ("/logs", "/liquidity", "/settings", "/identities"):
+    _register_client_redirect(_client_path)
 
 if STATIC_DIR.exists():
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
