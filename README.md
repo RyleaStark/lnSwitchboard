@@ -16,7 +16,7 @@ lnSwitchboard turns your node into a sovereign Lightning Address switchboard (ro
 Once the reverse proxy is in front of the root domain, every string before the `@` (tags included) resolves through lnSwitchboard, so anyone can zap sats to whatever handle you hand out.
 
 ## Supported LUDs
-lnSwitchboard currently implements the following LNURL specs. Each link points back to the canonical LUD on GitHub for easy reference:
+lnSwitchboard currently implements the following LNURL specs (plus NIP-05 for Nostr identity lookups). Each link points back to the canonical reference on GitHub for easy review:
 
 - [LUD-06 · `payRequest` base spec](https://github.com/lnurl/luds/blob/luds/06.md)
 - [LUD-09 · `successAction` field for `payRequest`](https://github.com/lnurl/luds/blob/luds/09.md)
@@ -26,8 +26,9 @@ lnSwitchboard currently implements the following LNURL specs. Each link points b
 - [LUD-18 · Payer identity in `payRequest`](https://github.com/lnurl/luds/blob/luds/18.md)
 - [LUD-20 · Long payment descriptions](https://github.com/lnurl/luds/blob/luds/20.md)
 - [LUD-21 · `verify` base spec](https://github.com/lnurl/luds/blob/luds/21.md)
+- [NIP-05 · Mapping internet identifiers to public keys](https://github.com/nostr-protocol/nips/blob/master/05.md)
 
 
 ## Support & credits
-- Sats keep the project zapping: `lnSwitchboard+tips@bigbones.net`
+- Sats keep the project zapping: `lnswitchboard+tips@bigbones.net`
 - Copyright © [Rylea Stark](https://github.com/RyleaStark). All rights reserved unless otherwise noted.

@@ -14,6 +14,7 @@ from .config import get_settings
 from .deps import get_ln_client_dep
 from .logging_utils import configure_logging
 from .routers import lnurl as lnurl_router
+from .routers import nip05 as nip05_router
 from .routers import ui as ui_router
 from .macaroon_store import MacaroonNotConfiguredError
 
@@ -59,6 +60,8 @@ app.add_middleware(
 )
 
 app.include_router(ui_router.router)
+app.include_router(nip05_router.api_router)
+app.include_router(nip05_router.public_router)
 app.include_router(lnurl_router.router)
 
 if STATIC_DIR.exists():

@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, Request, status
 from .config import Settings, get_settings
 from .ln_client import LNClient
 from .macaroon_store import MacaroonStore
+from .nip05_store import NostrIdentityStore
 from .log_storage import LogEntry, RequestLogStorage
 from .rate_limiter import RateLimiter
 from .request_utils import get_client_ip, get_proxy_debug_info
@@ -17,7 +18,11 @@ from .request_utils import get_client_ip, get_proxy_debug_info
 @lru_cache()
 def _get_log_storage() -> RequestLogStorage:
     settings = get_settings()
-    return RequestLogStorage(settings.log_path, max_recent=settings.recent_log_limit)
+    return RequestLogStorage(
+        settings.log_path,
+        max_recent=settings.recent_log_limit,
+        retention_days=settings.log_retention_days,
+    )
 
 
 @lru_cache()
@@ -30,6 +35,12 @@ def _get_rate_limiter() -> RateLimiter:
 def _get_macaroon_store() -> MacaroonStore:
     settings = get_settings()
     return MacaroonStore(settings.macaroon_store_path)
+
+
+@lru_cache()
+def _get_nip05_store() -> NostrIdentityStore:
+    settings = get_settings()
+    return NostrIdentityStore(settings.nip05_store_path)
 
 
 @lru_cache()
@@ -61,6 +72,10 @@ async def get_ln_client_dep() -> LNClient:
 
 async def get_macaroon_store_dep() -> MacaroonStore:
     return _get_macaroon_store()
+
+
+async def get_nip05_store_dep() -> NostrIdentityStore:
+    return _get_nip05_store()
 
 
 async def enforce_rate_limit(

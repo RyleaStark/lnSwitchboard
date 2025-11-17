@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -25,13 +26,17 @@ from ..request_utils import build_public_url, get_client_ip, get_proxy_debug_inf
 
 
 router = APIRouter(prefix="/.well-known/lnurlp", tags=["lnurl"])
+logger = logging.getLogger(__name__)
 
 
 def _metadata_description(settings: Settings, username: str, domain: str) -> str:
-    prefix = settings.metadata_description.strip()
     ln_address = f"{username}@{domain}"
-    if prefix:
-        return f"{prefix} {ln_address}"
+    template = settings.metadata_description or ""
+    template = template.strip()
+    if "{ln_address}" in template:
+        return template.replace("{ln_address}", ln_address).strip()
+    if template:
+        return f"{template} {ln_address}"
     return ln_address
 
 
@@ -126,6 +131,20 @@ def _resolve_long_description(settings: Settings) -> Optional[str]:
     return trimmed or None
 
 
+async def _channel_max_sendable_sat(ln_client: LNClient) -> int:
+    try:
+        channels = await ln_client.list_channels(public_only=False)
+    except Exception as exc:  # pragma: no cover - network errors
+        logger.warning("Failed to fetch channel data for LNURL max sendable: %s", exc)
+        return 0
+    max_receiving = 0
+    for channel in channels:
+        value = channel.get("receiving_capacity_sat")
+        if isinstance(value, int) and value > max_receiving:
+            max_receiving = value
+    return max_receiving
+
+
 def _resolve_payer_data_request(settings: Settings) -> Dict[str, Dict[str, bool]]:
     config_data = dict(settings.payer_data)
     if not config_data:
@@ -210,11 +229,26 @@ async def lnurl_pay(
     if payer_data_request:
         base_details["payer_data"] = payer_data_request
 
+    channel_max_sendable_sat = await _channel_max_sendable_sat(ln_client)
+    if channel_max_sendable_sat <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No inbound liquidity available",
+        )
+    if channel_max_sendable_sat < settings.min_sendable_sat:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Inbound liquidity below configured minimum send amount",
+        )
+
+    max_sendable_msat = channel_max_sendable_sat * 1000
+    base_details["channel_max_sendable_sat"] = channel_max_sendable_sat
+
     if amount is None:
         resp = {
             "tag": "payRequest",
             "callback": callback_http_url,
-            "maxSendable": settings.max_sendable_sat * 1000,
+            "maxSendable": max_sendable_msat,
             "minSendable": settings.min_sendable_sat * 1000,
             "metadata": metadata,
             "commentAllowed": settings.comment_max_length,
@@ -238,7 +272,7 @@ async def lnurl_pay(
     if amount <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount must be positive")
 
-    if amount < settings.min_sendable_sat * 1000 or amount > settings.max_sendable_sat * 1000:
+    if amount < settings.min_sendable_sat * 1000 or amount > max_sendable_msat:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Amount outside allowed range",
@@ -417,18 +451,17 @@ async def lnurl_pay(
             detail="Invoice missing payment request",
         )
 
-    full_success_message = (
-        f"Your payment hit faster than a Lightning bolt — {ln_address} stacked your sats!"
-    )
-    if len(full_success_message) > 144:
-        full_success_message = f"{ln_address} stacked your sats!"
+    template = settings.success_message.strip() or "{ln_address} stacked your sats!"
+    resolved_message = template.format(ln_address=ln_address)
+    if len(resolved_message) > 144:
+        resolved_message = f"{ln_address} stacked your sats!"
 
     response_payload: Dict[str, Any] = {
         "pr": payment_request,
         "routes": [],
         "successAction": {
             "tag": "message",
-            "message": full_success_message,
+            "message": resolved_message,
         },
     }
     if payment_hash_hex:

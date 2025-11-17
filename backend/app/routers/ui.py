@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
-from typing import Any, Dict, List, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
@@ -19,9 +21,21 @@ from ..deps import (
 from ..ln_client import LNClient
 from ..log_storage import RequestLogStorage
 from ..macaroon_store import MacaroonStore
+from ..env_settings import list_env_settings, update_env_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api", tags=["ui"])
+
+
+class EnvSettingsUpdate(BaseModel):
+    values: Dict[str, Any]
+
+
+class MacaroonPayload(BaseModel):
+    macaroon: str
 
 
 async def _refresh_invoice_statuses(entries: List[Dict[str, Any]], ln_client: LNClient) -> None:
@@ -67,6 +81,20 @@ async def _refresh_invoice_statuses(entries: List[Dict[str, Any]], ln_client: LN
         invoice_details = invoice_info
         invoice_details["settled"] = settled
         details["invoice"] = invoice_details
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if candidate.endswith("Z"):
+        candidate = f"{candidate[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
 
 
 @router.get("/logs/recent")
@@ -144,6 +172,74 @@ async def recent_logs(
     }
 
 
+@router.get("/stats/summary")
+async def stats_summary(
+    storage: RequestLogStorage = Depends(get_log_storage_dep),
+) -> Dict[str, int]:
+    entries = await storage.get_recent()
+    domains: Set[str] = set()
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+    requests_24h = 0
+
+    for entry in entries:
+        domain = entry.get("domain")
+        if isinstance(domain, str):
+            normalized = domain.strip().lower()
+            if normalized:
+                domains.add(normalized)
+
+        ts = _parse_timestamp(entry.get("timestamp"))
+        if ts and ts >= cutoff:
+            requests_24h += 1
+
+    return {
+        "connected_domains": len(domains),
+        "requests_24h": requests_24h,
+    }
+
+
+@router.get("/settings/env")
+async def get_env_settings(
+    ln_client: LNClient = Depends(get_ln_client_dep),
+) -> Dict[str, Any]:
+    settings = list_env_settings()
+    max_field = next((field for field in settings if field.get("key") == "MAX_SENDABLE_SAT"), None)
+    if max_field is not None:
+        try:
+            channels = await ln_client.list_channels(public_only=False)
+        except Exception as exc:  # pragma: no cover - network errors
+            logger.warning("Failed to refresh max sendable from channels: %s", exc)
+        else:
+            max_receiving = 0
+            for channel in channels:
+                value = channel.get("receiving_capacity_sat")
+                if isinstance(value, int) and value > max_receiving:
+                    max_receiving = value
+            max_field["value"] = str(max_receiving)
+    return {"settings": settings}
+
+
+@router.put("/settings/env")
+async def put_env_settings(payload: EnvSettingsUpdate) -> Dict[str, Any]:
+    updated = update_env_settings(payload.values)
+    return {"updated": list(updated.keys())}
+
+
+@router.get("/channels/public")
+async def public_channels(
+    ln_client: LNClient = Depends(get_ln_client_dep),
+) -> Dict[str, Any]:
+    try:
+        channels = await ln_client.list_channels(public_only=False)
+    except Exception as exc:  # pragma: no cover - network errors
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to load channels") from exc
+    total_receiving = sum(channel.get("receiving_capacity_sat", 0) for channel in channels)
+    return {
+        "channels": channels,
+        "total_receiving_capacity_sat": total_receiving,
+    }
+
+
 @router.delete("/logs/recent")
 async def clear_recent_logs(
     storage: RequestLogStorage = Depends(get_log_storage_dep),
@@ -155,10 +251,6 @@ async def clear_recent_logs(
 @router.get("/health")
 async def healthcheck() -> Dict[str, str]:
     return {"status": "ok"}
-
-
-class MacaroonPayload(BaseModel):
-    macaroon: str
 
 
 @router.get("/auth/status")

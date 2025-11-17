@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import grpc
 from google.protobuf.json_format import MessageToDict
 
-from .lnrpc import GetInfoRequest, Invoice, LightningStub, PaymentHash
+from .lnrpc import (
+    GetInfoRequest,
+    Invoice,
+    LightningStub,
+    ListChannelsRequest,
+    PaymentHash,
+)
 from .macaroon_store import MacaroonStore
 
 
@@ -146,6 +152,47 @@ class LNClient:
             "r_hash": bytes(r_hash) if r_hash else b"",
         }
         return result
+
+    async def list_channels(self, public_only: bool = False) -> List[Dict[str, Any]]:
+        stub = await self._load_stub()
+        metadata = await self._metadata()
+        request = ListChannelsRequest()
+        if public_only:
+            request.public_only = True
+        request.peer_alias_lookup = True
+        response = await stub.ListChannels(request, metadata=metadata)
+        channels: List[Dict[str, Any]] = []
+        for chan in getattr(response, "channels", []):
+            chan_id_raw = getattr(chan, "chan_id", 0)
+            chan_id_str = ""
+            if chan_id_raw:
+                try:
+                    chan_id_str = str(int(chan_id_raw))
+                except (TypeError, ValueError):
+                    chan_id_str = ""
+            local_balance = int(getattr(chan, "local_balance", 0))
+            remote_balance = int(getattr(chan, "remote_balance", 0))
+            local_reserve = int(getattr(chan, "local_chan_reserve_sat", 0))
+            remote_reserve = int(getattr(chan, "remote_chan_reserve_sat", 0))
+            entry = {
+                "active": bool(getattr(chan, "active", False)),
+                "private": bool(getattr(chan, "private", False)),
+                "capacity_sat": int(getattr(chan, "capacity", 0)),
+                "local_balance_sat": local_balance,
+                "remote_balance_sat": remote_balance,
+                "local_chan_reserve_sat": local_reserve,
+                "remote_chan_reserve_sat": remote_reserve,
+                "channel_point": getattr(chan, "channel_point", ""),
+                "remote_pubkey": getattr(chan, "remote_pubkey", ""),
+                "peer_alias": getattr(chan, "peer_alias", "") or "",
+                "channel_id": chan_id_str,
+            }
+            if public_only and entry["private"]:
+                continue
+            entry["receiving_capacity_sat"] = max(remote_balance - remote_reserve, 0)
+            entry["sendable_balance_sat"] = max(local_balance - local_reserve, 0)
+            channels.append(entry)
+        return channels
 
     @staticmethod
     def _normalize_payment_hash(payment_hash: bytes | str) -> bytes:

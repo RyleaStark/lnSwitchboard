@@ -7,7 +7,7 @@ import pytest
 
 from backend.app.ln_client import LNClient
 from backend.app.macaroon_store import MacaroonStore
-from backend.app.lnrpc import GetInfoResponse
+from backend.app.lnrpc import Channel, GetInfoResponse, ListChannelsResponse
 
 
 class FakeInvoiceResponse:
@@ -57,6 +57,16 @@ class ConnectivityStub:
         if self.lookup_error:
             raise self.lookup_error
         return FakeInvoiceResponse(request.r_hash)
+
+
+class ListChannelsStub:
+    def __init__(self, response):
+        self.response = response
+        self.requests = []
+
+    async def ListChannels(self, request, metadata=None):
+        self.requests.append(request)
+        return self.response
 
 
 def test_lookup_invoice_uses_binary_payment_hash(tmp_path):
@@ -198,3 +208,83 @@ def test_check_connection_raises_when_lookup_forbidden(tmp_path):
 
     with pytest.raises(FakeRpcError):
         asyncio.run(_exercise())
+
+
+def test_list_channels_formats_response(tmp_path):
+    tls_path = tmp_path / "tls.cert"
+    tls_path.write_text("CERT", encoding="utf-8")
+
+    macaroon_path = tmp_path / "macaroon.hex"
+
+    async def _exercise():
+        store = MacaroonStore(macaroon_path)
+        await store.set("00")
+        client = LNClient(
+            host="127.0.0.1",
+            port=10009,
+            macaroon_store=store,
+            tls_path=tls_path,
+        )
+        channel = Channel()
+        channel.active = True
+        channel.private = False
+        channel.capacity = 2000
+        channel.local_balance = 750
+        channel.remote_balance = 1250
+        channel.remote_pubkey = "deadbeef"
+        channel.channel_point = "abc:0"
+        response = ListChannelsResponse()
+        response.channels.extend([channel])
+        stub = ListChannelsStub(response)
+        client._stub = stub
+        return await client.list_channels(), stub
+
+    result, stub = asyncio.run(_exercise())
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["capacity_sat"] == 2000
+    assert entry["local_balance_sat"] == 750
+    assert entry["remote_balance_sat"] == 1250
+    assert entry["receiving_capacity_sat"] == 1250
+    assert entry["remote_pubkey"] == "deadbeef"
+    assert entry["channel_point"] == "abc:0"
+    assert stub.requests and stub.requests[0].public_only is False
+
+
+def test_list_channels_filters_private_when_public_only(tmp_path):
+    tls_path = tmp_path / "tls.cert"
+    tls_path.write_text("CERT", encoding="utf-8")
+
+    macaroon_path = tmp_path / "macaroon.hex"
+
+    async def _exercise():
+        store = MacaroonStore(macaroon_path)
+        await store.set("00")
+        client = LNClient(
+            host="127.0.0.1",
+            port=10009,
+            macaroon_store=store,
+            tls_path=tls_path,
+        )
+        pub_channel = Channel()
+        pub_channel.private = False
+        pub_channel.remote_balance = 500
+        pub_channel.channel_point = "pub:0"
+        pub_channel.remote_pubkey = "cafe"
+        priv_channel = Channel()
+        priv_channel.private = True
+        priv_channel.remote_balance = 600
+        priv_channel.channel_point = "priv:0"
+        priv_channel.remote_pubkey = "beef"
+        response = ListChannelsResponse()
+        response.channels.extend([pub_channel, priv_channel])
+        stub = ListChannelsStub(response)
+        client._stub = stub
+        return await client.list_channels(public_only=True), stub
+
+    result, stub = asyncio.run(_exercise())
+
+    assert len(result) == 1
+    assert result[0]["channel_point"] == "pub:0"
+    assert stub.requests and stub.requests[0].public_only is True

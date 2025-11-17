@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>lnSwitchboard · Dashboard</title>
+    <title>lnSwitchboard · Liquidity</title>
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
@@ -55,27 +55,60 @@
       </aside>
 
       <div class="content-area">
-        <header class="page-header">
-          <div>
-            <p class="page-eyebrow">Overview</p>
-            <h1>Dashboard</h1>
-            <p class="muted">Live glance at LNURL traffic across your domains.</p>
-          </div>
-        </header>
+        <div class="liquidity-page-top">
+          <header class="page-header">
+            <div>
+              <p class="page-eyebrow">Channels</p>
+              <h1>Liquidity</h1>
+              <p class="muted">Track inbound capacity and identify the channel that can receive the most sats.</p>
+            </div>
+          </header>
+
+          <section class="card liquidity-hero">
+            <div class="liquidity-hero-copy">
+              <p class="card-eyebrow">Inbound Liquidity</p>
+              <h2>Largest receivable</h2>
+              <p class="muted">Maximum single payment your current channels can accept.</p>
+            </div>
+            <div class="liquidity-hero-metric">
+              <p class="liquidity-max-value" id="liquidity-max-value">—</p>
+              <p class="muted liquidity-max-label" id="liquidity-max-label">Waiting for channel data…</p>
+            </div>
+          </section>
+        </div>
 
         <main class="page-content">
-          <div class="card-grid metrics-grid">
-            <section class="card metric-card">
-              <div class="metric-label">Connected Domains</div>
-              <div class="metric-value" id="metric-domains">—</div>
-              <p class="muted">Unique domains forwarding traffic to lnSwitchboard.</p>
-            </section>
-            <section class="card metric-card">
-              <div class="metric-label">24h Requests</div>
-              <div class="metric-value" id="metric-requests">—</div>
-              <p class="muted">All LNURL requests served in the last 24 hours.</p>
-            </section>
-          </div>
+          <section class="card liquidity-table-card">
+            <div class="card-heading liquidity-table-heading">
+              <div>
+                <p class="card-eyebrow">Channels</p>
+                <h2>Inbound capacity by peer</h2>
+                <p class="muted">Remote balances reported by your node.</p>
+              </div>
+              <div class="liquidity-total">
+                <p class="muted">Total inbound</p>
+                <p class="liquidity-total-value" id="liquidity-total">—</p>
+              </div>
+            </div>
+            <div class="table-wrapper">
+              <table class="liquidity-table">
+                <thead>
+                    <tr>
+                      <th>Peer</th>
+                      <th>Status</th>
+                      <th>Capacity (sat)</th>
+                      <th>Outbound (sat)</th>
+                      <th>Inbound (sat)</th>
+                    </tr>
+                </thead>
+                <tbody id="liquidity-table-body">
+                  <tr>
+                    <td colspan="5" class="placeholder">Loading channel data…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </main>
 
         <footer>

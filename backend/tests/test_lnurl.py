@@ -4,97 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-from typing import Any, Dict, List
 from urllib.parse import urlsplit, urlunsplit
 
-import pytest
 from fastapi.testclient import TestClient
 
 from ..app import config
-from ..app.main import app
-
-
-@pytest.fixture(autouse=True)
-def configure_env(tmp_path):
-    macaroon = tmp_path / "macaroon.hex"
-    macaroon.write_text("00", encoding="utf-8")
-    tls = tmp_path / "tls.cert"
-    tls.write_text("CERT")
-    log_path = tmp_path / "requests.log"
-
-    os.environ["LND_HOST"] = "127.0.0.1"
-    os.environ["LND_TLS_PATH"] = str(tls)
-    os.environ["SERVICE_PORT"] = "22121"
-    os.environ["REQUEST_LOG_PATH"] = str(log_path)
-    os.environ["LND_GRPC_PORT"] = "10009"
-    os.environ["MACAROON_STORE_PATH"] = str(macaroon)
-    os.environ["LNURL_COMMENT_MAX_LENGTH"] = "120"
-    os.environ["RATE_LIMIT_PER_MIN"] = "1000"
-
-    config.get_settings.cache_clear()
-    yield
-    config.get_settings.cache_clear()
-
-
-@pytest.fixture
-def test_client(monkeypatch) -> TestClient:
-    call_log: List[Dict[str, Any]] = []
-    invoice_store: Dict[str, Dict[str, Any]] = {}
-
-    async def fake_check_connection(self) -> Dict[str, Any]:
-        return {"version": "0"}
-
-    async def fake_create_invoice(
-        self, *, amount_msat: int, memo: str, description_hash: bytes
-    ) -> Dict[str, Any]:
-        payment_hash = hashlib.sha256(f"{memo}:{amount_msat}".encode("utf-8")).digest()
-        call_log.append(
-            {
-                "amount_msat": amount_msat,
-                "memo": memo,
-                "description_hash": description_hash,
-                "amount_sat": amount_msat // 1000,
-                "payment_hash": payment_hash.hex(),
-            }
-        )
-        payment_request = f"lnbc{amount_msat}n1psample"
-        invoice_store[payment_hash.hex()] = {
-            "settled": False,
-            "payment_request": payment_request,
-            "r_preimage": b"",
-        }
-        return {"payment_request": payment_request, "r_hash": payment_hash}
-
-    async def fake_lookup_invoice(self, payment_hash):
-        if isinstance(payment_hash, bytes):
-            hash_hex = payment_hash.hex()
-        else:
-            hash_hex = payment_hash
-        record = invoice_store.get(hash_hex)
-        if record is None:
-            raise LookupError("not found")
-        return {
-            "settled": record["settled"],
-            "payment_request": record["payment_request"],
-            "r_preimage": record["r_preimage"],
-            "r_hash": bytes.fromhex(hash_hex),
-        }
-
-    monkeypatch.setattr(
-        "backend.app.ln_client.LNClient.check_connection", fake_check_connection
-    )
-    monkeypatch.setattr(
-        "backend.app.ln_client.LNClient.create_invoice", fake_create_invoice
-    )
-    monkeypatch.setattr(
-        "backend.app.ln_client.LNClient.lookup_invoice", fake_lookup_invoice
-    )
-
-    with TestClient(app) as client:
-        client.app.state.test_invoice_calls = call_log
-        client.app.state.invoice_store = invoice_store
-        yield client
 
 
 def https_to_http(url: str) -> str:
@@ -609,3 +523,61 @@ def test_recent_logs_refreshes_invoice_status(test_client: TestClient):
     assert entry is not None
     invoice_details = entry["details"]["invoice"]
     assert invoice_details["settled"] is True
+
+
+def test_env_settings_get(test_client: TestClient):
+    response = test_client.get("/api/settings/env")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "settings" in payload
+    keys = {item["key"] for item in payload["settings"]}
+    assert "LNURL_METADATA_DESCRIPTION" in keys
+    assert "RATE_LIMIT_PER_MIN" in keys
+    assert "SERVICE_PORT" not in keys
+    assert "REQUEST_LOG_PATH" not in keys
+
+
+def test_env_settings_update(test_client: TestClient):
+    response = test_client.put(
+        "/api/settings/env",
+        json={"values": {"LNURL_METADATA_DESCRIPTION": "Edit"}},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert "LNURL_METADATA_DESCRIPTION" in payload["updated"]
+
+    refreshed = test_client.get("/api/settings/env").json()
+    entry = next(item for item in refreshed["settings"] if item["key"] == "LNURL_METADATA_DESCRIPTION")
+    assert entry["value"] == "Edit"
+
+    reset = test_client.put(
+        "/api/settings/env",
+        json={"values": {"LNURL_METADATA_DESCRIPTION": "Pay"}},
+    )
+    assert reset.status_code == 200
+
+
+def test_public_channels_endpoint(test_client: TestClient):
+    response = test_client.get("/api/channels/public")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_receiving_capacity_sat"] == 1000
+    assert len(payload["channels"]) == 1
+    assert payload["channels"][0]["remote_pubkey"] == "deadbeef"
+
+
+def test_stats_summary_counts_recent_activity(test_client: TestClient):
+    clear_resp = test_client.delete("/api/logs/recent")
+    assert clear_resp.status_code == 200
+
+    discovery_resp = test_client.get("/.well-known/lnurlp/bones")
+    assert discovery_resp.status_code == 200
+
+    invoice_resp = test_client.get("/.well-known/lnurlp/bones", params={"amount": 2000})
+    assert invoice_resp.status_code == 200
+
+    stats_resp = test_client.get("/api/stats/summary")
+    assert stats_resp.status_code == 200
+    payload = stats_resp.json()
+    assert payload["connected_domains"] == 1
+    assert payload["requests_24h"] >= 2

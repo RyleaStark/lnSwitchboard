@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections import deque
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, List
 
@@ -20,7 +20,7 @@ def _normalize_details(details: Dict[str, Any] | None) -> Dict[str, Any] | None:
         return {"_raw": repr(details)}
 
 
-@dataclass(slots=True)
+@dataclass
 class LogEntry:
     """Structured log entry for LNURL interactions."""
 
@@ -63,9 +63,10 @@ class LogEntry:
 class RequestLogStorage:
     """Handles append-only storage and retrieval of request logs."""
 
-    def __init__(self, path: Path, max_recent: int = 50) -> None:
+    def __init__(self, path: Path, max_recent: int = 50, retention_days: int = 30) -> None:
         self._path = path
         self._max_recent = max_recent
+        self._retention_days = max(1, retention_days)
         self._recent: Deque[Dict[str, object]] = deque(maxlen=max_recent)
         self._lock = asyncio.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,10 +98,10 @@ class RequestLogStorage:
                 with self._path.open("a", encoding="utf-8") as fp:
                     fp.write(json.dumps(payload) + "\n")
             except OSError:
-                # If writing fails, we still keep the recent buffer up-to-date.
                 pass
             payload.setdefault("domain", None)
             self._recent.append(payload)
+        await self.cleanup()
 
     async def get_recent(self, limit: int | None = None) -> List[Dict[str, object]]:
         async with self._lock:
@@ -117,4 +118,38 @@ class RequestLogStorage:
                     pass
             except OSError:
                 # Ignore failures; in-memory buffer remains cleared.
+                return
+
+    async def cleanup(self) -> None:
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=self._retention_days)
+        try:
+            with self._path.open("r", encoding="utf-8") as fp:
+                lines = fp.readlines()
+        except OSError:
+            return
+
+        keep: List[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            ts = data.get("timestamp")
+            if not isinstance(ts, str):
+                continue
+            try:
+                ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts_dt >= cutoff:
+                keep.append(stripped)
+
+        async with self._lock:
+            try:
+                with self._path.open("w", encoding="utf-8") as fp:
+                    fp.write("\n".join(keep) + ("\n" if keep else ""))
+            except OSError:
                 return

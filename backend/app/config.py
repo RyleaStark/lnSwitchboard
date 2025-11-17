@@ -43,7 +43,11 @@ def parse_payer_data_config(value: Any) -> Dict[str, bool]:
 class Settings(BaseSettings):
     """Centralized application settings."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     service_port: int = Field(22121, env="SERVICE_PORT")
     lnd_host: str = Field(..., env="LND_HOST")
@@ -51,7 +55,11 @@ class Settings(BaseSettings):
     lnd_tls_path: Path = Field(Path("secrets/tls.cert"), env="LND_TLS_PATH")
     max_sendable_sat: int = Field(1_000_000, env="MAX_SENDABLE_SAT")
     min_sendable_sat: int = Field(1, env="MIN_SENDABLE_SAT")
-    metadata_description: str = Field("Pay", env="LNURL_METADATA_DESCRIPTION")
+    metadata_description: str = Field("Pay {ln_address}", env="LNURL_METADATA_DESCRIPTION")
+    success_message: str = Field(
+        "Your payment hit faster than a Lightning bolt — {ln_address} stacked your sats!",
+        env="LNURL_SUCCESS_MESSAGE",
+    )
     comment_max_length: int = Field(280, env="LNURL_COMMENT_MAX_LENGTH")
     metadata_long_description: Optional[str] = Field(
         None, env="LNURL_METADATA_LONG_DESC"
@@ -63,12 +71,14 @@ class Settings(BaseSettings):
         env="LNURL_PAYER_DATA",
     )
     recent_log_limit: int = Field(50, env="RECENT_LOG_LIMIT")
+    log_retention_days: int = Field(180, env="LOG_RETENTION_DAYS")
     log_path: Path = Field(Path("logs/requests.log"), env="REQUEST_LOG_PATH")
-    rate_limit_per_min: int = Field(10, env="RATE_LIMIT_PER_MIN")
+    rate_limit_per_min: int = Field(30, env="RATE_LIMIT_PER_MIN")
     ui_poll_seconds: int = Field(10, env="UI_POLL_SECONDS")
     macaroon_store_path: Path = Field(Path("secrets/macaroon.hex"), env="MACAROON_STORE_PATH")
+    nip05_store_path: Path = Field(Path("secrets/nip05_identities.json"), env="NIP05_STORE_PATH")
 
-    @field_validator("lnd_tls_path", "log_path", "macaroon_store_path", mode="before")
+    @field_validator("lnd_tls_path", "log_path", "macaroon_store_path", "nip05_store_path", mode="before")
     @classmethod
     def _expand_path(cls, value: Optional[str | Path]) -> Path:
         if value is None:
