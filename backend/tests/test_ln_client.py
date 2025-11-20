@@ -1,31 +1,37 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from typing import Any
 
 import grpc
 import pytest
 
 from backend.app.ln_client import LNClient
 from backend.app.macaroon_store import MacaroonStore
-from backend.app.lnrpc import Channel, GetInfoResponse, ListChannelsResponse
-
-
-class FakeInvoiceResponse:
-    def __init__(self, payment_hash_bytes):
-        self.settled = True
-        self.payment_request = "lnbc1test"
-        self.r_preimage = b"\x02" * 32
-        self.r_hash = payment_hash_bytes
+from backend.app.lnrpc import Channel, GetInfoResponse, Invoice, ListChannelsResponse
 
 
 class FakeLightningStub:
-    def __init__(self, payment_hash_bytes):
+    def __init__(self, payment_hash_bytes, invoice_response: Invoice | None = None):
         self.payment_hash_bytes = payment_hash_bytes
         self.requests = []
+        self._response = invoice_response or self._default_response()
+
+    def _default_response(self) -> Invoice:
+        invoice = Invoice()
+        invoice.settled = True
+        invoice.payment_request = "lnbc1test"
+        invoice.r_preimage = b"\x02" * 32
+        invoice.r_hash = self.payment_hash_bytes
+        invoice.creation_date = int(datetime.now(timezone.utc).timestamp())
+        invoice.expiry = 3600
+        invoice.state = 1
+        return invoice
 
     async def LookupInvoice(self, request, metadata=None):
         self.requests.append(request)
-        return FakeInvoiceResponse(self.payment_hash_bytes)
+        return self._response
 
 
 class FakeRpcError(grpc.RpcError):
@@ -77,7 +83,7 @@ def test_lookup_invoice_uses_binary_payment_hash(tmp_path):
     payment_hash_hex = "11" * 32
     payment_hash_bytes = bytes.fromhex(payment_hash_hex)
 
-    async def _exercise() -> tuple[dict[str, bytes | bool | str], FakeLightningStub]:
+    async def _exercise() -> tuple[dict[str, bytes | bool | str], FakeLightningStub, Invoice]:
         store = MacaroonStore(macaroon_path)
         await store.set("00")
         client = LNClient(
@@ -86,12 +92,20 @@ def test_lookup_invoice_uses_binary_payment_hash(tmp_path):
             macaroon_store=store,
             tls_path=tls_path,
         )
-        fake_stub = FakeLightningStub(payment_hash_bytes)
+        invoice = Invoice()
+        invoice.settled = True
+        invoice.payment_request = "lnbc1test"
+        invoice.r_preimage = b"\x02" * 32
+        invoice.r_hash = payment_hash_bytes
+        invoice.creation_date = int(datetime.now(timezone.utc).timestamp())
+        invoice.expiry = 3600
+        invoice.state = 1
+        fake_stub = FakeLightningStub(payment_hash_bytes, invoice_response=invoice)
         client._stub = fake_stub
         result = await client.lookup_invoice(payment_hash_hex)
-        return result, fake_stub
+        return result, fake_stub, invoice
 
-    result, fake_stub = asyncio.run(_exercise())
+    result, fake_stub, invoice = asyncio.run(_exercise())
 
     assert len(fake_stub.requests) == 1
     request = fake_stub.requests[0]
@@ -101,6 +115,51 @@ def test_lookup_invoice_uses_binary_payment_hash(tmp_path):
     assert result["payment_request"] == "lnbc1test"
     assert result["r_preimage"] == b"\x02" * 32
     assert result["r_hash"] == payment_hash_bytes
+    assert result["state"] == "SETTLED"
+    assert result["creation_date"] == invoice.creation_date
+    assert result["expiry"] == invoice.expiry
+    expected_expires = datetime.fromtimestamp(
+        invoice.creation_date + invoice.expiry, tz=timezone.utc
+    ).isoformat()
+    assert result["expires_at"] == expected_expires
+    assert result["is_expired"] is False
+
+
+def test_lookup_invoice_detects_expired(tmp_path):
+    tls_path = tmp_path / "tls.cert"
+    tls_path.write_text("CERT", encoding="utf-8")
+
+    macaroon_path = tmp_path / "macaroon.hex"
+    payment_hash_hex = "22" * 32
+    payment_hash_bytes = bytes.fromhex(payment_hash_hex)
+
+    async def _exercise() -> dict[str, Any]:
+        store = MacaroonStore(macaroon_path)
+        await store.set("00")
+        client = LNClient(
+            host="127.0.0.1",
+            port=10009,
+            macaroon_store=store,
+            tls_path=tls_path,
+        )
+        invoice = Invoice()
+        invoice.settled = False
+        invoice.payment_request = "lnbc1expired"
+        invoice.r_preimage = b""
+        invoice.r_hash = payment_hash_bytes
+        invoice.creation_date = int(datetime.now(timezone.utc).timestamp()) - 7200
+        invoice.expiry = 1800
+        invoice.state = 2  # CANCELED
+        fake_stub = FakeLightningStub(payment_hash_bytes, invoice_response=invoice)
+        client._stub = fake_stub
+        return await client.lookup_invoice(payment_hash_hex)
+
+    result = asyncio.run(_exercise())
+
+    assert result["settled"] is False
+    assert result["state"] == "CANCELED"
+    assert result["is_expired"] is True
+    assert "expires_at" in result
 
 
 def test_lookup_invoice_rejects_non_32_byte_hash(tmp_path):

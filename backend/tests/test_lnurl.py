@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi.testclient import TestClient
@@ -114,6 +115,38 @@ def test_lnurl_invoice(test_client: TestClient):
         "lnurlp://testserver/.well-known/lnurlp/bones",
     )
     assert details.get("callback_lnurl") == "lnurlp://testserver/.well-known/lnurlp/bones"
+
+
+def test_request_logs_mark_expired_invoices(test_client: TestClient):
+    response = test_client.get(
+        "/.well-known/lnurlp/bones",
+        params={"amount": 1500},
+    )
+    assert response.status_code == 200
+    invoice_payload = response.json()
+    payment_hash = invoice_payload["verify"].rsplit("/", 1)[-1]
+    store = test_client.app.state.invoice_store
+    assert payment_hash in store
+    record = store[payment_hash]
+    record["state"] = "CANCELED"
+    record["is_expired"] = True
+    record["expires_at"] = datetime.now(timezone.utc).isoformat()
+
+    logs_resp = test_client.get("/api/logs/recent", params={"page_size": 50})
+    assert logs_resp.status_code == 200
+    payload = logs_resp.json()
+    invoice_entry = next(
+        (
+            item
+            for item in payload["items"]
+            if item["username"] == "bones" and item["event"] == "invoice"
+        ),
+        None,
+    )
+    assert invoice_entry is not None
+    invoice_details = invoice_entry["details"]["invoice"]
+    assert invoice_details["state"] == "CANCELED"
+    assert invoice_details["is_expired"] is True
 
 
 def test_lnurl_verify_flow(test_client: TestClient):

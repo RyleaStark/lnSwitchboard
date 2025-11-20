@@ -76,7 +76,7 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "description": "Automatically matches the largest receivable channel.",
         "hint_link": {
             "label": "Review your channel capacity here",
-            "href": "http://localhost:8000/liquidity/",
+            "href": "/liquidity/",
         },
         "editable": False,
     },

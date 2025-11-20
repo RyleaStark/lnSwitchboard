@@ -2,7 +2,7 @@ const statusElement = document.getElementById("service-status");
 const logBody = document.getElementById("log-body");
 const logTable = document.getElementById("log-table");
 const POLL_INTERVAL_MS = 10000;
-const MOBILE_NAV_BREAKPOINT = 900;
+const MOBILE_NAV_BREAKPOINT = 1100;
 const macaroonStatusEl = document.getElementById("macaroon-status");
 const macaroonForm = document.getElementById("macaroon-form");
 const macaroonInput = document.getElementById("macaroon-input");
@@ -27,16 +27,27 @@ const logsPrevBtn = document.getElementById("logs-prev");
 const logsNextBtn = document.getElementById("logs-next");
 const logsPageIndicator = document.getElementById("logs-page-indicator");
 const LOG_COLUMN_COUNT = logTable ? logTable.querySelectorAll("thead th").length : 0;
+const LOG_COLUMN_LABELS = logTable
+  ? Array.from(logTable.querySelectorAll("thead th")).map((th) => th.textContent.trim())
+  : [];
 const metricDomainsValue = document.getElementById("metric-domains");
 const metricRequestsValue = document.getElementById("metric-requests");
 const liquidityMaxValueEl = document.getElementById("liquidity-max-value");
 const liquidityMaxLabelEl = document.getElementById("liquidity-max-label");
 const liquidityTotalEl = document.getElementById("liquidity-total");
+const liquidityTable = document.getElementById("liquidity-table");
 const liquidityTableBody = document.getElementById("liquidity-table-body");
-const LIQUIDITY_TABLE_COLUMNS = 5;
+const LIQUIDITY_COLUMN_LABELS = liquidityTable
+  ? Array.from(liquidityTable.querySelectorAll("thead th")).map((th) => th.textContent.trim())
+  : [];
+const LIQUIDITY_COLUMN_COUNT = LIQUIDITY_COLUMN_LABELS.length || 1;
 const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const sidebarOverlay = document.getElementById("sidebar-overlay");
 const identityTableBody = document.getElementById("identity-table-body");
+const identityTable = identityTableBody ? identityTableBody.closest("table") : null;
+const IDENTITY_COLUMN_LABELS = identityTable
+  ? Array.from(identityTable.querySelectorAll("thead th")).map((th) => th.textContent.trim())
+  : [];
 const identityTablePlaceholder = document.getElementById("identity-table-placeholder");
 const identityNewBtn = document.getElementById("identity-new-btn");
 const identityForm = document.getElementById("identity-form");
@@ -439,6 +450,8 @@ function createIdentityRelaysCell(item) {
 function createIdentityActionsCell(item) {
   const cell = document.createElement("td");
   cell.className = "identity-actions-col";
+  const wrapper = document.createElement("div");
+  wrapper.className = "identity-actions";
   const editBtn = document.createElement("button");
   editBtn.type = "button";
   editBtn.className = "identity-action-btn";
@@ -449,8 +462,9 @@ function createIdentityActionsCell(item) {
   deleteBtn.className = "identity-action-btn";
   deleteBtn.textContent = "Delete";
   deleteBtn.addEventListener("click", () => handleIdentityDelete(item.id));
-  cell.appendChild(editBtn);
-  cell.appendChild(deleteBtn);
+  wrapper.appendChild(editBtn);
+  wrapper.appendChild(deleteBtn);
+  cell.appendChild(wrapper);
   return cell;
 }
 
@@ -488,9 +502,15 @@ function renderIdentityTable() {
   identityTableBody.innerHTML = "";
   rows.forEach((item) => {
     const row = document.createElement("tr");
-    row.appendChild(createIdentityHandleCell(item));
-    row.appendChild(createIdentityRelaysCell(item));
-    row.appendChild(createIdentityActionsCell(item));
+    const cells = [
+      createIdentityHandleCell(item),
+      createIdentityRelaysCell(item),
+      createIdentityActionsCell(item),
+    ];
+    cells.forEach((cell, index) => {
+      applyStackableLabel(cell, IDENTITY_COLUMN_LABELS[index]);
+      row.appendChild(cell);
+    });
     identityTableBody.appendChild(row);
   });
 }
@@ -1016,7 +1036,48 @@ function extractSettled(details) {
   return null;
 }
 
+function extractInvoice(details) {
+  if (!details || typeof details !== "object") {
+    return null;
+  }
+  const invoice = details.invoice;
+  if (invoice && typeof invoice === "object") {
+    return invoice;
+  }
+  return null;
+}
+
+function isInvoiceExpired(details) {
+  const invoice = extractInvoice(details);
+  if (!invoice) {
+    return null;
+  }
+  if (typeof invoice.is_expired === "boolean") {
+    return invoice.is_expired;
+  }
+  if (typeof invoice.expires_at === "string") {
+    const expiresAt = new Date(invoice.expires_at);
+    if (!Number.isNaN(expiresAt.getTime())) {
+      return expiresAt.getTime() <= Date.now();
+    }
+  }
+  if (typeof invoice.state === "string") {
+    const normalized = invoice.state.trim().toUpperCase();
+    if (normalized === "CANCELED") {
+      if (typeof invoice.settled === "boolean") {
+        return invoice.settled === false;
+      }
+      return true;
+    }
+  }
+  return null;
+}
+
 function resolvePaymentStatus(entry) {
+  const expired = isInvoiceExpired(entry.details);
+  if (expired === true) {
+    return { label: "Expired", tone: "expired" };
+  }
   const settled = extractSettled(entry.details);
   if (typeof settled === "boolean") {
     return { label: settled ? "Paid" : "Pending", tone: settled ? "paid" : "pending" };
@@ -1091,15 +1152,21 @@ function renderLogs(items, emptyMessage = "No activity yet.") {
         ? Math.round(entry.amount_msat / 1000)
         : "—";
 
-    row.appendChild(createTimestampCell(entry.timestamp));
-    row.appendChild(createCell(entry.username));
-    row.appendChild(createCell(entry.domain));
-    row.appendChild(createCell(amountSat));
-    row.appendChild(createPaymentCell(entry));
-    row.appendChild(createCell(formatIp(entry.ip)));
-    row.appendChild(createCell(entry.status));
-    row.appendChild(createCell(entry.event));
-    row.appendChild(createDetailsCell(entry));
+    const cells = [
+      createTimestampCell(entry.timestamp),
+      createCell(entry.username),
+      createCell(entry.domain),
+      createCell(amountSat),
+      createPaymentCell(entry),
+      createCell(formatIp(entry.ip)),
+      createCell(entry.status),
+      createCell(entry.event),
+      createDetailsCell(entry),
+    ];
+    cells.forEach((cell, index) => {
+      applyStackableLabel(cell, LOG_COLUMN_LABELS[index]);
+      row.appendChild(cell);
+    });
     logBody.appendChild(row);
 
     const messageText = typeof entry.message === "string" ? entry.message.trim() : "";
@@ -1132,7 +1199,7 @@ function renderLiquidityPlaceholder(message) {
   liquidityTableBody.innerHTML = "";
   const row = document.createElement("tr");
   const cell = document.createElement("td");
-  cell.colSpan = LIQUIDITY_TABLE_COLUMNS;
+  cell.colSpan = LIQUIDITY_COLUMN_COUNT;
   cell.className = "placeholder";
   cell.textContent = message;
   row.appendChild(cell);
@@ -1218,13 +1285,19 @@ function renderLiquidityTable(channels) {
     .sort((a, b) => (b?.receiving_capacity_sat || 0) - (a?.receiving_capacity_sat || 0))
     .forEach((channel) => {
       const row = document.createElement("tr");
-      row.appendChild(createPeerCell(channel));
-      row.appendChild(createLiquidityStatusCell(channel));
-      row.appendChild(createCapacityCell(channel));
       const sendable = getSendableBalance(channel);
-      row.appendChild(createCell(formatSatAmount(sendable ?? channel.local_balance_sat)));
       const receivable = getReceivableBalance(channel);
-      row.appendChild(createCell(formatSatAmount(receivable ?? channel.remote_balance_sat)));
+      const cells = [
+        createPeerCell(channel),
+        createLiquidityStatusCell(channel),
+        createCapacityCell(channel),
+        createCell(formatSatAmount(sendable ?? channel.local_balance_sat)),
+        createCell(formatSatAmount(receivable ?? channel.remote_balance_sat)),
+      ];
+      cells.forEach((cell, index) => {
+        applyStackableLabel(cell, LIQUIDITY_COLUMN_LABELS[index]);
+        row.appendChild(cell);
+      });
       liquidityTableBody.appendChild(row);
     });
 }
@@ -1289,6 +1362,15 @@ function createCell(value, className) {
     cell.classList.add(className);
   }
   return cell;
+}
+
+function applyStackableLabel(cell, label) {
+  if (!(cell instanceof HTMLElement)) {
+    return;
+  }
+  if (typeof label === "string" && label.trim()) {
+    cell.dataset.label = label.trim();
+  }
 }
 
 function createDetailsCell(entry) {

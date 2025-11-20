@@ -80,6 +80,16 @@ async def _refresh_invoice_statuses(entries: List[Dict[str, Any]], ln_client: LN
         details = entry.setdefault("details", {})
         invoice_details = invoice_info
         invoice_details["settled"] = settled
+        if "state" in result and result["state"] is not None:
+            invoice_details["state"] = result["state"]
+        if "creation_date" in result and result["creation_date"] is not None:
+            invoice_details["creation_date"] = result["creation_date"]
+        if "expiry" in result and result["expiry"] is not None:
+            invoice_details["expiry"] = result["expiry"]
+        if "expires_at" in result and result["expires_at"] is not None:
+            invoice_details["expires_at"] = result["expires_at"]
+        if "is_expired" in result and result["is_expired"] is not None:
+            invoice_details["is_expired"] = result["is_expired"]
         details["invoice"] = invoice_details
 
 

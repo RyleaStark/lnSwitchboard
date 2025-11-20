@@ -57,18 +57,38 @@
       <div class="content-area">
         <div class="liquidity-page-top">
           <header class="page-header">
-            <div>
+            <div class="page-header-content">
               <p class="page-eyebrow">Channels</p>
               <h1>Liquidity</h1>
-              <p class="muted">Track inbound capacity and identify the channel that can receive the most sats.</p>
+              <p class="muted page-description">Track inbound capacity and identify the channel that can receive the most sats.</p>
             </div>
           </header>
 
           <section class="card liquidity-hero">
             <div class="liquidity-hero-copy">
               <p class="card-eyebrow">Inbound Liquidity</p>
-              <h2>Largest receivable</h2>
-              <p class="muted">Maximum single payment your current channels can accept.</p>
+              <h2 class="liquidity-hero-title">
+                Largest receivable
+                <span class="tooltip-container" data-tooltip>
+                  <button
+                    type="button"
+                    class="tooltip-icon"
+                    aria-haspopup="true"
+                    aria-controls="liquidity-amp-tooltip"
+                    aria-label="Why do we use the largest single channel?"
+                  >
+                    ?
+                  </button>
+                  <span class="tooltip-panel" id="liquidity-amp-tooltip" role="tooltip">
+                    We show the biggest single channel because every wallet understands “one channel, one invoice”.
+                    If both sides support AMP you might squeeze in a larger payment by splitting it, but not every sender
+                    or node does, so this number is the safe bet.
+                  </span>
+                </span>
+              </h2>
+              <p class="muted liquidity-hero-note">
+                Maximum single payment your current channels can accept.
+              </p>
             </div>
             <div class="liquidity-hero-metric">
               <p class="liquidity-max-value" id="liquidity-max-value">—</p>
@@ -90,8 +110,8 @@
                 <p class="liquidity-total-value" id="liquidity-total">—</p>
               </div>
             </div>
-            <div class="table-wrapper">
-              <table class="liquidity-table">
+            <div class="table-wrapper stackable-table-wrapper">
+              <table class="liquidity-table stackable-table" id="liquidity-table">
                 <thead>
                     <tr>
                       <th>Peer</th>

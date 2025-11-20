@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -107,10 +108,11 @@ class LNClient:
     ) -> Dict[str, Any]:
         stub = await self._load_stub()
         metadata = await self._metadata()
-        sats, _remainder = divmod(amount_msat, 1000)
-        invoice_kwargs: Dict[str, Any] = {"memo": memo, "value_msat": amount_msat}
-        if sats > 0:
-            invoice_kwargs["value"] = sats
+        invoice_kwargs: Dict[str, Any] = {"memo": memo}
+        if amount_msat % 1000 == 0:
+            invoice_kwargs["value"] = amount_msat // 1000
+        else:
+            invoice_kwargs["value_msat"] = amount_msat
         if description_hash is not None:
             invoice_kwargs["description_hash"] = description_hash
         if private is not None:
@@ -141,7 +143,29 @@ class LNClient:
         binary_request.r_hash = payment_hash_bytes
         response = await _call(binary_request)
 
+        response_dict = MessageToDict(response, preserving_proto_field_name=True)
+
+        def _int_or_none(value: Any) -> int | None:
+            try:
+                if value is None:
+                    return None
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         settled = bool(getattr(response, "settled", False))
+        state_name = response_dict.get("state")
+        creation_date = _int_or_none(response_dict.get("creation_date"))
+        expiry = _int_or_none(response_dict.get("expiry"))
+        expires_at_ts: int | None = None
+        if creation_date is not None and expiry is not None:
+            expires_at_ts = creation_date + expiry
+        expires_at_iso: str | None = None
+        is_expired: bool | None = None
+        if expires_at_ts is not None:
+            expires_at_iso = datetime.fromtimestamp(expires_at_ts, tz=timezone.utc).isoformat()
+            now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+            is_expired = expires_at_ts <= now_ts
         payment_request = getattr(response, "payment_request", "")
         r_preimage = getattr(response, "r_preimage", b"")
         r_hash = getattr(response, "r_hash", b"")
@@ -151,6 +175,16 @@ class LNClient:
             "r_preimage": bytes(r_preimage) if r_preimage else b"",
             "r_hash": bytes(r_hash) if r_hash else b"",
         }
+        if state_name is not None:
+            result["state"] = state_name
+        if creation_date is not None:
+            result["creation_date"] = creation_date
+        if expiry is not None:
+            result["expiry"] = expiry
+        if expires_at_iso is not None:
+            result["expires_at"] = expires_at_iso
+        if is_expired is not None:
+            result["is_expired"] = is_expired
         return result
 
     async def list_channels(self, public_only: bool = False) -> List[Dict[str, Any]]:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import asyncio
@@ -94,10 +96,18 @@ def test_client(monkeypatch) -> SimpleTestClient:
             }
         )
         payment_request = f"lnbc{amount_msat}n1psample"
+        created_ts = int(time.time())
+        expiry_seconds = 3600
+        expires_at_iso = datetime.fromtimestamp(created_ts + expiry_seconds, tz=timezone.utc).isoformat()
         invoice_store[payment_hash.hex()] = {
             "settled": False,
             "payment_request": payment_request,
             "r_preimage": b"",
+            "state": "OPEN",
+            "creation_date": created_ts,
+            "expiry": expiry_seconds,
+            "expires_at": expires_at_iso,
+            "is_expired": False,
         }
         return {"payment_request": payment_request, "r_hash": payment_hash}
 
@@ -109,12 +119,23 @@ def test_client(monkeypatch) -> SimpleTestClient:
         record = invoice_store.get(hash_hex)
         if record is None:
             raise LookupError("not found")
-        return {
+        result: Dict[str, Any] = {
             "settled": record["settled"],
             "payment_request": record["payment_request"],
             "r_preimage": record["r_preimage"],
             "r_hash": bytes.fromhex(hash_hex),
         }
+        if "state" in record:
+            result["state"] = record["state"]
+        if "creation_date" in record:
+            result["creation_date"] = record["creation_date"]
+        if "expiry" in record:
+            result["expiry"] = record["expiry"]
+        if "expires_at" in record:
+            result["expires_at"] = record["expires_at"]
+        if "is_expired" in record:
+            result["is_expired"] = record["is_expired"]
+        return result
 
     monkeypatch.setattr(
         "backend.app.ln_client.LNClient.check_connection", fake_check_connection

@@ -69,7 +69,7 @@
               <div>
                 <p class="card-eyebrow">Admin</p>
                 <h2>Nostr identities</h2>
-                <p class="muted">Tie LNURL handles and hostnames to npubs so wallets can verify your users via NIP-05.</p>
+                <p class="muted">Tie LNURL handles and hostnames to npubs so wallets can verify you via NIP-05.</p>
               </div>
               <div class="card-actions">
                 <button class="primary-btn" type="button" id="identity-new-btn">Add mapping</button>
@@ -78,7 +78,7 @@
             <div class="callout identity-guidelines">
               <ul>
                 <li>Each entry becomes <code>local-part@domain</code> inside <code>/.well-known/nostr.json</code>.</li>
-                <li>Relays are optional but help clients discover your users faster.</li>
+                <li>Relays are optional but help clients discover you faster.</li>
                 <li>Identifiers must be unique per domain.</li>
               </ul>
             </div>
@@ -95,8 +95,8 @@
                 />
               </label>
             </div>
-            <div class="table-wrapper identity-table-wrapper">
-              <table class="identity-table">
+            <div class="table-wrapper identity-table-wrapper stackable-table-wrapper">
+              <table class="identity-table stackable-table stackable-table-stacked">
                 <thead>
                   <tr>
                     <th scope="col">Handle</th>
