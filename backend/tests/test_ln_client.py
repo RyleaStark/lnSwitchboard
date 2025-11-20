@@ -62,7 +62,9 @@ class ConnectivityStub:
         self.last_lookup_request = request
         if self.lookup_error:
             raise self.lookup_error
-        return FakeInvoiceResponse(request.r_hash)
+        invoice = Invoice()
+        invoice.r_hash = request.r_hash
+        return invoice
 
 
 class ListChannelsStub:
