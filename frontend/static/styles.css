@@ -132,7 +132,8 @@ img {
 }
 
 .tooltip-container:hover .tooltip-panel,
-.tooltip-container:focus-within .tooltip-panel {
+.tooltip-container:focus-within .tooltip-panel,
+.tooltip-container.tooltip-open .tooltip-panel {
   opacity: 1;
   visibility: visible;
   transform: translate(-50%, 4px);
@@ -662,7 +663,7 @@ img {
   background: var(--surface-alt);
   color: var(--text);
   padding: 0.85rem 1.1rem;
-  font-size: 0.95rem;
+  font-size: 1rem;
   transition: border-color 0.2s ease, background 0.2s ease;
 }
 

@@ -75,6 +75,9 @@ const logsConfirmCancelBtn = document.getElementById("logs-confirm-cancel");
 const logsConfirmCloseBtn = document.getElementById("logs-confirm-close");
 const envSettingsDirty = new Map();
 let envSettingsInitialValues = {};
+const tooltipContainers = Array.from(document.querySelectorAll("[data-tooltip]")).filter(
+  (el) => el instanceof HTMLElement
+);
 const LOG_PAGE_SIZE = 10;
 const assetBaseUrl = new URL(".", import.meta.url);
 const TIMESTAMP_BASE_OPTIONS = { dateStyle: "medium", timeStyle: "short" };
@@ -149,6 +152,79 @@ function refreshSidebarNav() {
     link.classList.toggle("active", Boolean(isActive));
     link.setAttribute("aria-current", isActive ? "page" : "false");
   });
+}
+
+function setupTooltips() {
+  if (!tooltipContainers.length) {
+    return;
+  }
+  const coarsePointerMedia = window.matchMedia("(hover: none), (pointer: coarse)");
+  const isCoarsePointer = coarsePointerMedia.matches;
+  tooltipContainers.forEach((container) => {
+    const trigger = container.querySelector("button, [data-tooltip-trigger]");
+    if (trigger instanceof HTMLElement && !trigger.hasAttribute("aria-expanded")) {
+      trigger.setAttribute("aria-expanded", "false");
+    }
+  });
+  if (!isCoarsePointer) {
+    tooltipContainers.forEach((container) => {
+      const trigger = container.querySelector("button, [data-tooltip-trigger]");
+      if (!(trigger instanceof HTMLElement)) {
+        return;
+      }
+      trigger.addEventListener("focus", () => trigger.setAttribute("aria-expanded", "true"));
+      trigger.addEventListener("blur", () => trigger.setAttribute("aria-expanded", "false"));
+    });
+    return;
+  }
+  let openContainer = null;
+  const setTooltipState = (container, isOpen) => {
+    if (!container) {
+      return;
+    }
+    const trigger = container.querySelector("button, [data-tooltip-trigger]");
+    container.classList.toggle("tooltip-open", isOpen);
+    if (trigger instanceof HTMLElement) {
+      trigger.setAttribute("aria-expanded", String(isOpen));
+    }
+    if (isOpen) {
+      openContainer = container;
+    } else if (openContainer === container) {
+      openContainer = null;
+    }
+  };
+  tooltipContainers.forEach((container) => {
+    const trigger = container.querySelector("button, [data-tooltip-trigger]");
+    if (!(trigger instanceof HTMLElement)) {
+      return;
+    }
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const isAlreadyOpen = container.classList.contains("tooltip-open");
+      if (openContainer && openContainer !== container) {
+        setTooltipState(openContainer, false);
+      }
+      setTooltipState(container, !isAlreadyOpen);
+    });
+  });
+  const handlePointerDown = (event) => {
+    if (!openContainer) {
+      return;
+    }
+    const target = event.target;
+    if (target instanceof Node && openContainer.contains(target)) {
+      return;
+    }
+    setTooltipState(openContainer, false);
+  };
+  const handleKeyDown = (event) => {
+    if (event.key === "Escape" && openContainer) {
+      setTooltipState(openContainer, false);
+    }
+  };
+  document.addEventListener("pointerdown", handlePointerDown);
+  document.addEventListener("keydown", handleKeyDown);
 }
 
 function buildApiUrl(path) {
@@ -1509,6 +1585,7 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshMacaroonUI();
   refreshLnurlInstructions();
   refreshSidebarNav();
+  setupTooltips();
   if (clearLogsBtn) {
     clearLogsBtn.addEventListener("click", handleClearLogs);
   }
