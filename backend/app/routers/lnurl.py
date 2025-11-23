@@ -472,6 +472,11 @@ async def lnurl_pay(
         base_details["verify_url"] = verify_public_url
         base_details["verify_url_http"] = verify_http_url
 
+    invoice_details = _details_with_invoice(
+        payment_request=payment_request,
+        response=response_payload,
+        extra={"ln_client_response": invoice_data},
+    )
     entry = LogEntry.create(
         username=username,
         ip=ip,
@@ -479,13 +484,24 @@ async def lnurl_pay(
         domain=domain,
         amount_msat=amount,
         status="ok",
-        details=_details_with_invoice(
-            payment_request=payment_request,
-            response=response_payload,
-            extra={"ln_client_response": invoice_data},
-        ),
+        details=invoice_details,
     )
-    await storage.append(entry)
+    request_log_id = await storage.append(entry)
+    invoice_meta = invoice_details.get("invoice") if isinstance(invoice_details, dict) else None
+    expires_at = None
+    if isinstance(invoice_meta, dict):
+        expires_at = invoice_meta.get("expires_at")
+    await storage.log_invoice_event(
+        username=username,
+        domain=domain,
+        amount_msat=amount,
+        ip=ip,
+        payment_hash=payment_hash_hex,
+        payment_request=payment_request,
+        details=invoice_details,
+        request_log_id=request_log_id,
+        expires_at=expires_at,
+    )
 
     return response_payload
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -41,10 +42,17 @@ def parse_payer_data_config(value: Any) -> Dict[str, bool]:
     raise ValueError("Unsupported value for LNURL_PAYER_DATA")
 
 
-def _env_field(*, env: str, default: Any = PydanticUndefined, **kwargs: Any) -> Any:
+def _env_field(*, env: str | Sequence[str], default: Any = PydanticUndefined, **kwargs: Any) -> Any:
     """Helper to map settings fields to environment variables in Pydantic v2."""
 
-    alias = AliasChoices(env, env.lower())
+    if isinstance(env, str):
+        alias_choices = [env, env.lower()]
+    else:
+        alias_choices = []
+        for item in env:
+            alias_choices.append(item)
+            alias_choices.append(item.lower())
+    alias = AliasChoices(*alias_choices)
     kwargs.setdefault("validation_alias", alias)
     if "default_factory" in kwargs:
         factory = kwargs.pop("default_factory")
@@ -87,13 +95,15 @@ class Settings(BaseSettings):
     )
     recent_log_limit: int = _env_field(env="RECENT_LOG_LIMIT", default=50)
     log_retention_days: int = _env_field(env="LOG_RETENTION_DAYS", default=180)
-    log_path: Path = _env_field(env="REQUEST_LOG_PATH", default=Path("logs/requests.log"))
+    data_store_path: Path = _env_field(
+        env=("DATA_STORE_PATH", "REQUEST_LOG_PATH", "NIP05_STORE_PATH"),
+        default=Path("data/lnswitchboard.db"),
+    )
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     ui_poll_seconds: int = _env_field(env="UI_POLL_SECONDS", default=10)
     macaroon_store_path: Path = _env_field(env="MACAROON_STORE_PATH", default=Path("secrets/macaroon.hex"))
-    nip05_store_path: Path = _env_field(env="NIP05_STORE_PATH", default=Path("secrets/nip05_identities.json"))
 
-    @field_validator("lnd_tls_path", "log_path", "macaroon_store_path", "nip05_store_path", mode="before")
+    @field_validator("lnd_tls_path", "data_store_path", "macaroon_store_path", mode="before")
     @classmethod
     def _expand_path(cls, value: Optional[str | Path]) -> Path:
         if value is None:

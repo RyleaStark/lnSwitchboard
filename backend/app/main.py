@@ -12,12 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
-from .deps import get_ln_client_dep
+from .deps import get_ln_client_dep, get_log_storage_dep
 from .logging_utils import configure_logging
 from .routers import lnurl as lnurl_router
 from .routers import nip05 as nip05_router
 from .routers import ui as ui_router
 from .macaroon_store import MacaroonNotConfiguredError
+from .invoice_worker import InvoiceStatusWorker
 
 LOGGER = logging.getLogger("lnswitchboard")
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -27,8 +28,12 @@ STATIC_DIR = BASE_DIR / "frontend" / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    configure_logging(settings.log_path.parent)
+    configure_logging(settings.data_store_path.parent)
     ln_client = await get_ln_client_dep()
+    storage = await get_log_storage_dep()
+    invoice_worker = InvoiceStatusWorker(storage=storage, ln_client=ln_client)
+    await invoice_worker.start()
+    app.state.invoice_worker = invoice_worker
     try:
         connection_info = await ln_client.check_connection()
         if connection_info.get("info_permission", True):
@@ -42,7 +47,10 @@ async def lifespan(app: FastAPI):
         LOGGER.info("Macaroon not yet configured; LND connectivity check skipped")
     except Exception as exc:  # pragma: no cover - network runtime
         LOGGER.warning("Unable to verify LND connection: %s", exc)
+    except Exception as exc:  # pragma: no cover - network runtime
+        LOGGER.warning("Unable to verify LND connection: %s", exc)
     yield
+    await invoice_worker.stop()
     await ln_client.close()
 
 
@@ -74,7 +82,7 @@ def _register_client_redirect(path: str) -> None:
         return RedirectResponse(url=target, status_code=307)
 
 
-for _client_path in ("/logs", "/liquidity", "/settings", "/identities"):
+for _client_path in ("/logs", "/liquidity", "/settings", "/identities", "/invoices"):
     _register_client_redirect(_client_path)
 
 if STATIC_DIR.exists():

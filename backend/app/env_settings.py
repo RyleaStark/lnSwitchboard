@@ -165,12 +165,12 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "editable": True,
     },
     {
-        "key": "REQUEST_LOG_PATH",
-        "attr": "log_path",
-        "label": "Request Log Path",
+        "key": "DATA_STORE_PATH",
+        "attr": "data_store_path",
+        "label": "Data Store Path",
         "type": "text",
         "category": "System",
-        "description": "File path used for persisting request logs.",
+        "description": "SQLite database file used for logs and NIP-05 identities.",
         "editable": False,
         "visible": False,
     },
@@ -333,5 +333,6 @@ def update_env_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
     deps._get_ln_client.cache_clear()
     deps._get_log_storage.cache_clear()
     deps._get_macaroon_store.cache_clear()
+    deps._get_nip05_store.cache_clear()
 
     return changed

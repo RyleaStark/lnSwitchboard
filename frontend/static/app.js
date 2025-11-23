@@ -22,6 +22,20 @@ const envSettingsFeedback = document.getElementById("env-settings-feedback");
 const detailsModal = document.getElementById("details-modal");
 const detailsJsonEl = document.getElementById("details-json");
 const detailsCloseBtn = document.getElementById("details-close");
+const invoiceDetailsModal = document.getElementById("invoice-details-modal");
+const invoiceDetailsCloseBtn = document.getElementById("invoice-details-close");
+const invoiceDetailsTitleEl = document.getElementById("invoice-details-title");
+const invoiceDetailsUsernameEl = document.getElementById("invoice-details-username");
+const invoiceDetailsRecipientEl = document.getElementById("invoice-details-recipient");
+const invoiceDetailsStatusEl = document.getElementById("invoice-details-status");
+const invoiceDetailsAmountEl = document.getElementById("invoice-details-amount");
+const invoiceDetailsCreatedEl = document.getElementById("invoice-details-created");
+const invoiceDetailsExpiresEl = document.getElementById("invoice-details-expires");
+const invoiceDetailsNextCheckEl = document.getElementById("invoice-details-next-check");
+const invoiceDetailsLastCheckedEl = document.getElementById("invoice-details-last-checked");
+const invoiceDetailsSettledAtEl = document.getElementById("invoice-details-settled-at");
+const invoiceDetailsHashEl = document.getElementById("invoice-details-hash");
+const invoiceDetailsRequestEl = document.getElementById("invoice-details-request");
 const logsSearchInput = document.getElementById("logs-search");
 const logsPrevBtn = document.getElementById("logs-prev");
 const logsNextBtn = document.getElementById("logs-next");
@@ -30,8 +44,26 @@ const LOG_COLUMN_COUNT = logTable ? logTable.querySelectorAll("thead th").length
 const LOG_COLUMN_LABELS = logTable
   ? Array.from(logTable.querySelectorAll("thead th")).map((th) => th.textContent.trim())
   : [];
+const invoiceTableBody = document.getElementById("invoice-table-body");
+const invoiceTable = invoiceTableBody ? invoiceTableBody.closest("table") : null;
+const invoiceSearchInput = document.getElementById("invoices-search");
+const invoicePrevBtn = document.getElementById("invoices-prev");
+const invoiceNextBtn = document.getElementById("invoices-next");
+const invoicePageIndicator = document.getElementById("invoice-page-indicator");
+const INVOICE_COLUMN_LABELS = invoiceTable
+  ? Array.from(invoiceTable.querySelectorAll("thead th")).map((th) => th.textContent.trim())
+  : [];
+const INVOICE_COLUMN_COUNT = INVOICE_COLUMN_LABELS.length || 1;
 const metricDomainsValue = document.getElementById("metric-domains");
 const metricRequestsValue = document.getElementById("metric-requests");
+const metricRequests7dValue = document.getElementById("metric-requests-7d");
+const metricInvoicesTotalValue = document.getElementById("metric-invoices-total");
+const metricInvoicesPaidValue = document.getElementById("metric-invoices-paid");
+const metricInvoicesPaid24Value = document.getElementById("metric-invoices-paid24");
+const metricSatsTotalValue = document.getElementById("metric-sats-total");
+const metricSats7dValue = document.getElementById("metric-sats-7d");
+const mixedChartCanvas = document.getElementById("mixed-chart");
+const mixedChartEmpty = document.getElementById("mixed-chart-empty");
 const liquidityMaxValueEl = document.getElementById("liquidity-max-value");
 const liquidityMaxLabelEl = document.getElementById("liquidity-max-label");
 const liquidityTotalEl = document.getElementById("liquidity-total");
@@ -79,6 +111,7 @@ const tooltipContainers = Array.from(document.querySelectorAll("[data-tooltip]")
   (el) => el instanceof HTMLElement
 );
 const LOG_PAGE_SIZE = 10;
+const INVOICE_PAGE_SIZE = 10;
 const assetBaseUrl = new URL(".", import.meta.url);
 const TIMESTAMP_BASE_OPTIONS = { dateStyle: "medium", timeStyle: "short" };
 const TIMESTAMP_WITH_TZ = { ...TIMESTAMP_BASE_OPTIONS, timeZoneName: "short" };
@@ -88,10 +121,17 @@ let logTotalItems = 0;
 let logQuery = "";
 let logsFetchToken = 0;
 let logSearchDebounceId;
+let invoicePage = 1;
+let invoiceTotalPages = 0;
+let invoiceTotalItems = 0;
+let invoiceQuery = "";
+let invoicesFetchToken = 0;
+let invoiceSearchDebounceId;
 let activeDetailsEntry = null;
 let macaroonFormManuallyOpen = false;
 let macaroonConfigured = false;
 let lnurlDetailsOpen = false;
+let mixedChartInstance = null;
 const identityState = {
   items: [],
   editingId: null,
@@ -110,6 +150,8 @@ const NAV_KEYS_BY_PATH = new Map([
   ["/identities/index.html", "identities"],
   ["/logs", "requests"],
   ["/logs/index.html", "requests"],
+  ["/invoices", "invoices"],
+  ["/invoices/index.html", "invoices"],
   [SETTINGS_ROUTE, "settings"],
   [`${SETTINGS_ROUTE}/index.html`, "settings"],
 ]);
@@ -283,6 +325,131 @@ function createTimestampCell(value) {
   return cell;
 }
 
+function createLogTimestampCell(entry) {
+  const cell = document.createElement("td");
+  const wrapper = document.createElement("div");
+  wrapper.className = "log-timestamp";
+  const primary = document.createElement("span");
+  primary.className = "log-timestamp-primary";
+  const formatted = formatTimestamp(entry?.timestamp);
+  if (formatted) {
+    primary.textContent = formatted.display;
+    cell.title = `${formatted.iso} (UTC)`;
+  } else if (entry && entry.timestamp) {
+    primary.textContent = String(entry.timestamp);
+  } else {
+    primary.textContent = "—";
+  }
+  wrapper.appendChild(primary);
+  const rawIp = typeof entry?.ip === "string" ? entry.ip.trim() : "";
+  if (rawIp) {
+    const meta = document.createElement("span");
+    meta.className = "log-timestamp-meta";
+    meta.textContent = formatIp(rawIp);
+    wrapper.appendChild(meta);
+  }
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+function createLogRecipientCell(entry) {
+  const cell = document.createElement("td");
+  const wrapper = document.createElement("div");
+  wrapper.className = "log-recipient";
+  const username = typeof entry?.username === "string" ? entry.username.trim() : "";
+  const domain = typeof entry?.domain === "string" ? entry.domain.trim() : "";
+  const primary = document.createElement("span");
+  primary.className = "log-recipient-primary";
+  primary.textContent = username || domain || "—";
+  wrapper.appendChild(primary);
+  if (domain) {
+    const secondary = document.createElement("span");
+    secondary.className = "log-recipient-secondary";
+    secondary.textContent = username ? `@${domain}` : domain;
+    wrapper.appendChild(secondary);
+  }
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+function getLogAmountSat(entry) {
+  if (!entry) {
+    return null;
+  }
+  if (typeof entry.amount_sat === "number" && Number.isFinite(entry.amount_sat)) {
+    return entry.amount_sat;
+  }
+  if (typeof entry.amount_msat === "number" && Number.isFinite(entry.amount_msat)) {
+    return Math.round(entry.amount_msat / 1000);
+  }
+  return null;
+}
+
+function createLogAmountCell(entry) {
+  const cell = document.createElement("td");
+  const wrapper = document.createElement("div");
+  wrapper.className = "log-amount";
+  const payment = resolvePaymentStatus(entry);
+  const tone = payment?.tone || "unknown";
+  const pill = document.createElement("span");
+  pill.className = `status-pill log-amount-status status-pill-${tone}`;
+  pill.textContent = payment?.label ?? "—";
+  wrapper.appendChild(pill);
+  const shouldShowAmount = !["verify", "discovery"].includes(
+    normalizeLogEventKey(entry?.event),
+  );
+  if (shouldShowAmount) {
+    const amountSat = getLogAmountSat(entry);
+    const amountValue = document.createElement("span");
+    amountValue.className = "log-amount-value";
+    amountValue.textContent =
+      typeof amountSat === "number" && Number.isFinite(amountSat)
+        ? formatSatAmount(amountSat)
+        : "—";
+    wrapper.appendChild(amountValue);
+  }
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+function normalizeLogEventKey(value) {
+  if (typeof value !== "string") {
+    return "unknown";
+  }
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) {
+    return "unknown";
+  }
+  return trimmed.replace(/[^a-z0-9_-]+/g, "-");
+}
+
+function formatLogEventLabel(value) {
+  if (typeof value !== "string") {
+    return "—";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "—";
+  }
+  return trimmed
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function createLogEventCell(entry) {
+  const cell = document.createElement("td");
+  const pill = document.createElement("span");
+  const normalized = normalizeLogEventKey(entry?.event);
+  const label = formatLogEventLabel(entry?.event);
+  pill.className = `log-event-pill log-event-pill-${normalized}`;
+  pill.textContent = label;
+  cell.appendChild(pill);
+  return cell;
+}
+
 function formatIp(value) {
   if (typeof value !== "string") {
     return value;
@@ -312,6 +479,122 @@ function formatSatAmount(value) {
     return "—";
   }
   return `${value.toLocaleString()} sats`;
+}
+
+function ensureMixedChart() {
+  if (!mixedChartCanvas || typeof Chart === "undefined") {
+    return null;
+  }
+  if (mixedChartInstance) {
+    return mixedChartInstance;
+  }
+  mixedChartInstance = new Chart(mixedChartCanvas, {
+    data: {
+      labels: [],
+      datasets: [
+        {
+          type: "bar",
+          label: "Invoices paid",
+          data: [],
+          backgroundColor: "rgba(122, 147, 255, 0.28)",
+          borderColor: "rgba(122, 147, 255, 0.65)",
+          borderWidth: 1,
+          borderRadius: 8,
+          borderSkipped: false,
+          order: 0,
+          yAxisID: "y",
+        },
+        {
+          type: "line",
+          label: "Sats stacked",
+          data: [],
+          fill: false,
+          borderColor: "#f7931a",
+          pointBackgroundColor: "#f7931a",
+          pointBorderColor: "#f7931a",
+          borderWidth: 2,
+          tension: 0.25,
+          pointRadius: 3,
+          order: 10,
+          yAxisID: "y1",
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { intersect: false, mode: "index" },
+      plugins: {
+        legend: {
+          display: true,
+          labels: {
+            color: "#ffffff",
+          },
+        },
+        tooltip: {
+          callbacks: {
+            label(context) {
+              const value = context.parsed.y || 0;
+              if (context.dataset.type === "line") {
+                return `${context.dataset.label}: ${value.toLocaleString()} sats`;
+              }
+              return `${context.dataset.label}: ${value.toLocaleString()}`;
+            },
+          },
+        },
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: { precision: 0, color: "#ffffff" },
+          grid: { color: "rgba(148, 163, 184, 0.25)" },
+          title: { display: true, text: "Invoices", color: "#ffffff" },
+        },
+        y1: {
+          beginAtZero: true,
+          position: "right",
+          ticks: { precision: 0, color: "#ffffff" },
+          grid: { drawOnChartArea: false },
+          title: { display: true, text: "Sats", color: "#ffffff" },
+        },
+        x: {
+          grid: { display: false },
+          ticks: {
+            color: "#ffffff",
+            maxRotation: 0,
+            autoSkip: true,
+            maxTicksLimit: 6,
+          },
+        },
+      },
+    },
+  });
+  return mixedChartInstance;
+}
+
+function renderMixedChart(series) {
+  const chart = ensureMixedChart();
+  if (!chart) return;
+  const items = Array.isArray(series) ? series.slice(-14) : [];
+  const labels = items.map((item) => formatChartDateLabel(item?.date));
+  const satsData = items.map((item) => Number(item?.sats) || 0);
+  const paidData = items.map((item) => Number(item?.paid) || 0);
+  chart.data.labels = labels;
+  chart.data.datasets[0].data = paidData;
+  chart.data.datasets[1].data = satsData;
+  chart.data.datasets.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  chart.update();
+  const hasData = satsData.some((value) => value > 0) || paidData.some((value) => value > 0);
+  if (mixedChartEmpty) {
+    mixedChartEmpty.classList.toggle("visible", !hasData);
+  }
+}
+
+function formatChartDateLabel(dateStr) {
+  if (!dateStr) return "--";
+  const parts = dateStr.split("-");
+  if (parts.length !== 3) return dateStr;
+  return `${parts[1]}/${parts[2]}`;
 }
 
 function shortenPubkey(value) {
@@ -411,6 +694,15 @@ function setMetricValue(target, value) {
   target.textContent = value;
 }
 
+function setSatMetricValue(target, value) {
+  if (!target) return;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    target.textContent = formatSatAmount(value);
+  } else {
+    target.textContent = "—";
+  }
+}
+
 function isMobileNav() {
   return window.innerWidth <= MOBILE_NAV_BREAKPOINT;
 }
@@ -428,7 +720,16 @@ function updateBodyModalState() {
 }
 
 async function fetchDashboardMetrics() {
-  if (!metricDomainsValue && !metricRequestsValue) {
+  const needsMetrics =
+    metricDomainsValue ||
+    metricRequestsValue ||
+    metricRequests7dValue ||
+    metricInvoicesTotalValue ||
+    metricInvoicesPaidValue ||
+    metricInvoicesPaid24Value ||
+    metricSatsTotalValue ||
+    metricSats7dValue;
+  if (!needsMetrics) {
     return;
   }
   try {
@@ -439,10 +740,24 @@ async function fetchDashboardMetrics() {
     const data = await response.json();
     setMetricValue(metricDomainsValue, formatMetricNumber(data.connected_domains));
     setMetricValue(metricRequestsValue, formatMetricNumber(data.requests_24h));
+    setMetricValue(metricRequests7dValue, formatMetricNumber(data.requests_7d));
+    setMetricValue(metricInvoicesTotalValue, formatMetricNumber(data.invoices_total));
+    setMetricValue(metricInvoicesPaidValue, formatMetricNumber(data.invoices_paid));
+    setMetricValue(metricInvoicesPaid24Value, formatMetricNumber(data.invoices_paid_24h));
+    setSatMetricValue(metricSatsTotalValue, data.total_sats_routed);
+    setSatMetricValue(metricSats7dValue, data.sats_routed_7d);
+    renderMixedChart(data.invoice_activity || []);
   } catch (error) {
     console.error("Failed to load dashboard metrics", error);
     setMetricValue(metricDomainsValue, "—");
     setMetricValue(metricRequestsValue, "—");
+    setMetricValue(metricRequests7dValue, "—");
+    setMetricValue(metricInvoicesTotalValue, "—");
+    setMetricValue(metricInvoicesPaidValue, "—");
+    setMetricValue(metricInvoicesPaid24Value, "—");
+    setSatMetricValue(metricSatsTotalValue, NaN);
+    setSatMetricValue(metricSats7dValue, NaN);
+    renderMixedChart([]);
   }
 }
 
@@ -1167,17 +1482,6 @@ function resolvePaymentStatus(entry) {
   return { label: "—", tone: "unknown" };
 }
 
-function createPaymentCell(entry) {
-  const cell = document.createElement("td");
-  const payment = resolvePaymentStatus(entry);
-  cell.textContent = payment.label;
-  cell.classList.add("payment-status");
-  if (payment.tone !== "unknown") {
-    cell.classList.add(`payment-status-${payment.tone}`);
-  }
-  return cell;
-}
-
 function updateLogPagination(meta) {
   if (!logsPageIndicator) return;
   const totalItems = Math.max(0, meta?.total_items ?? 0);
@@ -1223,20 +1527,11 @@ function renderLogs(items, emptyMessage = "No activity yet.") {
 
   for (const entry of rows) {
     const row = document.createElement("tr");
-    const amountSat =
-      typeof entry.amount_msat === "number"
-        ? Math.round(entry.amount_msat / 1000)
-        : "—";
-
     const cells = [
-      createTimestampCell(entry.timestamp),
-      createCell(entry.username),
-      createCell(entry.domain),
-      createCell(amountSat),
-      createPaymentCell(entry),
-      createCell(formatIp(entry.ip)),
-      createCell(entry.status),
-      createCell(entry.event),
+      createLogTimestampCell(entry),
+      createLogRecipientCell(entry),
+      createLogAmountCell(entry),
+      createLogEventCell(entry),
       createDetailsCell(entry),
     ];
     cells.forEach((cell, index) => {
@@ -1267,6 +1562,330 @@ function renderLogs(items, emptyMessage = "No activity yet.") {
       messageRow.appendChild(messageCell);
       logBody.appendChild(messageRow);
     }
+  }
+}
+
+function shortenHash(value, prefix = 8, suffix = 6) {
+  if (typeof value !== "string") {
+    return "—";
+  }
+  const trimmed = value.trim();
+  if (trimmed.length <= prefix + suffix + 3) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, prefix)}…${trimmed.slice(-suffix)}`;
+}
+
+function createHashCell(value) {
+  const cell = document.createElement("td");
+  if (!value) {
+    cell.textContent = "—";
+    return cell;
+  }
+  const code = document.createElement("code");
+  code.className = "hash-value";
+  code.textContent = shortenHash(value);
+  code.title = value;
+  cell.appendChild(code);
+  return cell;
+}
+
+function getInvoiceStatus(invoice) {
+  if (typeof invoice.status === "string" && invoice.status) {
+    return invoice.status.toLowerCase();
+  }
+  if (invoice.settled) {
+    return "settled";
+  }
+  if (invoice.expired) {
+    return "expired";
+  }
+  return "pending";
+}
+
+function createInvoiceStatusPill(invoice) {
+  const status = getInvoiceStatus(invoice);
+  const normalized = normalizeInvoiceStatus(status);
+  const pill = document.createElement("span");
+  pill.className = `status-pill status-pill-${normalized}`;
+  pill.textContent = formatInvoiceStatusLabel(status);
+  return pill;
+}
+
+function createInvoiceAmountCell(invoice, amountText) {
+  const cell = document.createElement("td");
+  const wrapper = document.createElement("div");
+  wrapper.className = "invoice-amount";
+  const pill = createInvoiceStatusPill(invoice);
+  pill.classList.add("invoice-amount-status");
+  const amountValue = document.createElement("span");
+  amountValue.className = "invoice-amount-value";
+  amountValue.textContent = amountText;
+  wrapper.appendChild(pill);
+  wrapper.appendChild(amountValue);
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+function normalizeInvoiceStatus(status) {
+  if (typeof status !== "string") {
+    return "unknown";
+  }
+  const normalized = status.toLowerCase();
+  return ["settled", "pending", "expired"].includes(normalized) ? normalized : "unknown";
+}
+
+function formatInvoiceStatusLabel(status) {
+  const normalized = normalizeInvoiceStatus(status);
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function getInvoiceAmountSat(invoice) {
+  if (!invoice) {
+    return null;
+  }
+  if (typeof invoice.amount_sat === "number" && Number.isFinite(invoice.amount_sat)) {
+    return invoice.amount_sat;
+  }
+  if (typeof invoice.amount_msat === "number" && Number.isFinite(invoice.amount_msat)) {
+    return Math.round(invoice.amount_msat / 1000);
+  }
+  return null;
+}
+
+function formatInvoiceRecipient(invoice) {
+  if (!invoice) {
+    return "—";
+  }
+  const username = typeof invoice.username === "string" ? invoice.username.trim() : "";
+  const domain = typeof invoice.domain === "string" ? invoice.domain.trim() : "";
+  if (username && domain) {
+    return `${username}@${domain}`;
+  }
+  if (username) {
+    return username;
+  }
+  if (domain) {
+    return domain;
+  }
+  return "—";
+}
+
+function createRecipientCell(invoice) {
+  const cell = document.createElement("td");
+  const username = typeof invoice?.username === "string" ? invoice.username.trim() : "";
+  const domain = typeof invoice?.domain === "string" ? invoice.domain.trim() : "";
+  const wrapper = document.createElement("div");
+  wrapper.className = "invoice-recipient";
+  const primary = document.createElement("span");
+  primary.className = "invoice-recipient-primary";
+  primary.textContent = username || domain || "—";
+  wrapper.appendChild(primary);
+  if (domain) {
+    const secondary = document.createElement("span");
+    secondary.className = "invoice-recipient-secondary";
+    secondary.textContent = username ? `@${domain}` : domain;
+    wrapper.appendChild(secondary);
+  }
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+function createInvoiceDetailsCell(invoice) {
+  const cell = document.createElement("td");
+  cell.classList.add("details-cell");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "details-btn";
+  button.textContent = "View";
+  button.addEventListener("click", () => openInvoiceDetails(invoice));
+  cell.appendChild(button);
+  return cell;
+}
+
+function setInvoiceDetailsTimestamp(target, value, fallback = "—") {
+  if (!target) return;
+  const formatted = formatTimestamp(value);
+  if (formatted) {
+    target.textContent = formatted.display;
+    target.title = `${formatted.iso} (UTC)`;
+  } else {
+    target.textContent = fallback;
+    target.removeAttribute("title");
+  }
+}
+
+function applyInvoiceDetailsStatus(invoice) {
+  if (!invoiceDetailsStatusEl) return;
+  const status = getInvoiceStatus(invoice);
+  const normalized = normalizeInvoiceStatus(status);
+  invoiceDetailsStatusEl.textContent = formatInvoiceStatusLabel(status);
+  invoiceDetailsStatusEl.className = `status-pill status-pill-${normalized}`;
+}
+
+function populateInvoiceDetails(invoice) {
+  if (!invoice) {
+    return;
+  }
+  const recipient = formatInvoiceRecipient(invoice);
+  if (invoiceDetailsTitleEl) {
+    invoiceDetailsTitleEl.textContent =
+      recipient && recipient !== "—" ? `Invoice for ${recipient}` : "Invoice details";
+  }
+  if (invoiceDetailsUsernameEl) {
+    const username = typeof invoice.username === "string" ? invoice.username.trim() : "";
+    const domain = typeof invoice.domain === "string" ? invoice.domain.trim() : "";
+    invoiceDetailsUsernameEl.textContent = username ? `@${username}` : domain || "Invoice";
+  }
+  if (invoiceDetailsRecipientEl) {
+    invoiceDetailsRecipientEl.textContent = recipient;
+  }
+  applyInvoiceDetailsStatus(invoice);
+  if (invoiceDetailsAmountEl) {
+    const amountSat = getInvoiceAmountSat(invoice);
+    const amountMsat =
+      typeof invoice.amount_msat === "number" && Number.isFinite(invoice.amount_msat)
+        ? invoice.amount_msat
+        : null;
+    if (typeof amountSat === "number" && Number.isFinite(amountSat)) {
+      const formatted = formatSatAmount(amountSat);
+      invoiceDetailsAmountEl.textContent = amountMsat
+        ? `${formatted} (${amountMsat.toLocaleString()} msat)`
+        : formatted;
+    } else if (amountMsat !== null) {
+      invoiceDetailsAmountEl.textContent = `${amountMsat.toLocaleString()} msat`;
+    } else {
+      invoiceDetailsAmountEl.textContent = "—";
+    }
+  }
+  setInvoiceDetailsTimestamp(invoiceDetailsCreatedEl, invoice.created_at);
+  setInvoiceDetailsTimestamp(invoiceDetailsNextCheckEl, invoice.next_check_at);
+  setInvoiceDetailsTimestamp(invoiceDetailsLastCheckedEl, invoice.last_checked_at);
+  if (invoiceDetailsSettledAtEl) {
+    const fallback = invoice.settled ? "Unknown" : "—";
+    setInvoiceDetailsTimestamp(invoiceDetailsSettledAtEl, invoice.settled_at, fallback);
+  }
+  if (invoiceDetailsExpiresEl) {
+    if (invoice.settled) {
+      invoiceDetailsExpiresEl.textContent = "Settled";
+      invoiceDetailsExpiresEl.removeAttribute("title");
+    } else if (invoice.expired) {
+      if (invoice.expires_at) {
+        setInvoiceDetailsTimestamp(invoiceDetailsExpiresEl, invoice.expires_at, "Expired");
+        const current = invoiceDetailsExpiresEl.textContent || "";
+        if (!current.toLowerCase().includes("expired")) {
+          invoiceDetailsExpiresEl.textContent = `${current} (expired)`;
+        }
+      } else {
+        invoiceDetailsExpiresEl.textContent = "Expired";
+        invoiceDetailsExpiresEl.removeAttribute("title");
+      }
+    } else {
+      setInvoiceDetailsTimestamp(invoiceDetailsExpiresEl, invoice.expires_at);
+    }
+  }
+  if (invoiceDetailsHashEl) {
+    const hash = typeof invoice.payment_hash === "string" ? invoice.payment_hash.trim() : "";
+    invoiceDetailsHashEl.textContent = hash || "—";
+    if (hash) {
+      invoiceDetailsHashEl.title = hash;
+    } else {
+      invoiceDetailsHashEl.removeAttribute("title");
+    }
+  }
+  if (invoiceDetailsRequestEl) {
+    const request =
+      typeof invoice.payment_request === "string" ? invoice.payment_request.trim() : "";
+    invoiceDetailsRequestEl.textContent = request || "—";
+    if (request) {
+      invoiceDetailsRequestEl.title = request;
+    } else {
+      invoiceDetailsRequestEl.removeAttribute("title");
+    }
+  }
+}
+
+function openInvoiceDetails(invoice) {
+  if (!invoiceDetailsModal) {
+    return;
+  }
+  populateInvoiceDetails(invoice);
+  invoiceDetailsModal.classList.remove("hidden");
+  invoiceDetailsModal.classList.add("visible");
+  updateBodyModalState();
+}
+
+function closeInvoiceDetails() {
+  if (!invoiceDetailsModal) {
+    return;
+  }
+  invoiceDetailsModal.classList.add("hidden");
+  invoiceDetailsModal.classList.remove("visible");
+  updateBodyModalState();
+}
+
+function renderInvoices(items, emptyMessage = "No invoices yet.") {
+  if (!invoiceTableBody) return;
+  const rows = Array.isArray(items) ? items : [];
+  invoiceTableBody.innerHTML = "";
+
+  if (!rows.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = INVOICE_COLUMN_COUNT || 1;
+    cell.className = "placeholder";
+    cell.textContent = emptyMessage;
+    row.appendChild(cell);
+    invoiceTableBody.appendChild(row);
+    return;
+  }
+
+  for (const invoice of rows) {
+    const row = document.createElement("tr");
+    const amountSat = getInvoiceAmountSat(invoice);
+    const amountText =
+      typeof amountSat === "number" && Number.isFinite(amountSat)
+        ? formatSatAmount(amountSat)
+        : "—";
+    const cells = [
+      createTimestampCell(invoice.created_at),
+      createRecipientCell(invoice),
+      createInvoiceAmountCell(invoice, amountText),
+      createHashCell(invoice.payment_hash),
+      createInvoiceDetailsCell(invoice),
+    ];
+    cells.forEach((cell, index) => {
+      applyStackableLabel(cell, INVOICE_COLUMN_LABELS[index]);
+      row.appendChild(cell);
+    });
+    invoiceTableBody.appendChild(row);
+  }
+}
+
+function updateInvoicePagination(meta) {
+  if (!invoicePageIndicator) return;
+  const totalItems = Math.max(0, meta?.total_items ?? 0);
+  const totalPages = Math.max(0, meta?.total_pages ?? 0);
+  const currentPage = totalPages > 0 ? Math.max(1, meta?.page ?? 1) : 1;
+  invoiceTotalItems = totalItems;
+  invoiceTotalPages = totalPages;
+  invoicePage = totalPages > 0 ? currentPage : 1;
+
+  let summary;
+  if (totalItems === 0) {
+    summary = invoiceQuery ? "No matches" : "No invoices yet";
+  } else if (totalPages <= 1) {
+    summary = `${totalItems} invoice${totalItems === 1 ? "" : "s"}`;
+  } else {
+    summary = `Page ${invoicePage} of ${totalPages} • ${totalItems} invoices`;
+  }
+
+  invoicePageIndicator.textContent = summary;
+  if (invoicePrevBtn) {
+    invoicePrevBtn.disabled = totalPages === 0 || invoicePage <= 1;
+  }
+  if (invoiceNextBtn) {
+    invoiceNextBtn.disabled = totalPages === 0 || invoicePage >= totalPages;
   }
 }
 
@@ -1507,13 +2126,66 @@ async function refreshLogs() {
   }
 }
 
+async function refreshInvoices() {
+  if (!invoiceTableBody) {
+    return;
+  }
+  const requestToken = ++invoicesFetchToken;
+  if (invoicePageIndicator) {
+    invoicePageIndicator.textContent = invoiceQuery ? "Searching…" : "Loading…";
+  }
+  try {
+    const params = new URLSearchParams({
+      page: String(invoicePage),
+      page_size: String(INVOICE_PAGE_SIZE),
+    });
+    if (invoiceQuery) {
+      params.set("q", invoiceQuery);
+    }
+    const response = await fetch(buildApiUrl(`api/invoices?${params.toString()}`));
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    if (requestToken !== invoicesFetchToken) {
+      return;
+    }
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    const emptyMessage = invoiceQuery ? "No invoices match your search." : "No invoices yet.";
+    renderInvoices(items, emptyMessage);
+    updateInvoicePagination(payload);
+  } catch (error) {
+    console.error("Failed to load invoices", error);
+    if (requestToken !== invoicesFetchToken) {
+      return;
+    }
+    renderInvoices([], "Unable to load invoices.");
+    updateInvoicePagination({ page: 1, total_pages: 0, total_items: 0 });
+    if (invoicePageIndicator) {
+      invoicePageIndicator.textContent = "Unable to load invoices";
+    }
+  }
+}
+
 function startPolling() {
   updateStatus();
   const shouldPollLogs = Boolean(logBody);
-  const shouldPollMetrics = Boolean(metricDomainsValue || metricRequestsValue);
+  const shouldPollMetrics = Boolean(
+    metricDomainsValue ||
+    metricRequestsValue ||
+    metricInvoicesTotalValue ||
+    metricInvoicesPaidValue ||
+    metricInvoicesPaid24Value ||
+    metricSatsTotalValue ||
+    metricSats7dValue,
+  );
   const shouldFetchLiquidity = Boolean(liquidityTableBody || liquidityMaxValueEl || liquidityTotalEl);
+  const shouldPollInvoices = Boolean(invoiceTableBody);
   if (shouldPollLogs) {
     refreshLogs();
+  }
+  if (shouldPollInvoices) {
+    refreshInvoices();
   }
   if (shouldPollMetrics) {
     fetchDashboardMetrics();
@@ -1525,6 +2197,9 @@ function startPolling() {
   setInterval(updateStatus, POLL_INTERVAL_MS);
   if (shouldPollLogs) {
     setInterval(refreshLogs, POLL_INTERVAL_MS);
+  }
+  if (shouldPollInvoices) {
+    setInterval(refreshInvoices, POLL_INTERVAL_MS);
   }
   if (shouldPollMetrics) {
     setInterval(fetchDashboardMetrics, POLL_INTERVAL_MS);
@@ -1577,6 +2252,25 @@ function handleLogsSearchInput(event) {
     logQuery = normalized;
     logPage = 1;
     refreshLogs();
+  }, 250);
+}
+
+function handleInvoicesSearchInput(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
+  if (invoiceSearchDebounceId) {
+    window.clearTimeout(invoiceSearchDebounceId);
+  }
+  invoiceSearchDebounceId = window.setTimeout(() => {
+    const normalized = target.value.trim();
+    if (normalized === invoiceQuery) {
+      return;
+    }
+    invoiceQuery = normalized;
+    invoicePage = 1;
+    refreshInvoices();
   }, 250);
 }
 
@@ -1689,6 +2383,16 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   }
+  if (invoiceDetailsCloseBtn) {
+    invoiceDetailsCloseBtn.addEventListener("click", closeInvoiceDetails);
+  }
+  if (invoiceDetailsModal) {
+    invoiceDetailsModal.addEventListener("click", (event) => {
+      if (event.target instanceof HTMLElement && event.target.dataset.close === "invoice-details") {
+        closeInvoiceDetails();
+      }
+    });
+  }
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (lnurlModal?.classList.contains("visible")) {
@@ -1709,6 +2413,10 @@ document.addEventListener("keydown", (event) => {
     }
     if (identityModal?.classList.contains("visible")) {
       setIdentityFormVisible(false);
+      return;
+    }
+    if (invoiceDetailsModal?.classList.contains("visible")) {
+      closeInvoiceDetails();
       return;
     }
     if (detailsModal?.classList.contains("visible")) {
@@ -1738,6 +2446,30 @@ document.addEventListener("keydown", (event) => {
       refreshLogs();
     });
     logsNextBtn.disabled = true;
+  }
+
+  if (invoiceSearchInput) {
+    invoiceSearchInput.addEventListener("input", handleInvoicesSearchInput);
+  }
+  if (invoicePrevBtn) {
+    invoicePrevBtn.addEventListener("click", () => {
+      if (invoicePage <= 1) {
+        return;
+      }
+      invoicePage -= 1;
+      refreshInvoices();
+    });
+    invoicePrevBtn.disabled = true;
+  }
+  if (invoiceNextBtn) {
+    invoiceNextBtn.addEventListener("click", () => {
+      if (invoiceTotalPages === 0 || invoicePage >= invoiceTotalPages) {
+        return;
+      }
+      invoicePage += 1;
+      refreshInvoices();
+    });
+    invoiceNextBtn.disabled = true;
   }
 
   if (envSettingsCard) {

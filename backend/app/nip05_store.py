@@ -1,9 +1,10 @@
-"""Simple JSON-backed storage for NIP-05 identity mappings."""
+"""SQLite-backed storage for NIP-05 identity mappings."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -66,60 +67,130 @@ class IdentityNotFoundError(KeyError):
 
 
 class NostrIdentityStore:
-    """File-backed identity registry with coarse locking."""
+    """SQLite-backed identity registry with coarse locking."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, legacy_json_path: Optional[Path] = None) -> None:
         self._path = path
+        self._legacy_json_path = legacy_json_path
         self._lock = asyncio.Lock()
-        self._records: Dict[str, NostrIdentityRecord] = {}
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._load()
+        self._init_db()
+        self._maybe_import_legacy()
 
-    def _load(self) -> None:
-        if not self._path.exists():
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS nostr_identities (
+                    id TEXT PRIMARY KEY,
+                    local_part TEXT NOT NULL,
+                    domain TEXT NOT NULL,
+                    npub TEXT NOT NULL,
+                    pubkey_hex TEXT NOT NULL,
+                    relays TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_nostr_identity_lookup ON nostr_identities(local_part, domain)"
+            )
+
+    def _maybe_import_legacy(self) -> None:
+        legacy_path = self._legacy_json_path
+        if not legacy_path or legacy_path == self._path or not legacy_path.exists():
             return
         try:
-            with self._path.open("r", encoding="utf-8") as fp:
+            with self._connect() as conn:
+                row = conn.execute("SELECT 1 FROM nostr_identities LIMIT 1").fetchone()
+                if row:
+                    return
+        except sqlite3.Error:
+            return
+        try:
+            with legacy_path.open("r", encoding="utf-8") as fp:
                 payload = json.load(fp)
         except (OSError, json.JSONDecodeError):
             return
         if not isinstance(payload, list):
             return
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            record = NostrIdentityRecord.from_dict(item)
-            self._records[record.id] = record
-
-    def _persist_locked(self) -> None:
-        data = [record.to_dict() for record in self._records.values()]
-        tmp_path = self._path.with_suffix(".tmp")
-        try:
-            with tmp_path.open("w", encoding="utf-8") as fp:
-                json.dump(data, fp, indent=2)
-            tmp_path.replace(self._path)
-        except OSError:
-            # Persistence failures are non-fatal; keep in-memory state.
+        records = [NostrIdentityRecord.from_dict(item) for item in payload if isinstance(item, dict)]
+        if not records:
             return
+        try:
+            with self._connect() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO nostr_identities (
+                        id, local_part, domain, npub, pubkey_hex, relays, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            record.id,
+                            record.local_part,
+                            record.domain,
+                            record.npub,
+                            record.pubkey_hex,
+                            json.dumps(record.relays),
+                            record.created_at,
+                            record.updated_at,
+                        )
+                        for record in records
+                    ],
+                )
+        except sqlite3.Error:
+            return
+        try:
+            legacy_path.rename(legacy_path.with_suffix(f"{legacy_path.suffix or ''}.migrated"))
+        except OSError:
+            try:
+                legacy_path.unlink()
+            except OSError:
+                pass
 
     def _norm(self, value: str) -> str:
         return value.strip().lower()
 
-    def _has_conflict(self, local_part: str, domain: str, *, exclude_id: Optional[str] = None) -> bool:
-        for record_id, record in self._records.items():
-            if exclude_id and record_id == exclude_id:
-                continue
-            if record.local_part == local_part and record.domain == domain:
-                return True
-        return False
+    def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        relays_raw = row["relays"] or "[]"
+        try:
+            relays = json.loads(relays_raw)
+        except json.JSONDecodeError:
+            relays = []
+        return {
+            "id": row["id"],
+            "local_part": row["local_part"],
+            "domain": row["domain"],
+            "npub": row["npub"],
+            "pubkey_hex": row["pubkey_hex"],
+            "relays": relays,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     async def list_identities(self) -> List[Dict[str, Any]]:
         async with self._lock:
-            records = sorted(
-                (record.to_dict() for record in self._records.values()),
-                key=lambda entry: (entry["domain"], entry["local_part"]),
-            )
-            return deepcopy(records)
+            try:
+                with self._connect() as conn:
+                    rows = conn.execute(
+                        """
+                        SELECT id, local_part, domain, npub, pubkey_hex, relays, created_at, updated_at
+                        FROM nostr_identities
+                        ORDER BY domain, local_part
+                        """
+                    ).fetchall()
+            except sqlite3.Error:
+                return []
+        records = [self._row_to_dict(row) for row in rows]
+        return deepcopy(records)
 
     async def add_identity(
         self,
@@ -133,21 +204,40 @@ class NostrIdentityStore:
         async with self._lock:
             normalized_local = self._norm(local_part)
             normalized_domain = self._norm(domain)
-            if self._has_conflict(normalized_local, normalized_domain):
-                raise IdentityConflictError("NIP-05 mapping already exists for this domain and local-part")
-            record = NostrIdentityRecord(
-                id=str(uuid4()),
-                local_part=normalized_local,
-                domain=normalized_domain,
-                npub=npub,
-                pubkey_hex=pubkey_hex,
-                relays=list(relays),
-                created_at=_now_iso(),
-                updated_at=_now_iso(),
-            )
-            self._records[record.id] = record
-            self._persist_locked()
-            return deepcopy(record.to_dict())
+            now_iso = _now_iso()
+            record = {
+                "id": str(uuid4()),
+                "local_part": normalized_local,
+                "domain": normalized_domain,
+                "npub": npub,
+                "pubkey_hex": pubkey_hex,
+                "relays": list(relays),
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            }
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO nostr_identities (
+                            id, local_part, domain, npub, pubkey_hex, relays, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            record["id"],
+                            record["local_part"],
+                            record["domain"],
+                            record["npub"],
+                            record["pubkey_hex"],
+                            json.dumps(record["relays"]),
+                            record["created_at"],
+                            record["updated_at"],
+                        ),
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise IdentityConflictError("NIP-05 mapping already exists for this domain and local-part") from exc
+        return deepcopy(record)
 
     async def update_identity(
         self,
@@ -160,35 +250,72 @@ class NostrIdentityStore:
         relays: List[str],
     ) -> Dict[str, Any]:
         async with self._lock:
-            if identity_id not in self._records:
-                raise IdentityNotFoundError(identity_id)
             normalized_local = self._norm(local_part)
             normalized_domain = self._norm(domain)
-            if self._has_conflict(normalized_local, normalized_domain, exclude_id=identity_id):
-                raise IdentityConflictError("NIP-05 mapping already exists for this domain and local-part")
-            record = self._records[identity_id]
-            record.local_part = normalized_local
-            record.domain = normalized_domain
-            record.npub = npub
-            record.pubkey_hex = pubkey_hex
-            record.relays = list(relays)
-            record.updated_at = _now_iso()
-            self._persist_locked()
-            return deepcopy(record.to_dict())
+            now_iso = _now_iso()
+            try:
+                with self._connect() as conn:
+                    result = conn.execute(
+                        """
+                        UPDATE nostr_identities
+                        SET local_part = ?, domain = ?, npub = ?, pubkey_hex = ?, relays = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            normalized_local,
+                            normalized_domain,
+                            npub,
+                            pubkey_hex,
+                            json.dumps(list(relays)),
+                            now_iso,
+                            identity_id,
+                        ),
+                    )
+                    if result.rowcount == 0:
+                        raise IdentityNotFoundError(identity_id)
+            except sqlite3.IntegrityError as exc:
+                raise IdentityConflictError("NIP-05 mapping already exists for this domain and local-part") from exc
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT id, local_part, domain, npub, pubkey_hex, relays, created_at, updated_at
+                        FROM nostr_identities
+                        WHERE id = ?
+                        """,
+                        (identity_id,),
+                    ).fetchone()
+            except sqlite3.Error as exc:  # pragma: no cover - defensive
+                raise IdentityNotFoundError(identity_id) from exc
+        if not row:
+            raise IdentityNotFoundError(identity_id)
+        return deepcopy(self._row_to_dict(row))
 
     async def delete_identity(self, identity_id: str) -> None:
         async with self._lock:
-            if identity_id not in self._records:
+            try:
+                with self._connect() as conn:
+                    result = conn.execute("DELETE FROM nostr_identities WHERE id = ?", (identity_id,))
+            except sqlite3.Error as exc:
+                raise IdentityNotFoundError(identity_id) from exc
+            if result.rowcount == 0:
                 raise IdentityNotFoundError(identity_id)
-            del self._records[identity_id]
-            self._persist_locked()
 
     async def get_by_domain(self, domain: str) -> List[Dict[str, Any]]:
         normalized_domain = self._norm(domain)
         async with self._lock:
-            results = [
-                record.to_dict()
-                for record in self._records.values()
-                if record.domain == normalized_domain
-            ]
-        return deepcopy(results)
+            try:
+                with self._connect() as conn:
+                    rows = conn.execute(
+                        """
+                        SELECT id, local_part, domain, npub, pubkey_hex, relays, created_at, updated_at
+                        FROM nostr_identities
+                        WHERE domain = ?
+                        ORDER BY local_part
+                        """,
+                        (normalized_domain,),
+                    ).fetchall()
+            except sqlite3.Error:
+                return []
+        records = [self._row_to_dict(row) for row in rows]
+        return deepcopy(records)

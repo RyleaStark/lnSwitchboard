@@ -25,6 +25,10 @@
             <span class="sidebar-icon icon-home" aria-hidden="true"></span>
             <span class="sidebar-label">Dashboard</span>
           </a>
+          <a class="sidebar-link" href="/invoices/" data-nav-item="invoices">
+            <span class="sidebar-icon icon-invoices" aria-hidden="true"></span>
+            <span class="sidebar-label">Invoices</span>
+          </a>
           <a class="sidebar-link" href="/liquidity/" data-nav-item="liquidity">
             <span class="sidebar-icon icon-liquidity" aria-hidden="true"></span>
             <span class="sidebar-label">Liquidity</span>
@@ -59,21 +63,77 @@
           <div>
             <p class="page-eyebrow">Overview</p>
             <h1>Dashboard</h1>
-            <p class="muted">Live glance at LNURL traffic across your domains.</p>
+            <p class="muted">Live pulse of sats ripping through your LNURL endpoints.</p>
           </div>
         </header>
 
         <main class="page-content">
-          <div class="card-grid metrics-grid">
-            <section class="card metric-card">
-              <div class="metric-label">Connected Domains</div>
-              <div class="metric-value" id="metric-domains">—</div>
-              <p class="muted">Unique domains forwarding traffic to lnSwitchboard.</p>
+          <div class="dashboard-metrics">
+            <section class="card metrics-intro">
+              <div>
+                <p class="card-eyebrow">Lightning Snapshot</p>
+                <h2>Track your routing flow without touching the terminal</h2>
+                <p class="muted">
+                  Real-time sats intel so you know when to spin up liquidity, throttle spam, or brag on Nostr.
+                </p>
+              </div>
+              <div class="metric-grid">
+                <article class="metric-card">
+                  <p class="metric-label">Connected Domains</p>
+                  <p class="metric-value" id="metric-domains">—</p>
+                  <small class="metric-subtext">Domains currently routing</small>
+                </article>
+                <article class="metric-card">
+                  <p class="metric-label">24h Requests</p>
+                  <p class="metric-value" id="metric-requests">—</p>
+                  <small class="metric-subtext">Fresh LNURL pings (24h)</small>
+                </article>
+                <article class="metric-card">
+                  <p class="metric-label">7 Day Requests</p>
+                  <p class="metric-value" id="metric-requests-7d">—</p>
+                  <small class="metric-subtext">Seven-day lightning pressure</small>
+                </article>
+                <article class="metric-card">
+                  <p class="metric-label">Invoices Generated</p>
+                  <p class="metric-value" id="metric-invoices-total">—</p>
+                  <small class="metric-subtext">Lifetime invoices minted</small>
+                </article>
+                <article class="metric-card">
+                  <p class="metric-label">Invoices Paid</p>
+                  <p class="metric-value" id="metric-invoices-paid">—</p>
+                  <small class="metric-subtext">All-time sats stacked</small>
+                </article>
+                <article class="metric-card">
+                  <p class="metric-label">Paid (24h)</p>
+                  <p class="metric-value" id="metric-invoices-paid24">—</p>
+                  <small class="metric-subtext">Cleared in the last 24h</small>
+                </article>
+                <article class="metric-card">
+                  <p class="metric-label">Total Sats Stacked</p>
+                  <p class="metric-value" id="metric-sats-total">—</p>
+                  <small class="metric-subtext">Cumulative routed haul</small>
+                </article>
+                <article class="metric-card">
+                  <p class="metric-label">Sats Stacked (7 days)</p>
+                  <p class="metric-value" id="metric-sats-7d">—</p>
+                  <small class="metric-subtext">Last 7 days of stacking</small>
+                </article>
+              </div>
             </section>
-            <section class="card metric-card">
-              <div class="metric-label">24h Requests</div>
-              <div class="metric-value" id="metric-requests">—</div>
-              <p class="muted">All LNURL requests served in the last 24 hours.</p>
+
+            <section class="card chart-card">
+              <div class="chart-card-header">
+                <div>
+                  <p class="card-eyebrow">Activity Trend</p>
+                  <h2>Sats stacked (14 days)</h2>
+                  <p class="muted">Two-week view of daily sats volume for the invoices you’ve actually settled.</p>
+                </div>
+                <a class="ghost-btn" href="/invoices/">View invoices</a>
+              </div>
+              <div class="chart-wrapper">
+                <canvas id="mixed-chart" height="220"></canvas>
+                <div class="chart-empty visible" id="mixed-chart-empty">No activity yet</div>
+              </div>
             </section>
           </div>
         </main>
@@ -91,6 +151,7 @@
       </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js" integrity="sha256-CN+kcwVxsjgQw0/DnFEBRh7K/KVsP5LK9IUFCcsVjzA=" crossorigin="anonymous"></script>
     <script src="/app.js" type="module"></script>
   </body>
 </html>

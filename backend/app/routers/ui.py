@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, Set
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
@@ -38,61 +37,6 @@ class MacaroonPayload(BaseModel):
     macaroon: str
 
 
-async def _refresh_invoice_statuses(entries: List[Dict[str, Any]], ln_client: LNClient) -> None:
-    pending: List[Tuple[Dict[str, Any], Dict[str, Any], bytes]] = []
-    for entry in entries:
-        if entry.get("event") != "invoice":
-            continue
-        details = entry.get("details")
-        if not isinstance(details, dict):
-            continue
-        payment_hash = details.get("payment_hash")
-        if not isinstance(payment_hash, str):
-            continue
-        invoice_info = details.get("invoice")
-        if not isinstance(invoice_info, dict):
-            invoice_info = {}
-        if invoice_info.get("settled") is True:
-            continue
-        try:
-            payment_hash_bytes = bytes.fromhex(payment_hash.strip())
-        except ValueError:
-            continue
-        pending.append((entry, invoice_info if isinstance(invoice_info, dict) else {}, payment_hash_bytes))
-
-    if not pending:
-        return
-
-    async def _lookup(payment_hash_bytes: bytes) -> Any:
-        try:
-            return await ln_client.lookup_invoice(payment_hash_bytes)
-        except Exception as exc:  # pragma: no cover - diagnostics only
-            return exc
-
-    results = await asyncio.gather(
-        *[_lookup(payment_hash_bytes) for _, _, payment_hash_bytes in pending]
-    )
-
-    for (entry, invoice_info, _), result in zip(pending, results):
-        if isinstance(result, Exception):
-            continue
-        settled = bool(result.get("settled"))
-        details = entry.setdefault("details", {})
-        invoice_details = invoice_info
-        invoice_details["settled"] = settled
-        if "state" in result and result["state"] is not None:
-            invoice_details["state"] = result["state"]
-        if "creation_date" in result and result["creation_date"] is not None:
-            invoice_details["creation_date"] = result["creation_date"]
-        if "expiry" in result and result["expiry"] is not None:
-            invoice_details["expiry"] = result["expiry"]
-        if "expires_at" in result and result["expires_at"] is not None:
-            invoice_details["expires_at"] = result["expires_at"]
-        if "is_expired" in result and result["is_expired"] is not None:
-            invoice_details["is_expired"] = result["is_expired"]
-        details["invoice"] = invoice_details
-
-
 def _parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -111,7 +55,6 @@ def _parse_timestamp(value: Any) -> datetime | None:
 async def recent_logs(
     storage: RequestLogStorage = Depends(get_log_storage_dep),
     settings: Settings = Depends(get_settings_dep),
-    ln_client: LNClient = Depends(get_ln_client_dep),
     q: str = Query("", description="Search query for filtering log entries."),
     page: int = Query(1, ge=1, description="1-based page number."),
     page_size: int = Query(
@@ -168,7 +111,6 @@ async def recent_logs(
     start = (current_page - 1) * page_size
     end = start + page_size
     page_items = filtered[start:end]
-    await _refresh_invoice_statuses(page_items, ln_client)
 
     return {
         "items": page_items,
@@ -182,14 +124,31 @@ async def recent_logs(
     }
 
 
+@router.get("/invoices")
+async def list_invoices(
+    storage: RequestLogStorage = Depends(get_log_storage_dep),
+    q: str = Query("", description="Search query for filtering invoices."),
+    page: int = Query(1, ge=1, description="1-based page number."),
+    page_size: int = Query(
+        10,
+        ge=1,
+        le=100,
+        description="Number of invoice entries per page.",
+    ),
+) -> Dict[str, Any]:
+    return await storage.list_invoice_events(page=page, page_size=page_size, query=q)
+
+
 @router.get("/stats/summary")
 async def stats_summary(
     storage: RequestLogStorage = Depends(get_log_storage_dep),
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     entries = await storage.get_recent()
     domains: Set[str] = set()
     cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+    cutoff_7d = datetime.now(tz=timezone.utc) - timedelta(days=7)
     requests_24h = 0
+    requests_7d = 0
 
     for entry in entries:
         domain = entry.get("domain")
@@ -201,10 +160,27 @@ async def stats_summary(
         ts = _parse_timestamp(entry.get("timestamp"))
         if ts and ts >= cutoff:
             requests_24h += 1
+        if ts and ts >= cutoff_7d:
+            requests_7d += 1
+
+    invoice_stats = await storage.get_invoice_summary()
+    sats_series = await storage.get_invoice_activity(days=14)
+    invoices_total = invoice_stats.get("invoices_total", 0)
+    invoices_paid = invoice_stats.get("invoices_paid", 0)
+    invoices_paid_24h = invoice_stats.get("invoices_paid_24h", 0)
+    total_sats = invoice_stats.get("sats_total_msat", 0) // 1000
+    sats_7d = invoice_stats.get("sats_7d_msat", 0) // 1000
 
     return {
         "connected_domains": len(domains),
         "requests_24h": requests_24h,
+        "requests_7d": requests_7d,
+        "invoices_total": invoices_total,
+        "invoices_paid": invoices_paid,
+        "invoices_paid_24h": invoices_paid_24h,
+        "total_sats_routed": total_sats,
+        "sats_routed_7d": sats_7d,
+        "invoice_activity": sats_series,
     }
 
 

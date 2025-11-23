@@ -54,14 +54,16 @@ def configure_env(tmp_path):
     macaroon.write_text("00", encoding="utf-8")
     tls = tmp_path / "tls.cert"
     tls.write_text("CERT")
-    log_path = tmp_path / "requests.log"
+    data_store_path = tmp_path / "lnswitchboard.db"
+    legacy_log_path = tmp_path / "requests.log"
     env_file = tmp_path / ".env"
     nip05_store = tmp_path / "nip05.json"
 
     os.environ["LND_HOST"] = "127.0.0.1"
     os.environ["LND_TLS_PATH"] = str(tls)
     os.environ["SERVICE_PORT"] = "22121"
-    os.environ["REQUEST_LOG_PATH"] = str(log_path)
+    os.environ["DATA_STORE_PATH"] = str(data_store_path)
+    os.environ["REQUEST_LOG_PATH"] = str(legacy_log_path)
     os.environ["LND_GRPC_PORT"] = "10009"
     os.environ["MACAROON_STORE_PATH"] = str(macaroon)
     os.environ["LNURL_COMMENT_MAX_LENGTH"] = "120"
@@ -70,8 +72,20 @@ def configure_env(tmp_path):
     os.environ["NIP05_STORE_PATH"] = str(nip05_store)
 
     config.get_settings.cache_clear()
+    from backend.app import deps
+
+    deps._get_log_storage.cache_clear()
+    deps._get_nip05_store.cache_clear()
+    deps._get_rate_limiter.cache_clear()
+    deps._get_ln_client.cache_clear()
+    deps._get_macaroon_store.cache_clear()
     yield
     config.get_settings.cache_clear()
+    deps._get_log_storage.cache_clear()
+    deps._get_nip05_store.cache_clear()
+    deps._get_rate_limiter.cache_clear()
+    deps._get_ln_client.cache_clear()
+    deps._get_macaroon_store.cache_clear()
 
 
 @pytest.fixture

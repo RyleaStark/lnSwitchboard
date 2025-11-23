@@ -2,26 +2,41 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
+from pathlib import Path
 
 from fastapi import Depends, HTTPException, Request, status
 
 from .config import Settings, get_settings
 from .ln_client import LNClient
+from .log_storage import LogEntry, RequestLogStorage
 from .macaroon_store import MacaroonStore
 from .nip05_store import NostrIdentityStore
-from .log_storage import LogEntry, RequestLogStorage
 from .rate_limiter import RateLimiter
 from .request_utils import get_client_ip, get_proxy_debug_info
+
+
+def _legacy_path(env_name: str, default: Path) -> Path:
+    raw_value = os.environ.get(env_name)
+    if raw_value and raw_value.strip():
+        candidate = Path(raw_value)
+    else:
+        candidate = default
+    return candidate.expanduser().resolve()
 
 
 @lru_cache()
 def _get_log_storage() -> RequestLogStorage:
     settings = get_settings()
+    legacy_path = _legacy_path("REQUEST_LOG_PATH", Path("logs/requests.log"))
+    if legacy_path == settings.data_store_path:
+        legacy_path = None
     return RequestLogStorage(
-        settings.log_path,
+        settings.data_store_path,
         max_recent=settings.recent_log_limit,
         retention_days=settings.log_retention_days,
+        legacy_log_path=legacy_path,
     )
 
 
@@ -40,7 +55,10 @@ def _get_macaroon_store() -> MacaroonStore:
 @lru_cache()
 def _get_nip05_store() -> NostrIdentityStore:
     settings = get_settings()
-    return NostrIdentityStore(settings.nip05_store_path)
+    legacy_path = _legacy_path("NIP05_STORE_PATH", Path("secrets/nip05_identities.json"))
+    if legacy_path == settings.data_store_path:
+        legacy_path = None
+    return NostrIdentityStore(settings.data_store_path, legacy_json_path=legacy_path)
 
 
 @lru_cache()

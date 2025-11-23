@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import sqlite3
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi.testclient import TestClient
 
-from ..app import config
+from ..app import config, deps
+from backend.app.invoice_worker import refresh_invoice_statuses
 
 
 def https_to_http(url: str) -> str:
@@ -17,6 +20,18 @@ def https_to_http(url: str) -> str:
     if parsed.scheme != "https":
         return url
     return urlunsplit(("http", parsed.netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def refresh_invoices_once():
+    storage = deps._get_log_storage()
+    ln_client = deps._get_ln_client()
+    asyncio.run(
+        refresh_invoice_statuses(
+            storage,
+            ln_client,
+            batch_size=100,
+        )
+    )
 
 
 def test_lnurl_metadata(test_client: TestClient):
@@ -131,6 +146,8 @@ def test_request_logs_mark_expired_invoices(test_client: TestClient):
     record["state"] = "CANCELED"
     record["is_expired"] = True
     record["expires_at"] = datetime.now(timezone.utc).isoformat()
+
+    refresh_invoices_once()
 
     logs_resp = test_client.get("/api/logs/recent", params={"page_size": 50})
     assert logs_resp.status_code == 200
@@ -549,6 +566,8 @@ def test_recent_logs_refreshes_invoice_status(test_client: TestClient):
     for record in invoice_store.values():
         record["settled"] = True
 
+    refresh_invoices_once()
+
     logs_resp = test_client.get("/api/logs/recent", params={"page_size": 50})
     assert logs_resp.status_code == 200
     payload = logs_resp.json()
@@ -568,6 +587,7 @@ def test_env_settings_get(test_client: TestClient):
     assert "RATE_LIMIT_PER_MIN" in keys
     assert "SERVICE_PORT" not in keys
     assert "REQUEST_LOG_PATH" not in keys
+    assert "DATA_STORE_PATH" not in keys
 
 
 def test_env_settings_update(test_client: TestClient):
@@ -614,3 +634,69 @@ def test_stats_summary_counts_recent_activity(test_client: TestClient):
     payload = stats_resp.json()
     assert payload["connected_domains"] == 1
     assert payload["requests_24h"] >= 2
+    assert payload["requests_7d"] >= payload["requests_24h"]
+    assert payload["invoices_total"] >= 1
+    assert payload["invoices_paid"] >= 0
+    assert payload["invoices_paid_24h"] >= 0
+    assert payload["total_sats_routed"] >= 0
+    assert payload["sats_routed_7d"] >= 0
+    series = payload.get("invoice_activity")
+    assert isinstance(series, list)
+    assert len(series) == 14
+    assert all("date" in entry and "sats" in entry and "paid" in entry for entry in series)
+
+
+def test_invoice_events_are_persisted(test_client: TestClient):
+    response = test_client.get(
+        "/.well-known/lnurlp/bones",
+        params={"amount": 2000},
+    )
+    assert response.status_code == 200
+    invoice_payload = response.json()
+    db_path = config.get_settings().data_store_path
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT username, domain, amount_msat, payment_hash, payment_request
+        FROM invoice_events
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row["username"] == "bones"
+    assert row["domain"] == "testserver"
+    assert row["amount_msat"] == 2000
+    assert row["payment_request"] == invoice_payload["pr"]
+    assert row["payment_hash"] == invoice_payload["verify"].split("/")[-1]
+
+
+def test_invoice_list_endpoint(test_client: TestClient):
+    response = test_client.get(
+        "/.well-known/lnurlp/bones",
+        params={"amount": 2100},
+    )
+    assert response.status_code == 200
+    invoice_payload = response.json()
+    refresh_invoices_once()
+
+    list_resp = test_client.get("/api/invoices", params={"page_size": 5})
+    assert list_resp.status_code == 200
+    payload = list_resp.json()
+    assert payload["total_items"] >= 1
+    first = payload["items"][0]
+    assert first["payment_request"] == invoice_payload["pr"]
+    assert first["payment_hash"] == invoice_payload["verify"].rsplit("/", 1)[-1]
+    assert first["status"] in {"pending", "settled", "expired"}
+    assert "details" in first
+    assert "settled_at" in first
+
+    search_resp = test_client.get(
+        "/api/invoices",
+        params={"q": "nonexistent-hash-fragment"},
+    )
+    assert search_resp.status_code == 200
+    search_payload = search_resp.json()
+    assert search_payload["total_items"] == 0
