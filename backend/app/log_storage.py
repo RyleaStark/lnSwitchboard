@@ -108,17 +108,14 @@ class RequestLogStorage:
         *,
         max_recent: int = 50,
         retention_days: int = 30,
-        legacy_log_path: Optional[Path] = None,
     ) -> None:
         self._path = path
-        self._legacy_log_path = legacy_log_path
         self._max_recent = max_recent
         self._retention_days = max(1, retention_days)
         self._recent: Deque[Dict[str, object]] = deque(maxlen=max_recent)
         self._lock = asyncio.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
-        self._maybe_import_legacy_logs()
         self._load_recent()
 
     def _connect(self) -> sqlite3.Connection:
@@ -191,68 +188,6 @@ class RequestLogStorage:
         for column, ddl in alterations.items():
             if column not in columns:
                 conn.execute(f"ALTER TABLE invoice_events ADD COLUMN {column} {ddl}")
-
-    def _maybe_import_legacy_logs(self) -> None:
-        legacy_path = self._legacy_log_path
-        if not legacy_path or legacy_path == self._path or not legacy_path.exists():
-            return
-        try:
-            with self._connect() as conn:
-                row = conn.execute("SELECT 1 FROM request_logs LIMIT 1").fetchone()
-                if row:
-                    return
-        except sqlite3.Error:
-            return
-        entries: List[Dict[str, Any]] = []
-        try:
-            with legacy_path.open("r", encoding="utf-8") as fp:
-                for line in fp:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        payload = json.loads(stripped)
-                    except json.JSONDecodeError:
-                        continue
-                    payload.setdefault("domain", None)
-                    entries.append(payload)
-        except OSError:
-            return
-        if not entries:
-            return
-        try:
-            with self._connect() as conn:
-                conn.executemany(
-                    """
-                    INSERT INTO request_logs (
-                        timestamp, username, ip, event, domain, amount_msat, status, message, details
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            entry.get("timestamp"),
-                            entry.get("username"),
-                            entry.get("ip"),
-                            entry.get("event"),
-                            entry.get("domain"),
-                            entry.get("amount_msat"),
-                            entry.get("status"),
-                            entry.get("message"),
-                            self._serialize_details(entry.get("details")),
-                        )
-                        for entry in entries
-                    ],
-                )
-        except sqlite3.Error:
-            return
-        try:
-            legacy_path.rename(legacy_path.with_suffix(f"{legacy_path.suffix or ''}.migrated"))
-        except OSError:
-            try:
-                legacy_path.unlink()
-            except OSError:
-                pass
 
     def _load_recent(self) -> None:
         try:

@@ -95,10 +95,7 @@ class Settings(BaseSettings):
     )
     recent_log_limit: int = _env_field(env="RECENT_LOG_LIMIT", default=50)
     log_retention_days: int = _env_field(env="LOG_RETENTION_DAYS", default=180)
-    data_store_path: Path = _env_field(
-        env=("DATA_STORE_PATH", "REQUEST_LOG_PATH", "NIP05_STORE_PATH"),
-        default=Path("data/lnswitchboard.db"),
-    )
+    data_store_path: Path = _env_field(env="DATA_STORE_PATH", default=Path("secrets/lnswitchboard.db"))
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     ui_poll_seconds: int = _env_field(env="UI_POLL_SECONDS", default=10)
     macaroon_store_path: Path = _env_field(env="MACAROON_STORE_PATH", default=Path("secrets/macaroon.hex"))

@@ -55,21 +55,17 @@ def configure_env(tmp_path):
     tls = tmp_path / "tls.cert"
     tls.write_text("CERT")
     data_store_path = tmp_path / "lnswitchboard.db"
-    legacy_log_path = tmp_path / "requests.log"
     env_file = tmp_path / ".env"
-    nip05_store = tmp_path / "nip05.json"
 
     os.environ["LND_HOST"] = "127.0.0.1"
     os.environ["LND_TLS_PATH"] = str(tls)
     os.environ["SERVICE_PORT"] = "22121"
     os.environ["DATA_STORE_PATH"] = str(data_store_path)
-    os.environ["REQUEST_LOG_PATH"] = str(legacy_log_path)
     os.environ["LND_GRPC_PORT"] = "10009"
     os.environ["MACAROON_STORE_PATH"] = str(macaroon)
     os.environ["LNURL_COMMENT_MAX_LENGTH"] = "120"
     os.environ["RATE_LIMIT_PER_MIN"] = "1000"
     os.environ["LNSWITCHBOARD_ENV_FILE"] = str(env_file)
-    os.environ["NIP05_STORE_PATH"] = str(nip05_store)
 
     config.get_settings.cache_clear()
     from backend.app import deps

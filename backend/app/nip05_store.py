@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from uuid import uuid4
 
 
@@ -69,13 +69,11 @@ class IdentityNotFoundError(KeyError):
 class NostrIdentityStore:
     """SQLite-backed identity registry with coarse locking."""
 
-    def __init__(self, path: Path, *, legacy_json_path: Optional[Path] = None) -> None:
+    def __init__(self, path: Path) -> None:
         self._path = path
-        self._legacy_json_path = legacy_json_path
         self._lock = asyncio.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
-        self._maybe_import_legacy()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
@@ -101,60 +99,6 @@ class NostrIdentityStore:
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_nostr_identity_lookup ON nostr_identities(local_part, domain)"
             )
-
-    def _maybe_import_legacy(self) -> None:
-        legacy_path = self._legacy_json_path
-        if not legacy_path or legacy_path == self._path or not legacy_path.exists():
-            return
-        try:
-            with self._connect() as conn:
-                row = conn.execute("SELECT 1 FROM nostr_identities LIMIT 1").fetchone()
-                if row:
-                    return
-        except sqlite3.Error:
-            return
-        try:
-            with legacy_path.open("r", encoding="utf-8") as fp:
-                payload = json.load(fp)
-        except (OSError, json.JSONDecodeError):
-            return
-        if not isinstance(payload, list):
-            return
-        records = [NostrIdentityRecord.from_dict(item) for item in payload if isinstance(item, dict)]
-        if not records:
-            return
-        try:
-            with self._connect() as conn:
-                conn.executemany(
-                    """
-                    INSERT INTO nostr_identities (
-                        id, local_part, domain, npub, pubkey_hex, relays, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            record.id,
-                            record.local_part,
-                            record.domain,
-                            record.npub,
-                            record.pubkey_hex,
-                            json.dumps(record.relays),
-                            record.created_at,
-                            record.updated_at,
-                        )
-                        for record in records
-                    ],
-                )
-        except sqlite3.Error:
-            return
-        try:
-            legacy_path.rename(legacy_path.with_suffix(f"{legacy_path.suffix or ''}.migrated"))
-        except OSError:
-            try:
-                legacy_path.unlink()
-            except OSError:
-                pass
 
     def _norm(self, value: str) -> str:
         return value.strip().lower()
