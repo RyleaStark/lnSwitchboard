@@ -675,6 +675,11 @@ class RequestLogStorage:
             except sqlite3.Error:
                 total = settled = settled_24h = 0
                 sats_total_msat = sats_7d_msat = 0
+        total = 0 if total is None else total
+        settled = 0 if settled is None else settled
+        settled_24h = 0 if settled_24h is None else settled_24h
+        sats_total_msat = 0 if sats_total_msat is None else sats_total_msat
+        sats_7d_msat = 0 if sats_7d_msat is None else sats_7d_msat
         return {
             "invoices_total": int(total),
             "invoices_paid": int(settled),
@@ -683,11 +688,15 @@ class RequestLogStorage:
             "sats_7d_msat": int(sats_7d_msat or 0),
         }
 
-    async def get_invoice_activity(self, days: int = 14) -> List[Dict[str, int]]:
+    async def get_invoice_activity(self, days: int = 14, tz_offset_minutes: int = 0) -> List[Dict[str, int]]:
         if days <= 0:
             return []
-        now = datetime.now(tz=timezone.utc)
-        start_dt = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        offset_minutes = int(tz_offset_minutes or 0)
+        offset_delta = timedelta(minutes=offset_minutes)
+        now_utc = datetime.now(tz=timezone.utc)
+        local_now = now_utc - offset_delta
+        local_start = (local_now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_dt = local_start + offset_delta
         start_iso = start_dt.isoformat()
         async with self._lock:
             try:
@@ -705,6 +714,7 @@ class RequestLogStorage:
                     ).fetchall()
             except sqlite3.Error:
                 rows = []
+        local_series_start_date = local_start.date()
         totals: Dict[str, int] = {}
         counts: Dict[str, int] = {}
         for row in rows:
@@ -715,15 +725,16 @@ class RequestLogStorage:
                 dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
             except ValueError:
                 continue
-            if dt.date() < start_dt.date():
+            local_dt = dt - offset_delta
+            if local_dt.date() < local_series_start_date:
                 continue
-            key = dt.date().isoformat()
+            key = local_dt.date().isoformat()
             amount_msat = row["amount_msat"] or 0
             totals[key] = totals.get(key, 0) + int(amount_msat)
             counts[key] = counts.get(key, 0) + 1
         series: List[Dict[str, int]] = []
         for offset in range(days):
-            day = (start_dt + timedelta(days=offset)).date().isoformat()
+            day = (local_start + timedelta(days=offset)).date().isoformat()
             sats = totals.get(day, 0) // 1000
             paid = counts.get(day, 0)
             series.append({"date": day, "sats": sats, "paid": paid})

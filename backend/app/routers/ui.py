@@ -142,6 +142,10 @@ async def list_invoices(
 @router.get("/stats/summary")
 async def stats_summary(
     storage: RequestLogStorage = Depends(get_log_storage_dep),
+    tz_offset_minutes: int = Query(
+        0,
+        description="Client timezone offset, matching Date.getTimezoneOffset().",
+    ),
 ) -> Dict[str, Any]:
     entries = await storage.get_recent()
     domains: Set[str] = set()
@@ -164,7 +168,7 @@ async def stats_summary(
             requests_7d += 1
 
     invoice_stats = await storage.get_invoice_summary()
-    sats_series = await storage.get_invoice_activity(days=14)
+    sats_series = await storage.get_invoice_activity(days=14, tz_offset_minutes=tz_offset_minutes)
     invoices_total = invoice_stats.get("invoices_total", 0)
     invoices_paid = invoice_stats.get("invoices_paid", 0)
     invoices_paid_24h = invoice_stats.get("invoices_paid_24h", 0)

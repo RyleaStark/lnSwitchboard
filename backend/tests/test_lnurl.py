@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi.testclient import TestClient
@@ -644,6 +644,78 @@ def test_stats_summary_counts_recent_activity(test_client: TestClient):
     assert isinstance(series, list)
     assert len(series) == 14
     assert all("date" in entry and "sats" in entry and "paid" in entry for entry in series)
+
+
+def test_stats_summary_invoice_activity_respects_timezone_offset(test_client: TestClient):
+    storage = deps._get_log_storage()
+
+    def insert_invoice(settled_at: datetime, amount_msat: int = 2000) -> None:
+        settled_iso = settled_at.isoformat()
+        payment_hash = hashlib.sha256(settled_iso.encode("utf-8")).hexdigest()
+        with storage._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO invoice_events (
+                    created_at,
+                    username,
+                    domain,
+                    ip,
+                    amount_msat,
+                    payment_hash,
+                    payment_request,
+                    details,
+                    request_log_id,
+                    settled,
+                    expired,
+                    last_checked_at,
+                    next_check_at,
+                    expires_at,
+                    settled_at,
+                    check_interval_seconds
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    settled_iso,
+                    "bones",
+                    "testserver",
+                    None,
+                    amount_msat,
+                    payment_hash,
+                    f"lnbc{amount_msat}n1ptest",
+                    None,
+                    None,
+                    1,
+                    0,
+                    settled_iso,
+                    settled_iso,
+                    None,
+                    settled_iso,
+                    60,
+                ),
+            )
+
+    now = datetime.now(tz=timezone.utc)
+    candidate = now.replace(hour=0, minute=30, second=0, microsecond=0)
+    if candidate > now:
+        candidate -= timedelta(days=1)
+    insert_invoice(candidate)
+
+    base_resp = test_client.get("/api/stats/summary")
+    assert base_resp.status_code == 200
+    base_series = base_resp.json()["invoice_activity"]
+    base_active = [entry for entry in base_series if entry["sats"] > 0 or entry["paid"] > 0]
+    assert len(base_active) == 1
+    assert base_active[0]["date"] == candidate.date().isoformat()
+
+    offset_minutes = 300  # UTC-5
+    offset_resp = test_client.get("/api/stats/summary", params={"tz_offset_minutes": offset_minutes})
+    assert offset_resp.status_code == 200
+    offset_series = offset_resp.json()["invoice_activity"]
+    offset_active = [entry for entry in offset_series if entry["sats"] > 0 or entry["paid"] > 0]
+    assert len(offset_active) == 1
+    expected_local_date = (candidate - timedelta(minutes=offset_minutes)).date().isoformat()
+    assert offset_active[0]["date"] == expected_local_date
 
 
 def test_invoice_events_are_persisted(test_client: TestClient):

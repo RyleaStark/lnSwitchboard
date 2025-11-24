@@ -733,7 +733,9 @@ async function fetchDashboardMetrics() {
     return;
   }
   try {
-    const response = await fetch(buildApiUrl("api/stats/summary"));
+    const summaryUrl = new URL(buildApiUrl("api/stats/summary"));
+    summaryUrl.searchParams.set("tz_offset_minutes", String(new Date().getTimezoneOffset()));
+    const response = await fetch(summaryUrl);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
