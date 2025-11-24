@@ -7,6 +7,7 @@ from functools import lru_cache
 from fastapi import Depends, HTTPException, Request, status
 
 from .config import Settings, get_settings
+from .ln_address_store import LNAddressStore
 from .ln_client import LNClient
 from .log_storage import LogEntry, RequestLogStorage
 from .macaroon_store import MacaroonStore
@@ -44,6 +45,12 @@ def _get_nip05_store() -> NostrIdentityStore:
 
 
 @lru_cache()
+def _get_ln_address_store() -> LNAddressStore:
+    settings = get_settings()
+    return LNAddressStore(settings.data_store_path)
+
+
+@lru_cache()
 def _get_ln_client() -> LNClient:
     settings = get_settings()
     return LNClient(
@@ -76,6 +83,10 @@ async def get_macaroon_store_dep() -> MacaroonStore:
 
 async def get_nip05_store_dep() -> NostrIdentityStore:
     return _get_nip05_store()
+
+
+async def get_ln_address_store_dep() -> LNAddressStore:
+    return _get_ln_address_store()
 
 
 async def enforce_rate_limit(

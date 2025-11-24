@@ -100,6 +100,34 @@ const identityDeleteMessage = document.getElementById("identity-delete-message")
 const identityDeleteConfirmBtn = document.getElementById("identity-delete-confirm");
 const identityDeleteCancelBtn = document.getElementById("identity-delete-cancel");
 const identityDeleteCloseBtn = document.getElementById("identity-delete-close");
+const addressTableBody = document.getElementById("address-table-body");
+const addressTablePlaceholder = document.getElementById("address-table-placeholder");
+const addressNewBtn = document.getElementById("address-new-btn");
+const addressSearchInput = document.getElementById("address-search");
+const addressModal = document.getElementById("address-modal");
+const addressModalCloseBtn = document.getElementById("address-modal-close");
+const addressForm = document.getElementById("address-form");
+const addressFormTitle = document.getElementById("address-form-title");
+const addressFormEyebrow = document.getElementById("address-form-eyebrow");
+const addressFormSubmit = document.getElementById("address-form-submit");
+const addressFormCancel = document.getElementById("address-form-cancel");
+const addressFormFeedback = document.getElementById("address-form-feedback");
+const addressLocalInput = document.getElementById("address-local-part");
+const addressDomainInput = document.getElementById("address-domain");
+const addressMinInput = document.getElementById("address-min-sats");
+const addressMaxInput = document.getElementById("address-max-sats");
+const addressMetadataInput = document.getElementById("address-metadata-template");
+const addressSuccessInput = document.getElementById("address-success-template");
+const addressDeleteModal = document.getElementById("address-delete-modal");
+const addressDeleteMessage = document.getElementById("address-delete-message");
+const addressDeleteConfirmBtn = document.getElementById("address-delete-confirm");
+const addressDeleteCancelBtn = document.getElementById("address-delete-cancel");
+const addressDeleteCloseBtn = document.getElementById("address-delete-close");
+const addressTable = addressTableBody ? addressTableBody.closest("table") : null;
+const ADDRESS_COLUMN_LABELS = addressTable
+  ? Array.from(addressTable.querySelectorAll("thead th")).map((th) => th.textContent.trim())
+  : [];
+const ADDRESS_COLUMN_COUNT = ADDRESS_COLUMN_LABELS.length || 4;
 const logsConfirmModal = document.getElementById("logs-confirm-modal");
 const logsConfirmMessage = document.getElementById("logs-confirm-message");
 const logsConfirmConfirmBtn = document.getElementById("logs-confirm-confirm");
@@ -139,6 +167,14 @@ const identityState = {
   searchQuery: "",
   pendingDeleteId: null,
 };
+let identityDataFetched = false;
+const addressState = {
+  items: [],
+  editingId: null,
+  formVisible: false,
+  searchQuery: "",
+  pendingDeleteId: null,
+};
 const SETTINGS_ROUTE = "/settings";
 const SETTINGS_URL = "/settings/";
 const NAV_KEYS_BY_PATH = new Map([
@@ -146,6 +182,8 @@ const NAV_KEYS_BY_PATH = new Map([
   ["/index.html", "dashboard"],
   ["/liquidity", "liquidity"],
   ["/liquidity/index.html", "liquidity"],
+  ["/addresses", "ln-addresses"],
+  ["/addresses/index.html", "ln-addresses"],
   ["/identities", "identities"],
   ["/identities/index.html", "identities"],
   ["/logs", "requests"],
@@ -310,6 +348,62 @@ function formatTimestamp(value) {
     } catch {
       return { display: iso, iso };
     }
+  }
+}
+
+const numberFormatter = typeof Intl !== "undefined" && Intl.NumberFormat ? new Intl.NumberFormat() : null;
+
+function formatNumber(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return value === null || value === undefined ? "" : String(value);
+  }
+  return numberFormatter ? numberFormatter.format(value) : String(value);
+}
+
+function normalizeApiErrorDetail(detail) {
+  if (!detail) {
+    return null;
+  }
+  if (typeof detail === "string") {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((entry) => {
+        if (!entry) {
+          return null;
+        }
+        if (typeof entry === "string") {
+          return entry;
+        }
+        if (typeof entry.msg === "string") {
+          return entry.msg;
+        }
+        if (typeof entry.message === "string") {
+          return entry.message;
+        }
+        if (typeof entry.detail === "string") {
+          return entry.detail;
+        }
+        return null;
+      })
+      .filter(Boolean);
+    if (messages.length) {
+      return messages.join("; ");
+    }
+  }
+  if (typeof detail === "object") {
+    if (typeof detail.message === "string") {
+      return detail.message;
+    }
+    if (typeof detail.detail === "string") {
+      return detail.detail;
+    }
+  }
+  try {
+    return JSON.stringify(detail);
+  } catch {
+    return String(detail);
   }
 }
 
@@ -1013,11 +1107,23 @@ function collectIdentityFormData() {
 }
 
 async function loadIdentityMappings() {
-  if (!identityTableBody) {
-    return;
-  }
   if (identityTablePlaceholder) {
     identityTablePlaceholder.textContent = "Loading mappings…";
+  }
+  try {
+    await fetchIdentityItems(true);
+    renderIdentityTable();
+  } catch (error) {
+    console.error("Failed to load NIP-05 identities", error);
+    if (identityTableBody) {
+      renderIdentityPlaceholder("Unable to load mappings right now.");
+    }
+  }
+}
+
+async function fetchIdentityItems(force = false) {
+  if (identityDataFetched && !force) {
+    return identityState.items;
   }
   try {
     const response = await fetch(buildApiUrl("api/nip05/identities"));
@@ -1027,10 +1133,14 @@ async function loadIdentityMappings() {
     const data = await response.json();
     const items = Array.isArray(data.items) ? data.items : [];
     identityState.items = sortIdentityItems(items);
-    renderIdentityTable();
+    identityDataFetched = true;
+    if (addressTableBody) {
+      renderAddressTable();
+    }
+    return identityState.items;
   } catch (error) {
-    console.error("Failed to load NIP-05 identities", error);
-    renderIdentityPlaceholder("Unable to load mappings right now.");
+    identityDataFetched = false;
+    throw error;
   }
 }
 
@@ -1044,11 +1154,17 @@ function upsertIdentityLocal(item) {
   }
   identityState.items = sortIdentityItems(items);
   renderIdentityTable();
+  if (addressTableBody) {
+    renderAddressTable();
+  }
 }
 
 function removeIdentityLocal(id) {
   identityState.items = identityState.items.filter((item) => item.id !== id);
   renderIdentityTable();
+  if (addressTableBody) {
+    renderAddressTable();
+  }
 }
 
 function setIdentityFormPending(pending) {
@@ -1171,6 +1287,488 @@ async function confirmIdentityDelete() {
       identityDeleteConfirmBtn.disabled = false;
     }
   }
+}
+
+function sortAddressItems(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return items
+    .slice()
+    .sort((a, b) => {
+      const domainCompare = (a.domain || "").localeCompare(b.domain || "");
+      if (domainCompare !== 0) {
+        return domainCompare;
+      }
+      return (a.local_part || "").localeCompare(b.local_part || "");
+    });
+}
+
+function getAddressIdentifier(item) {
+  if (!item) return "";
+  if (item.identifier) {
+    return item.identifier;
+  }
+  return `${item.local_part || ""}@${item.domain || ""}`;
+}
+
+function hasIdentityForAddress(localPart, domain) {
+  if (!localPart || !domain) return false;
+  const normalizedLocal = localPart.trim().toLowerCase();
+  const normalizedDomain = domain.trim().toLowerCase();
+  return identityState.items.some(
+    (identity) =>
+      identity &&
+      (identity.local_part || "").toLowerCase() === normalizedLocal &&
+      (identity.domain || "").toLowerCase() === normalizedDomain
+  );
+}
+
+function renderAddressPlaceholder(message) {
+  if (!addressTableBody) return;
+  const row = document.createElement("tr");
+  const cell = document.createElement("td");
+  cell.colSpan = ADDRESS_COLUMN_COUNT;
+  cell.className = "placeholder";
+  cell.textContent = message;
+  row.appendChild(cell);
+  addressTableBody.innerHTML = "";
+  addressTableBody.appendChild(row);
+}
+
+function createAddressHandleCell(item) {
+  const cell = document.createElement("td");
+  const wrapper = document.createElement("div");
+  wrapper.className = "address-handle";
+  const label = document.createElement("p");
+  label.className = "address-handle-label";
+  label.textContent = getAddressIdentifier(item);
+  wrapper.appendChild(label);
+  if (hasIdentityForAddress(item.local_part, item.domain)) {
+    const badge = document.createElement("span");
+    badge.className = "address-badge";
+    badge.textContent = "Nostr identity linked";
+    wrapper.appendChild(badge);
+  }
+  if (item.tag) {
+    const tagLine = document.createElement("p");
+    tagLine.className = "address-handle-domain";
+    tagLine.textContent = `Tag: ${item.tag}`;
+    wrapper.appendChild(tagLine);
+  }
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+function createAddressLimitsCell(item) {
+  const cell = document.createElement("td");
+  const wrapper = document.createElement("div");
+  wrapper.className = "address-limits";
+  const minLine = document.createElement("span");
+  const minValue = typeof item.min_sats === "number" ? `${formatNumber(item.min_sats)} sats` : "Global minimum";
+  minLine.innerHTML = `<span class="address-limit-label">Min:</span> <span class="address-limit-highlight">${minValue}</span>`;
+  wrapper.appendChild(minLine);
+  const maxLine = document.createElement("span");
+  const maxValue = typeof item.max_sats === "number" ? `${formatNumber(item.max_sats)} sats` : "Channel max";
+  maxLine.innerHTML = `<span class="address-limit-label">Max:</span> <span class="address-limit-highlight">${maxValue}</span>`;
+  wrapper.appendChild(maxLine);
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+function summarizeTemplate(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized || "Inherits global default";
+}
+
+function createAddressTemplatesCell(item) {
+  const cell = document.createElement("td");
+  const wrapper = document.createElement("div");
+  wrapper.className = "address-templates";
+  const metadataLine = document.createElement("div");
+  metadataLine.className = "address-template-line";
+  const metadataLabel = document.createElement("span");
+  metadataLabel.className = "address-template-label";
+  metadataLabel.textContent = "Metadata";
+  const metadataValue = document.createElement("span");
+  metadataValue.className = "address-template-value";
+  metadataValue.textContent = summarizeTemplate(item.metadata_description);
+  metadataLine.appendChild(metadataLabel);
+  metadataLine.appendChild(metadataValue);
+  const successLine = document.createElement("div");
+  successLine.className = "address-template-line";
+  const successLabel = document.createElement("span");
+  successLabel.className = "address-template-label";
+  successLabel.textContent = "Success";
+  const successValue = document.createElement("span");
+  successValue.className = "address-template-value";
+  successValue.textContent = summarizeTemplate(item.success_message);
+  successLine.appendChild(successLabel);
+  successLine.appendChild(successValue);
+  wrapper.appendChild(metadataLine);
+  wrapper.appendChild(successLine);
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+function createAddressActionsCell(item) {
+  const cell = document.createElement("td");
+  cell.className = "address-actions-col";
+  const wrapper = document.createElement("div");
+  wrapper.className = "address-actions";
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "address-action-btn";
+  editBtn.textContent = "Edit";
+  editBtn.addEventListener("click", () => handleAddressEdit(item.id));
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "address-action-btn";
+  deleteBtn.textContent = "Delete";
+  deleteBtn.addEventListener("click", () => handleAddressDelete(item.id));
+  wrapper.appendChild(editBtn);
+  wrapper.appendChild(deleteBtn);
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+function getDisplayAddressItems() {
+  const items = Array.isArray(addressState.items) ? addressState.items : [];
+  const query = (addressState.searchQuery || "").trim().toLowerCase();
+  if (!query) {
+    return sortAddressItems(items);
+  }
+  const filtered = items.filter((item) => {
+    const identifier = getAddressIdentifier(item).toLowerCase();
+    const domain = (item.domain || "").toLowerCase();
+    const metadata = (item.metadata_description || "").toLowerCase();
+    const success = (item.success_message || "").toLowerCase();
+    const min = typeof item.min_sats === "number" ? String(item.min_sats) : "";
+    const max = typeof item.max_sats === "number" ? String(item.max_sats) : "";
+    return (
+      identifier.includes(query) ||
+      domain.includes(query) ||
+      metadata.includes(query) ||
+      success.includes(query) ||
+      min.includes(query) ||
+      max.includes(query)
+    );
+  });
+  return sortAddressItems(filtered);
+}
+
+function renderAddressTable() {
+  if (!addressTableBody) return;
+  const rows = getDisplayAddressItems();
+  if (!rows.length) {
+    const emptyMessage = addressState.searchQuery
+      ? "No LN Addresses match your search."
+      : "No LN Addresses yet. Click “Add Address” to create your first one.";
+    renderAddressPlaceholder(emptyMessage);
+    return;
+  }
+  addressTableBody.innerHTML = "";
+  rows.forEach((item) => {
+    const row = document.createElement("tr");
+    const cells = [
+      createAddressHandleCell(item),
+      createAddressLimitsCell(item),
+      createAddressTemplatesCell(item),
+      createAddressActionsCell(item),
+    ];
+    cells.forEach((cell, index) => {
+      applyStackableLabel(cell, ADDRESS_COLUMN_LABELS[index]);
+      row.appendChild(cell);
+    });
+    addressTableBody.appendChild(row);
+  });
+}
+
+function setAddressFormFeedback(message, isError = false) {
+  if (!addressFormFeedback) return;
+  addressFormFeedback.textContent = message || "";
+  addressFormFeedback.style.color = isError ? "#f87171" : "#34d399";
+}
+
+function sanitizeAddressLocal(value) {
+  if (typeof value !== "string") return "";
+  return value.trim().toLowerCase();
+}
+
+function resetAddressForm() {
+  addressForm?.reset();
+}
+
+function setAddressFormVisible(visible) {
+  addressState.formVisible = Boolean(visible);
+  if (!addressModal) return;
+  addressModal.classList.toggle("hidden", !visible);
+  addressModal.classList.toggle("visible", visible);
+  if (!visible) {
+    addressState.editingId = null;
+    setAddressFormFeedback("");
+    resetAddressForm();
+  } else if (addressLocalInput) {
+    addressLocalInput.focus();
+  }
+  updateBodyModalState();
+}
+
+function openAddressCreateForm() {
+  if (addressFormTitle) {
+    addressFormTitle.textContent = "Add LN address";
+  }
+  if (addressFormEyebrow) {
+    addressFormEyebrow.textContent = "Create";
+  }
+  if (addressFormSubmit) {
+    addressFormSubmit.textContent = "Create Override";
+    addressFormSubmit.disabled = false;
+  }
+  addressState.editingId = null;
+  resetAddressForm();
+  setAddressFormFeedback("");
+  setAddressFormVisible(true);
+}
+
+function openAddressEditForm(item) {
+  if (!item) return;
+  addressState.editingId = item.id;
+  if (addressFormTitle) {
+    addressFormTitle.textContent = `Edit ${getAddressIdentifier(item)}`;
+  }
+  if (addressFormEyebrow) {
+    addressFormEyebrow.textContent = "Edit";
+  }
+  if (addressFormSubmit) {
+    addressFormSubmit.textContent = "Save changes";
+    addressFormSubmit.disabled = false;
+  }
+  if (addressLocalInput) {
+    addressLocalInput.value = item.local_part || "";
+  }
+  if (addressDomainInput) {
+    addressDomainInput.value = item.domain || "";
+  }
+  if (addressMinInput) {
+    addressMinInput.value = typeof item.min_sats === "number" ? String(item.min_sats) : "";
+  }
+  if (addressMaxInput) {
+    addressMaxInput.value = typeof item.max_sats === "number" ? String(item.max_sats) : "";
+  }
+  if (addressMetadataInput) {
+    addressMetadataInput.value = item.metadata_description || "";
+  }
+  if (addressSuccessInput) {
+    addressSuccessInput.value = item.success_message || "";
+  }
+  setAddressFormFeedback("");
+  setAddressFormVisible(true);
+}
+
+function collectAddressFormData() {
+  const localPart = sanitizeAddressLocal(addressLocalInput?.value || "");
+  const domain = normalizeDomainInput(addressDomainInput?.value || "");
+  const minRaw = addressMinInput?.value.trim() || "";
+  const maxRaw = addressMaxInput?.value.trim() || "";
+  const metadata = addressMetadataInput?.value.trim() || "";
+  const success = addressSuccessInput?.value.trim() || "";
+  if (!localPart || !domain) {
+    setAddressFormFeedback("Local-part and domain are required.", true);
+    return null;
+  }
+  let minSats = null;
+  let maxSats = null;
+  if (minRaw) {
+    const parsed = Number(minRaw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setAddressFormFeedback("Minimum sats must be a positive number.", true);
+      return null;
+    }
+    minSats = Math.floor(parsed);
+  }
+  if (maxRaw) {
+    const parsed = Number(maxRaw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setAddressFormFeedback("Maximum sats must be a positive number.", true);
+      return null;
+    }
+    maxSats = Math.floor(parsed);
+  }
+  if (minSats !== null && maxSats !== null && maxSats < minSats) {
+    setAddressFormFeedback("Maximum sats must be greater than or equal to the minimum.", true);
+    return null;
+  }
+  return {
+    local_part: localPart,
+    domain,
+    min_sats: minSats,
+    max_sats: maxSats,
+    metadata_description: metadata || null,
+    success_message: success || null,
+  };
+}
+
+function setAddressFormPending(pending) {
+  if (!addressFormSubmit) return;
+  const isEdit = Boolean(addressState.editingId);
+  if (pending) {
+    addressFormSubmit.disabled = true;
+    addressFormSubmit.textContent = isEdit ? "Saving…" : "Creating…";
+  } else {
+    addressFormSubmit.disabled = false;
+    addressFormSubmit.textContent = isEdit ? "Save changes" : "Create Override";
+  }
+}
+
+async function submitAddressForm(event) {
+  event.preventDefault();
+  if (!addressForm) return;
+  const payload = collectAddressFormData();
+  if (!payload) {
+    return;
+  }
+  const editingId = addressState.editingId;
+  const method = editingId ? "PUT" : "POST";
+  const endpoint = editingId ? `api/lnaddresses/${editingId}` : "api/lnaddresses";
+  setAddressFormPending(true);
+  setAddressFormFeedback("");
+  try {
+    const response = await fetch(buildApiUrl(endpoint), {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = normalizeApiErrorDetail(data.detail) || "Unable to save LN address.";
+      throw new Error(detail);
+    }
+    if (data.item) {
+      upsertAddressLocal(data.item);
+    }
+    setAddressFormVisible(false);
+  } catch (error) {
+    setAddressFormFeedback(error.message || "Failed to save LN address.", true);
+  } finally {
+    setAddressFormPending(false);
+  }
+}
+
+async function fetchAddresses() {
+  if (!addressTableBody) {
+    return;
+  }
+  if (addressTablePlaceholder) {
+    addressTablePlaceholder.textContent = "Loading addresses…";
+  }
+  try {
+    const response = await fetch(buildApiUrl("api/lnaddresses"));
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    addressState.items = sortAddressItems(items);
+    renderAddressTable();
+  } catch (error) {
+    console.error("Failed to load LN addresses", error);
+    renderAddressPlaceholder("Unable to load LN addresses right now.");
+  }
+}
+
+function upsertAddressLocal(item) {
+  const items = Array.isArray(addressState.items) ? addressState.items.slice() : [];
+  const index = items.findIndex((entry) => entry.id === item.id);
+  if (index >= 0) {
+    items[index] = item;
+  } else {
+    items.push(item);
+  }
+  addressState.items = sortAddressItems(items);
+  renderAddressTable();
+}
+
+function removeAddressLocal(id) {
+  addressState.items = addressState.items.filter((item) => item.id !== id);
+  renderAddressTable();
+}
+
+function handleAddressEdit(addressId) {
+  const entry = addressState.items.find((item) => item.id === addressId);
+  if (!entry) return;
+  openAddressEditForm(entry);
+}
+
+function handleAddressDelete(addressId) {
+  const entry = addressState.items.find((item) => item.id === addressId);
+  if (!entry) return;
+  openAddressDeleteModal(entry);
+}
+
+function setAddressDeleteVisible(visible) {
+  if (!addressDeleteModal) return;
+  addressDeleteModal.classList.toggle("hidden", !visible);
+  addressDeleteModal.classList.toggle("visible", visible);
+  if (!visible) {
+    addressState.pendingDeleteId = null;
+    if (addressDeleteConfirmBtn) {
+      const defaultText = addressDeleteConfirmBtn.dataset.defaultText || "Delete LN Address";
+      addressDeleteConfirmBtn.textContent = defaultText;
+      addressDeleteConfirmBtn.disabled = false;
+    }
+  }
+  updateBodyModalState();
+}
+
+function openAddressDeleteModal(entry) {
+  addressState.pendingDeleteId = entry.id;
+  if (addressDeleteMessage) {
+    addressDeleteMessage.textContent = `Remove ${getAddressIdentifier(entry)} from LN Addresses? This stops any custom limits, templates, or future webhooks.`;
+  }
+  if (addressDeleteConfirmBtn) {
+    const defaultText = addressDeleteConfirmBtn.dataset.defaultText || "Delete LN Address";
+    addressDeleteConfirmBtn.textContent = defaultText;
+    addressDeleteConfirmBtn.disabled = false;
+  }
+  setAddressDeleteVisible(true);
+}
+
+async function confirmAddressDelete() {
+  const addressId = addressState.pendingDeleteId;
+  if (!addressId) {
+    return;
+  }
+  if (addressDeleteConfirmBtn) {
+    addressDeleteConfirmBtn.disabled = true;
+    addressDeleteConfirmBtn.textContent = "Deleting…";
+  }
+  try {
+    const response = await fetch(buildApiUrl(`api/lnaddresses/${addressId}`), {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    removeAddressLocal(addressId);
+    setAddressDeleteVisible(false);
+  } catch (error) {
+    window.alert("Failed to delete LN address. Please retry.");
+    if (addressDeleteConfirmBtn) {
+      const defaultText = addressDeleteConfirmBtn.dataset.defaultText || "Delete LN Address";
+      addressDeleteConfirmBtn.textContent = defaultText;
+      addressDeleteConfirmBtn.disabled = false;
+    }
+  }
+}
+
+function handleAddressSearchInput(event) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
+  addressState.searchQuery = target.value || "";
+  renderAddressTable();
 }
 
 function setLogsConfirmVisible(visible) {
@@ -2326,6 +2924,54 @@ document.addEventListener("DOMContentLoaded", () => {
   if (identityDeleteConfirmBtn) {
     identityDeleteConfirmBtn.addEventListener("click", confirmIdentityDelete);
   }
+  if (addressTableBody) {
+    fetchAddresses();
+    fetchIdentityItems()
+      .then(() => {
+        renderAddressTable();
+      })
+      .catch((error) => {
+        console.error("Failed to fetch identity data for LN Addresses", error);
+      });
+  }
+  if (addressNewBtn) {
+    addressNewBtn.addEventListener("click", openAddressCreateForm);
+  }
+  if (addressSearchInput) {
+    addressSearchInput.addEventListener("input", handleAddressSearchInput);
+  }
+  if (addressForm) {
+    addressForm.addEventListener("submit", submitAddressForm);
+  }
+  if (addressFormCancel) {
+    addressFormCancel.addEventListener("click", () => setAddressFormVisible(false));
+  }
+  if (addressModalCloseBtn) {
+    addressModalCloseBtn.addEventListener("click", () => setAddressFormVisible(false));
+  }
+  if (addressModal) {
+    addressModal.addEventListener("click", (event) => {
+      if (event.target instanceof HTMLElement && event.target.dataset.close === "address-modal") {
+        setAddressFormVisible(false);
+      }
+    });
+  }
+  if (addressDeleteCancelBtn) {
+    addressDeleteCancelBtn.addEventListener("click", () => setAddressDeleteVisible(false));
+  }
+  if (addressDeleteCloseBtn) {
+    addressDeleteCloseBtn.addEventListener("click", () => setAddressDeleteVisible(false));
+  }
+  if (addressDeleteModal) {
+    addressDeleteModal.addEventListener("click", (event) => {
+      if (event.target instanceof HTMLElement && event.target.dataset.close === "address-delete") {
+        setAddressDeleteVisible(false);
+      }
+    });
+  }
+  if (addressDeleteConfirmBtn) {
+    addressDeleteConfirmBtn.addEventListener("click", confirmAddressDelete);
+  }
   if (logsConfirmCancelBtn) {
     logsConfirmCancelBtn.addEventListener("click", () => setLogsConfirmVisible(false));
   }
@@ -2415,6 +3061,14 @@ document.addEventListener("keydown", (event) => {
     }
     if (identityModal?.classList.contains("visible")) {
       setIdentityFormVisible(false);
+      return;
+    }
+    if (addressDeleteModal?.classList.contains("visible")) {
+      setAddressDeleteVisible(false);
+      return;
+    }
+    if (addressModal?.classList.contains("visible")) {
+      setAddressFormVisible(false);
       return;
     }
     if (invoiceDetailsModal?.classList.contains("visible")) {

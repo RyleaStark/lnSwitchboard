@@ -86,7 +86,7 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "label": "Metadata Description",
         "type": "text",
         "category": "LNURL",
-        "description": "Text used in invoice memos/LNURL metadata. Use {ln_address} to insert the payer address.",
+        "description": "Text used in invoice memos/LNURL metadata. Supports {ln_address}, {local_part}, {domain}, and {tag}.",
         "editable": True,
     },
     {
@@ -95,7 +95,7 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "label": "Success Message",
         "type": "textarea",
         "category": "LNURL",
-        "description": "Message returned in successAction (use {ln_address} for the recipient).",
+        "description": "Message returned in successAction. Supports the metadata variables plus {amount_sat} once a payment is requested.",
         "editable": True,
     },
     {

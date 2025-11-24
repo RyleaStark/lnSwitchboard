@@ -72,6 +72,7 @@ def configure_env(tmp_path):
 
     deps._get_log_storage.cache_clear()
     deps._get_nip05_store.cache_clear()
+    deps._get_ln_address_store.cache_clear()
     deps._get_rate_limiter.cache_clear()
     deps._get_ln_client.cache_clear()
     deps._get_macaroon_store.cache_clear()
@@ -79,6 +80,7 @@ def configure_env(tmp_path):
     config.get_settings.cache_clear()
     deps._get_log_storage.cache_clear()
     deps._get_nip05_store.cache_clear()
+    deps._get_ln_address_store.cache_clear()
     deps._get_rate_limiter.cache_clear()
     deps._get_ln_client.cache_clear()
     deps._get_macaroon_store.cache_clear()

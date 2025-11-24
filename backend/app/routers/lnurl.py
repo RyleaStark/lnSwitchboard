@@ -14,11 +14,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from ..config import Settings, parse_payer_data_config
 from ..deps import (
     enforce_rate_limit,
+    get_ln_address_store_dep,
     get_ln_client_dep,
     get_log_storage_dep,
     get_macaroon_store_dep,
     get_settings_dep,
 )
+from ..ln_address_store import LNAddressStore
 from ..ln_client import LNClient
 from ..log_storage import LogEntry, RequestLogStorage
 from ..macaroon_store import MacaroonNotConfiguredError, MacaroonStore
@@ -27,17 +29,6 @@ from ..request_utils import build_public_url, get_client_ip, get_proxy_debug_inf
 
 router = APIRouter(prefix="/.well-known/lnurlp", tags=["lnurl"])
 logger = logging.getLogger(__name__)
-
-
-def _metadata_description(settings: Settings, username: str, domain: str) -> str:
-    ln_address = f"{username}@{domain}"
-    template = settings.metadata_description or ""
-    template = template.strip()
-    if "{ln_address}" in template:
-        return template.replace("{ln_address}", ln_address).strip()
-    if template:
-        return f"{template} {ln_address}"
-    return ln_address
 
 
 def _build_metadata(
@@ -159,6 +150,92 @@ def _resolve_payer_data_request(settings: Settings) -> Dict[str, Dict[str, bool]
     return {field: {"mandatory": mandatory} for field, mandatory in config_data.items()}
 
 
+class _TemplateDict(dict):
+    def __missing__(self, key):
+        return f"{{{key}}}"
+
+
+def _format_template(template: str, context: Dict[str, Any]) -> str:
+    prepared = {
+        key: ("" if value is None else value)
+        for key, value in context.items()
+    }
+    safe_context = _TemplateDict(prepared)
+    try:
+        return template.format_map(safe_context).strip()
+    except Exception:
+        return template.strip()
+
+
+def _build_template_context(
+    *,
+    raw_username: str,
+    domain: str,
+    ln_address: str,
+    min_sat: int,
+    max_sat: int,
+    channel_max_sat: int,
+    amount_msat: Optional[int] = None,
+) -> Dict[str, Any]:
+    base, tag = _split_username_tag(raw_username)
+    amount_sat = amount_msat // 1000 if amount_msat is not None else None
+    return {
+        "username": raw_username,
+        "local_part": base,
+        "tag": tag or "",
+        "domain": domain,
+        "ln_address": ln_address,
+        "amount_sat": amount_sat,
+    }
+
+
+def _resolve_metadata_description(
+    *,
+    settings: Settings,
+    override_template: Optional[str],
+    context: Dict[str, Any],
+) -> str:
+    template = (override_template or settings.metadata_description or "").strip()
+    if not template:
+        return context["ln_address"]
+    rendered = _format_template(template, context) or context["ln_address"]
+    if "{ln_address}" not in template and context["ln_address"] not in rendered:
+        rendered = f"{rendered} {context['ln_address']}".strip()
+    return rendered
+
+
+def _resolve_success_message(
+    *,
+    settings: Settings,
+    override_template: Optional[str],
+    context: Dict[str, Any],
+) -> str:
+    template = (override_template or settings.success_message or "").strip()
+    if not template:
+        template = "{ln_address} stacked your sats!"
+    rendered = _format_template(template, context) or context["ln_address"]
+    if len(rendered) > 144:
+        rendered = f"{context['ln_address']} stacked your sats!"
+    return rendered
+
+
+async def _lookup_address_override(
+    store: LNAddressStore,
+    *,
+    username: str,
+    domain: str,
+) -> Optional[Dict[str, Any]]:
+    normalized_domain = domain.strip().lower()
+    normalized_username = username.strip().lower()
+    exact = await store.get_by_identifier(local_part=normalized_username, domain=normalized_domain)
+    if exact:
+        return exact
+    base, tag = _split_username_tag(normalized_username)
+    if tag:
+        return await store.get_by_identifier(local_part=base, domain=normalized_domain)
+    return None
+
+
 @router.get("/{username}", name="lnurlp")
 async def lnurl_pay(
     request: Request,
@@ -179,6 +256,7 @@ async def lnurl_pay(
     settings: Settings = Depends(get_settings_dep),
     ln_client: LNClient = Depends(get_ln_client_dep),
     storage: RequestLogStorage = Depends(get_log_storage_dep),
+    address_store: LNAddressStore = Depends(get_ln_address_store_dep),
     macaroon_store: MacaroonStore = Depends(get_macaroon_store_dep),
 ) -> Dict[str, Any]:
     raw_username = username.strip()
@@ -194,8 +272,58 @@ async def lnurl_pay(
     callback_http_url = build_public_url(request)
     domain = _extract_domain(callback_http_url)
     ln_address = f"{raw_username}@{domain}"
-    memo = _metadata_description(settings, raw_username, domain)
+    override = await _lookup_address_override(
+        address_store,
+        username=raw_username,
+        domain=domain,
+    )
+    override_min_sat = override.get("min_sendable_sat") if override else None
+    override_max_sat = override.get("max_sendable_sat") if override else None
+    override_metadata = override.get("metadata_description") if override else None
+    override_success = override.get("success_message") if override else None
     long_description = _resolve_long_description(settings)
+    payer_data_request = _resolve_payer_data_request(settings)
+    if payer_data_request:
+        base_payer_data = payer_data_request
+    else:
+        base_payer_data = None
+
+    query_params = dict(request.query_params)
+    callback_lnurl = _make_lnurlp(callback_http_url)
+
+    channel_max_sendable_sat = await _channel_max_sendable_sat(ln_client)
+    if channel_max_sendable_sat <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No inbound liquidity available",
+        )
+    min_sendable_sat = override_min_sat if override_min_sat is not None else settings.min_sendable_sat
+    min_sendable_sat = max(1, min_sendable_sat)
+    if channel_max_sendable_sat < min_sendable_sat:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Inbound liquidity below configured minimum send amount",
+        )
+
+    max_sendable_sat = channel_max_sendable_sat
+    if override_max_sat is not None:
+        max_sendable_sat = min(channel_max_sendable_sat, override_max_sat)
+    if max_sendable_sat < min_sendable_sat:
+        max_sendable_sat = min_sendable_sat
+
+    memo_context = _build_template_context(
+        raw_username=raw_username,
+        domain=domain,
+        ln_address=ln_address,
+        min_sat=min_sendable_sat,
+        max_sat=max_sendable_sat,
+        channel_max_sat=channel_max_sendable_sat,
+    )
+    memo = _resolve_metadata_description(
+        settings=settings,
+        override_template=override_metadata,
+        context=memo_context,
+    )
     metadata = _build_metadata(
         memo,
         ln_address,
@@ -203,9 +331,8 @@ async def lnurl_pay(
         tag,
         long_description,
     )
+    metadata_entries = json.loads(metadata)
     base_metadata_hash = hashlib.sha256(metadata.encode("utf-8")).digest()
-    query_params = dict(request.query_params)
-    callback_lnurl = _make_lnurlp(callback_http_url)
     base_details: Dict[str, Any] = {
         "callback": callback_http_url,
         "callback_lnurl": callback_lnurl,
@@ -215,33 +342,31 @@ async def lnurl_pay(
         "metadata": metadata,
         "metadata_hash": base_metadata_hash.hex(),
         "ln_address": ln_address,
-        "metadata_entries": json.loads(metadata),
+        "metadata_entries": metadata_entries,
         "metadata_long_desc": long_description,
         "comment_allowed": settings.comment_max_length,
+        "username_raw": raw_username,
     }
     if tag:
         base_details["tag"] = tag
-    base_details["username_raw"] = raw_username
     if query_params:
         base_details["query"] = query_params
+    if base_payer_data:
+        base_details["payer_data"] = base_payer_data
+    if override:
+        base_details["address_override"] = {
+            "id": override.get("id"),
+            "local_part": override.get("local_part"),
+            "domain": override.get("domain"),
+        }
+    base_details["limits"] = {
+        "min_sat": min_sendable_sat,
+        "max_sat": max_sendable_sat,
+        "channel_max_sat": channel_max_sendable_sat,
+    }
 
-    payer_data_request = _resolve_payer_data_request(settings)
-    if payer_data_request:
-        base_details["payer_data"] = payer_data_request
-
-    channel_max_sendable_sat = await _channel_max_sendable_sat(ln_client)
-    if channel_max_sendable_sat <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No inbound liquidity available",
-        )
-    if channel_max_sendable_sat < settings.min_sendable_sat:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Inbound liquidity below configured minimum send amount",
-        )
-
-    max_sendable_msat = channel_max_sendable_sat * 1000
+    max_sendable_msat = max_sendable_sat * 1000
+    min_sendable_msat = min_sendable_sat * 1000
     base_details["channel_max_sendable_sat"] = channel_max_sendable_sat
 
     if amount is None:
@@ -249,12 +374,12 @@ async def lnurl_pay(
             "tag": "payRequest",
             "callback": callback_http_url,
             "maxSendable": max_sendable_msat,
-            "minSendable": settings.min_sendable_sat * 1000,
+            "minSendable": min_sendable_msat,
             "metadata": metadata,
             "commentAllowed": settings.comment_max_length,
         }
-        if payer_data_request:
-            resp["payerData"] = payer_data_request
+        if base_payer_data:
+            resp["payerData"] = base_payer_data
         details = dict(base_details)
         details["response"] = resp
         await storage.append(
@@ -272,7 +397,7 @@ async def lnurl_pay(
     if amount <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount must be positive")
 
-    if amount < settings.min_sendable_sat * 1000 or amount > max_sendable_msat:
+    if amount < min_sendable_msat or amount > max_sendable_msat:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Amount outside allowed range",
@@ -451,10 +576,14 @@ async def lnurl_pay(
             detail="Invoice missing payment request",
         )
 
-    template = settings.success_message.strip() or "{ln_address} stacked your sats!"
-    resolved_message = template.format(ln_address=ln_address)
-    if len(resolved_message) > 144:
-        resolved_message = f"{ln_address} stacked your sats!"
+    invoice_context = dict(memo_context)
+    invoice_context["amount_msat"] = amount
+    invoice_context["amount_sat"] = amount // 1000
+    resolved_message = _resolve_success_message(
+        settings=settings,
+        override_template=override_success,
+        context=invoice_context,
+    )
 
     response_payload: Dict[str, Any] = {
         "pr": payment_request,

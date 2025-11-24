@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <title>lnSwitchboard · LN Addresses</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Toggle navigation"></button>
+      <div class="sidebar-overlay" id="sidebar-overlay"></div>
+      <aside class="sidebar">
+        <a class="sidebar-brand" href="/">
+          <img class="sidebar-logo" src="/icon.svg" alt="" />
+          <div class="sidebar-copy">
+            <p class="sidebar-title">lnSwitchboard</p>
+            <p class="sidebar-tagline">LNURL Router</p>
+          </div>
+        </a>
+        <nav class="sidebar-nav">
+          <p class="sidebar-section">Overview</p>
+          <a class="sidebar-link" href="/" data-nav-item="dashboard">
+            <span class="sidebar-icon icon-home" aria-hidden="true"></span>
+            <span class="sidebar-label">Dashboard</span>
+          </a>
+          <a class="sidebar-link" href="/invoices/" data-nav-item="invoices">
+            <span class="sidebar-icon icon-invoices" aria-hidden="true"></span>
+            <span class="sidebar-label">Invoices</span>
+          </a>
+          <a class="sidebar-link" href="/liquidity/" data-nav-item="liquidity">
+            <span class="sidebar-icon icon-liquidity" aria-hidden="true"></span>
+            <span class="sidebar-label">Liquidity</span>
+          </a>
+          <a class="sidebar-link" href="/logs/" data-nav-item="requests">
+            <span class="sidebar-icon icon-logs" aria-hidden="true"></span>
+            <span class="sidebar-label">Request Log</span>
+          </a>
+          <p class="sidebar-section">Admin</p>
+          <a class="sidebar-link" href="/addresses/" data-nav-item="ln-addresses">
+            <span class="sidebar-icon icon-addresses" aria-hidden="true"></span>
+            <span class="sidebar-label">LN Addresses</span>
+          </a>
+          <a class="sidebar-link" href="/identities/" data-nav-item="identities">
+            <span class="sidebar-icon icon-identities" aria-hidden="true"></span>
+            <span class="sidebar-label">Nostr Identities</span>
+          </a>
+          <a class="sidebar-link" href="/settings/" data-nav-item="settings">
+            <span class="sidebar-icon icon-settings" aria-hidden="true"></span>
+            <span class="sidebar-label">Settings</span>
+          </a>
+          <a class="sidebar-link" href="https://github.com/RyleaStark/lnSwitchboard/wiki" target="_blank" rel="noopener noreferrer" data-nav-item="help">
+            <span class="sidebar-icon icon-help" aria-hidden="true"></span>
+            <span class="sidebar-label">Help</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-status">
+          <p class="sidebar-status-label">LND status</p>
+          <div class="status" id="service-status">Checking status…</div>
+        </div>
+      </aside>
+
+      <div class="content-area">
+        <header class="page-header">
+          <div>
+            <p class="page-eyebrow">Mapping</p>
+            <h1>LN Addresses</h1>
+            <p class="muted">
+              Track the handles you plan to customize. Everything listed here can carry its own limits, copy, and soon webhooks or notifications.
+            </p>
+          </div>
+        </header>
+
+        <main class="page-content addresses-page">
+          <section class="card address-table-card">
+            <div class="card-heading">
+              <div>
+                <p class="card-eyebrow">Admin</p>
+                <h2>Lightning Addresses</h2>
+                <p class="muted">Add a handle when you want unique behavior or plan to attach webhooks/notifications.</p>
+              </div>
+              <div class="card-actions">
+                <button class="primary-btn" type="button" id="address-new-btn">Add Address</button>
+              </div>
+            </div>
+            <div class="callout address-guidelines">
+              <p>Handles not listed here keep using your global LNURL defaults. Add one when you need to:</p>
+              <ul>
+                <li>Set a custom <strong>minimum</strong> or <strong>maximum</strong> sats window (still capped by inbound liquidity).</li>
+                <li>Show different metadata or success text for partners, campaigns, or tip jars.</li>
+                <li>Prepare for per-address webhooks or notifications (coming soon).</li>
+                <li>Remember that the base handle covers every +tag (for example, <code>alice</code> also covers <code>alice+vip</code>).</li>
+              </ul>
+              <div class="address-variables">
+                <div class="address-variable-card">
+                  <p class="address-variable-label">Always available</p>
+                  <p class="address-variable-value">
+                    <code>{ln_address}</code>
+                    <code>{local_part}</code>
+                    <code>{tag}</code>
+                    <code>{domain}</code>
+                  </p>
+                </div>
+                <div class="address-variable-card">
+                  <p class="address-variable-label">Success message only</p>
+                  <p class="address-variable-value">
+                    <code>{amount_sat}</code>
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div class="card-toolbar address-toolbar">
+              <label class="field field-search">
+                <span class="sr-only">Search LN addresses</span>
+                <span class="field-icon" aria-hidden="true"></span>
+                <input
+                  type="search"
+                  id="address-search"
+                  class="input input-search"
+                  placeholder="Search handles, domains, or template text…"
+                  autocomplete="off"
+                />
+              </label>
+            </div>
+            <div class="table-wrapper address-table-wrapper stackable-table-wrapper stackable-table-wrapper-wide">
+              <table class="address-table stackable-table stackable-table-wide">
+                <thead>
+                  <tr>
+                    <th scope="col">Address</th>
+                    <th scope="col">Limits</th>
+                    <th scope="col">Templates</th>
+                    <th scope="col" class="address-actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="address-table-body">
+                  <tr>
+                    <td colspan="4" class="placeholder" id="address-table-placeholder">Loading addresses…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </main>
+
+        <footer>
+          <div class="footer-content">
+            <p class="footer-copy">
+              © <span id="copyright-year"></span>
+              <a href="https://github.com/RyleaStark" target="_blank" rel="noopener noreferrer">Rylea Stark</a>
+              · Tip sats ❤️
+              <a href="lnurlp://lnswitchboard+tips@bigbones.net">lnswitchboard+tips@bigbones.net</a>
+            </p>
+          </div>
+        </footer>
+      </div>
+    </div>
+
+    <div id="address-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="address-form-title">
+      <div class="modal-backdrop" data-close="address-modal"></div>
+      <div class="modal-content address-modal-content">
+        <div class="modal-header">
+          <div>
+            <p class="card-eyebrow" id="address-form-eyebrow">Create</p>
+            <h2 id="address-form-title">Add LN address</h2>
+            <p class="muted address-form-subtitle">
+              Local part and domain identify the handle. Leave any optional field blank to keep the global default until you are ready to customize.
+            </p>
+          </div>
+          <button class="modal-close" id="address-modal-close" aria-label="Close LN address form" data-close="address-modal">
+            &times;
+          </button>
+        </div>
+        <form id="address-form" class="address-form">
+          <div class="address-form-grid">
+            <label class="address-field">
+              <span class="address-field-label">Local part</span>
+              <input
+                type="text"
+                id="address-local-part"
+                class="input"
+                placeholder="alice"
+                required
+                pattern="[a-z0-9._-]+"
+                autocomplete="off"
+              />
+              <span class="address-field-hint">Only lowercase letters, numbers, dot, dash, underscore. If you use a +tag (alice+vip), enter “alice” here because the + part inherits automatically.</span>
+            </label>
+            <label class="address-field">
+              <span class="address-field-label">Domain</span>
+              <input
+                type="text"
+                id="address-domain"
+                class="input"
+                placeholder="example.com"
+                required
+                autocomplete="off"
+                inputmode="url"
+              />
+            </label>
+            <label class="address-field">
+              <span class="address-field-label">Min sats</span>
+              <input
+                type="number"
+                id="address-min-sats"
+                class="input"
+                min="1"
+                placeholder="e.g. 21"
+                inputmode="numeric"
+              />
+              <span class="address-field-hint">If blank, uses the global minimum.</span>
+            </label>
+            <label class="address-field">
+              <span class="address-field-label">Max sats</span>
+              <input
+                type="number"
+                id="address-max-sats"
+                class="input"
+                min="1"
+                placeholder="e.g. 500"
+                inputmode="numeric"
+              />
+              <span class="address-field-hint">Leave blank to use the global/channel maximum, or enter a lower cap for this handle.</span>
+            </label>
+            <label class="address-field address-field-full">
+              <span class="address-field-label">Metadata description</span>
+              <textarea
+                id="address-metadata-template"
+                class="input"
+                rows="2"
+                placeholder="Pay {ln_address} with a grin"
+              ></textarea>
+              <span class="address-field-hint">Shows up in wallet metadata. Leave blank to reuse the global metadata template.</span>
+            </label>
+            <label class="address-field address-field-full">
+              <span class="address-field-label">Success message</span>
+              <textarea
+                id="address-success-template"
+                class="input"
+                rows="2"
+                placeholder="{ln_address} stacked {amount_sat} sats!"
+              ></textarea>
+              <span class="address-field-hint">Displayed after payment (must stay under 144 chars once rendered; supports {amount_sat}). Leave blank to inherit the global success message.</span>
+            </label>
+          </div>
+          <p class="address-form-feedback" id="address-form-feedback" role="status"></p>
+          <div class="address-form-actions">
+            <button type="submit" class="primary-btn" id="address-form-submit">Create Override</button>
+            <button type="button" class="ghost-btn" id="address-form-cancel">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="address-delete-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="address-delete-message">
+      <div class="modal-backdrop" data-close="address-delete"></div>
+      <div class="modal-content address-delete-modal-content confirm-modal-content">
+        <div class="modal-header">
+          <div>
+            <p class="card-eyebrow">Delete LN Address</p>
+            <h2>Remove this Lightning address?</h2>
+            <p class="muted address-form-subtitle" id="address-delete-message">This will stop tracking the handle-specific settings.</p>
+          </div>
+          <button class="modal-close" id="address-delete-close" aria-label="Close delete dialog" data-close="address-delete">
+            &times;
+          </button>
+        </div>
+        <div class="address-delete-actions confirm-actions">
+          <button class="ghost-btn ghost-btn-danger" type="button" id="address-delete-confirm" data-default-text="Delete LN Address">Delete LN Address</button>
+          <button class="ghost-btn" type="button" id="address-delete-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

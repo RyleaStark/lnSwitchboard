@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import get_settings
 from .deps import get_ln_client_dep, get_log_storage_dep
 from .logging_utils import configure_logging
+from .routers import ln_addresses as ln_addresses_router
 from .routers import lnurl as lnurl_router
 from .routers import nip05 as nip05_router
 from .routers import ui as ui_router
@@ -69,6 +70,7 @@ app.add_middleware(
 )
 
 app.include_router(ui_router.router)
+app.include_router(ln_addresses_router.api_router)
 app.include_router(nip05_router.api_router)
 app.include_router(nip05_router.public_router)
 app.include_router(lnurl_router.router)
@@ -82,7 +84,7 @@ def _register_client_redirect(path: str) -> None:
         return RedirectResponse(url=target, status_code=307)
 
 
-for _client_path in ("/logs", "/liquidity", "/settings", "/identities", "/invoices"):
+for _client_path in ("/logs", "/liquidity", "/settings", "/identities", "/addresses", "/invoices"):
     _register_client_redirect(_client_path)
 
 if STATIC_DIR.exists():

@@ -260,6 +260,73 @@ def test_lnurl_tag_metadata(test_client: TestClient):
     assert discovery_entry["details"].get("callback_lnurl") == expected_callback_lnurl
 
 
+def test_lnurl_address_overrides(test_client: TestClient):
+    base_payload = {
+        "local_part": "bones",
+        "domain": "testserver",
+        "min_sats": 50,
+        "max_sats": 400,
+        "metadata_description": "{ln_address} is live on {domain}",
+        "success_message": "{ln_address} handled {amount_sat} sats",
+    }
+    resp = test_client.post("/api/lnaddresses", json=base_payload)
+    assert resp.status_code == 201
+
+    discovery = test_client.get("/.well-known/lnurlp/bones")
+    assert discovery.status_code == 200
+    body = discovery.json()
+    assert body["minSendable"] == 50 * 1000
+    assert body["maxSendable"] == 400 * 1000
+    metadata_entries = json.loads(body["metadata"])
+    assert metadata_entries[0][1] == "bones@testserver is live on testserver"
+
+    invoice_resp = test_client.get("/.well-known/lnurlp/bones", params={"amount": 120000})
+    assert invoice_resp.status_code == 200
+    invoice_body = invoice_resp.json()
+    assert invoice_body["successAction"]["message"] == "bones@testserver handled 120 sats"
+
+    vip_payload = {
+        "local_part": "vipcrew",
+        "domain": "testserver",
+        "min_sats": 200,
+        "max_sats": 250,
+        "metadata_description": "{ln_address} routes VIP flow",
+        "success_message": "{ln_address} stacked {amount_sat} sats",
+    }
+    vip_resp = test_client.post("/api/lnaddresses", json=vip_payload)
+    assert vip_resp.status_code == 201
+
+    vip_discovery = test_client.get("/.well-known/lnurlp/vipcrew")
+    assert vip_discovery.status_code == 200
+    vip_body = vip_discovery.json()
+    assert vip_body["minSendable"] == 200 * 1000
+    assert vip_body["maxSendable"] == 250 * 1000
+    vip_metadata = json.loads(vip_body["metadata"])
+    assert vip_metadata[0][1] == "vipcrew@testserver routes VIP flow"
+
+    vip_invoice = test_client.get("/.well-known/lnurlp/vipcrew", params={"amount": 220000})
+    assert vip_invoice.status_code == 200
+    vip_invoice_body = vip_invoice.json()
+    assert vip_invoice_body["successAction"]["message"] == "vipcrew@testserver stacked 220 sats"
+
+    whale_payload = {
+        "local_part": "whaleback",
+        "domain": "testserver",
+        "min_sats": 100,
+        "max_sats": 5000,
+        "metadata_description": "{ln_address} is the whale lane",
+        "success_message": "{ln_address} received {amount_sat}",
+    }
+    whale_resp = test_client.post("/api/lnaddresses", json=whale_payload)
+    assert whale_resp.status_code == 201
+    whale_discovery = test_client.get("/.well-known/lnurlp/whaleback")
+    assert whale_discovery.status_code == 200
+    whale_body = whale_discovery.json()
+    assert whale_body["minSendable"] == 100 * 1000
+    # still limited by channel capacity (1000 sats)
+    assert whale_body["maxSendable"] == 1000 * 1000
+
+
 def test_lnurl_invoice_with_tag(test_client: TestClient):
     response = test_client.get(
         "/.well-known/lnurlp/bones+promo",
@@ -647,6 +714,8 @@ def test_stats_summary_counts_recent_activity(test_client: TestClient):
 
 
 def test_stats_summary_invoice_activity_respects_timezone_offset(test_client: TestClient):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     storage = deps._get_log_storage()
 
     def insert_invoice(settled_at: datetime, amount_msat: int = 2000) -> None:
@@ -716,6 +785,7 @@ def test_stats_summary_invoice_activity_respects_timezone_offset(test_client: Te
     assert len(offset_active) == 1
     expected_local_date = (candidate - timedelta(minutes=offset_minutes)).date().isoformat()
     assert offset_active[0]["date"] == expected_local_date
+    loop.close()
 
 
 def test_invoice_events_are_persisted(test_client: TestClient):
