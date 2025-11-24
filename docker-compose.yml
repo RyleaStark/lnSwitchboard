@@ -2,18 +2,17 @@ version: "3.9"
 
 services:
   lnswitchboard:
-    build: .
-    image: lnswitchboard:local
+    image: ghcr.io/ryleastark/lnswitchboard:0.1.0@sha256:672f4ae5e348f963848b5e2cde7518a10e16ff0d43c7bf94f0ba58a068475377
     container_name: lnswitchboard
     restart: unless-stopped
     environment:
       SERVICE_PORT: 22121
-      LND_HOST: umbrel-lnd
+      LND_HOST: #LND Host IP
       LND_GRPC_PORT: 10009
-      LND_TLS_PATH: /lnd/tls.cert
+      LND_TLS_PATH: "/lnd/tls.cert"
+      DATA_STORE_PATH: "secrets/lnswitchboard.db"
     volumes:
       - ./secrets:/app/secrets:rw
-      - ./logs:/app/logs:rw
       - /app-data/lightning/data/lnd:/lnd:ro
     ports:
       - "22121:22121"
