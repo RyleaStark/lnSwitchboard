@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .ln_client import LNClient
-from .log_storage import RequestLogStorage
+from .log_storage import InvoiceEvent, RequestLogStorage
 
 LOGGER = logging.getLogger("lnswitchboard.invoice_worker")
 
@@ -95,9 +95,11 @@ async def refresh_invoice_statuses(
     slow_interval_seconds: int = 900,
     batch_size: int = 50,
     logger: Optional[logging.Logger] = None,
+    events: Optional[List[InvoiceEvent]] = None,
 ) -> int:
     logger = logger or LOGGER
-    events = await storage.get_due_invoice_events(limit=batch_size)
+    if events is None:
+        events = await storage.get_due_invoice_events(limit=batch_size)
     if not events:
         return 0
 
@@ -120,6 +122,7 @@ async def refresh_invoice_statuses(
                 next_check=None,
                 expires_at=None,
                 interval_seconds=0,
+                settled_at=None,
             )
             continue
         try:
@@ -134,11 +137,25 @@ async def refresh_invoice_statuses(
                 next_check=None,
                 expires_at=None,
                 interval_seconds=0,
+                settled_at=None,
             )
             continue
 
         try:
             snapshot = await ln_client.lookup_invoice(payment_hash_bytes)
+        except LookupError:
+            logger.info("Invoice lookup returned not found for %s", payment_hash_hex)
+            await storage.apply_invoice_event_update(
+                event=event,
+                details=event.details,
+                settled=False,
+                expired=True,
+                next_check=None,
+                expires_at=None,
+                interval_seconds=0,
+                settled_at=None,
+            )
+            continue
         except Exception as exc:  # pragma: no cover - network/runtime
             logger.warning("Invoice lookup failed for %s: %s", payment_hash_hex, exc)
             next_check = now + quick_interval
@@ -150,6 +167,7 @@ async def refresh_invoice_statuses(
                 next_check=next_check,
                 expires_at=None,
                 interval_seconds=int(quick_interval.total_seconds()),
+                settled_at=None,
             )
             continue
 
@@ -197,31 +215,61 @@ async def refresh_invoice_statuses(
     return processed
 
 
-class InvoiceStatusWorker:
-    """Background worker that keeps invoice/request logs in sync with LND."""
+async def refresh_all_pending_invoices(
+    storage: RequestLogStorage,
+    ln_client: LNClient,
+    *,
+    batch_size: int = 100,
+    quick_window_minutes: int = 5,
+    quick_interval_seconds: int = 15,
+    mid_window_minutes: int = 60,
+    mid_interval_seconds: int = 60,
+    slow_interval_seconds: int = 900,
+    logger: Optional[logging.Logger] = None,
+) -> int:
+    logger = logger or LOGGER
+    total = 0
+    last_id: Optional[int] = None
+    while True:
+        events = await storage.get_unsettled_invoice_events(limit=batch_size, min_id=last_id)
+        if not events:
+            break
+        await refresh_invoice_statuses(
+            storage,
+            ln_client,
+            quick_window_minutes=quick_window_minutes,
+            quick_interval_seconds=quick_interval_seconds,
+            mid_window_minutes=mid_window_minutes,
+            mid_interval_seconds=mid_interval_seconds,
+            slow_interval_seconds=slow_interval_seconds,
+            batch_size=batch_size,
+            logger=logger,
+            events=events,
+        )
+        total += len(events)
+        last_id = events[-1].id
+        if len(events) < batch_size:
+            break
+    return total
+
+
+class InvoiceSubscriptionWorker:
+    """Streams invoice updates from LND and mirrors them into storage."""
 
     def __init__(
         self,
         storage: RequestLogStorage,
         ln_client: LNClient,
         *,
-        batch_size: int = 50,
-        quick_window_minutes: int = 5,
-        quick_interval_seconds: int = 15,
-        mid_window_minutes: int = 60,
-        mid_interval_seconds: int = 60,
-        slow_interval_seconds: int = 900,
-        idle_sleep_seconds: int = 15,
+        pending_interval_seconds: int = 300,
+        backoff_initial_seconds: int = 5,
+        backoff_max_seconds: int = 60,
     ) -> None:
         self._storage = storage
         self._ln_client = ln_client
-        self._batch_size = batch_size
-        self._quick_window_minutes = quick_window_minutes
-        self._quick_interval_seconds = quick_interval_seconds
-        self._mid_window_minutes = mid_window_minutes
-        self._mid_interval_seconds = mid_interval_seconds
-        self._slow_interval_seconds = slow_interval_seconds
-        self._idle_sleep_seconds = max(1, idle_sleep_seconds)
+        self._pending_interval = timedelta(seconds=max(1, pending_interval_seconds))
+        self._backoff_initial = max(1, backoff_initial_seconds)
+        self._backoff_max = max(self._backoff_initial, backoff_max_seconds)
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
 
@@ -229,7 +277,7 @@ class InvoiceStatusWorker:
         if self._task and not self._task.done():
             return
         self._stop_event.clear()
-        self._task = asyncio.create_task(self._run(), name="invoice-status-worker")
+        self._task = asyncio.create_task(self._run(), name="invoice-subscription-worker")
 
     async def stop(self) -> None:
         if not self._task:
@@ -244,25 +292,135 @@ class InvoiceStatusWorker:
             self._task = None
 
     async def _run(self) -> None:
+        backoff = self._backoff_initial
         try:
             while not self._stop_event.is_set():
-                processed = await refresh_invoice_statuses(
-                    self._storage,
-                    self._ln_client,
-                    quick_window_minutes=self._quick_window_minutes,
-                    quick_interval_seconds=self._quick_interval_seconds,
-                    mid_window_minutes=self._mid_window_minutes,
-                    mid_interval_seconds=self._mid_interval_seconds,
-                    slow_interval_seconds=self._slow_interval_seconds,
-                    batch_size=self._batch_size,
-                    logger=LOGGER,
-                )
-                if processed:
-                    await asyncio.sleep(0)
-                    continue
                 try:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=self._idle_sleep_seconds)
+                    await self._consume_stream()
+                    backoff = self._backoff_initial
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # pragma: no cover - runtime errors
+                    LOGGER.warning("Invoice subscription stream failed: %s", exc)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, self._backoff_max)
+        except asyncio.CancelledError:
+            pass
+
+    async def _consume_stream(self) -> None:
+        async for snapshot in self._ln_client.subscribe_invoices():
+            if self._stop_event.is_set():
+                break
+            try:
+                await self._apply_snapshot(snapshot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - runtime errors
+                LOGGER.warning("Failed to apply invoice subscription update: %s", exc)
+
+    async def _apply_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        payment_hash_value = snapshot.get("r_hash") or snapshot.get("payment_hash")
+        if isinstance(payment_hash_value, bytes):
+            payment_hash_hex = payment_hash_value.hex()
+        elif isinstance(payment_hash_value, str):
+            payment_hash_hex = payment_hash_value.strip().lower()
+        else:
+            return
+        if not payment_hash_hex:
+            return
+        event = await self._storage.get_invoice_event_by_hash(payment_hash_hex)
+        if not event:
+            return
+        snapshot_data = dict(snapshot)
+        settled = bool(snapshot_data.get("settled"))
+        expires_at_dt = _derive_expires_at(snapshot_data) or _parse_iso8601(event.expires_at)
+        expired_flag = bool(snapshot_data.get("is_expired"))
+        if not expired_flag and expires_at_dt is not None:
+            expired_flag = datetime.now(tz=timezone.utc) >= expires_at_dt
+        details = event.details if isinstance(event.details, dict) else {}
+        details = _merge_invoice_snapshot(details, snapshot_data, settled=settled, expired=expired_flag)
+
+        now = datetime.now(tz=timezone.utc)
+        next_check: Optional[datetime]
+        interval_seconds = 0
+        if settled or expired_flag:
+            next_check = None
+        else:
+            next_check = now + self._pending_interval
+            interval_seconds = int(self._pending_interval.total_seconds())
+
+        newly_settled = settled and not event.settled
+        settled_at_dt = now if newly_settled else None
+
+        await self._storage.apply_invoice_event_update(
+            event=event,
+            details=details,
+            settled=settled,
+            expired=expired_flag,
+            next_check=next_check,
+            expires_at=expires_at_dt,
+            interval_seconds=interval_seconds,
+            settled_at=settled_at_dt,
+        )
+
+
+class InvoiceFullRefreshWorker:
+    """Runs a full pending-invoice refresh on a fixed interval."""
+
+    def __init__(
+        self,
+        storage: RequestLogStorage,
+        ln_client: LNClient,
+        *,
+        interval_seconds: int = 1_800,
+        batch_size: int = 250,
+    ) -> None:
+        self._storage = storage
+        self._ln_client = ln_client
+        self._interval = max(60, interval_seconds)
+        self._batch_size = max(1, batch_size)
+        self._task: Optional[asyncio.Task[None]] = None
+        self._stop_event = asyncio.Event()
+
+    async def start(self) -> None:
+        if self._task and not self._task.done():
+            return
+        self._stop_event.clear()
+        try:
+            await self.run_once()
+        except Exception as exc:  # pragma: no cover - runtime errors
+            LOGGER.warning("Startup full invoice refresh failed: %s", exc)
+        self._task = asyncio.create_task(self._run(), name="invoice-full-refresh-worker")
+
+    async def stop(self) -> None:
+        if not self._task:
+            return
+        self._stop_event.set()
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._task = None
+
+    async def run_once(self) -> int:
+        return await refresh_all_pending_invoices(
+            self._storage,
+            self._ln_client,
+            batch_size=self._batch_size,
+        )
+
+    async def _run(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)
                 except asyncio.TimeoutError:
+                    try:
+                        await self.run_once()
+                    except Exception as exc:  # pragma: no cover - runtime errors
+                        LOGGER.warning("Full invoice refresh failed: %s", exc)
                     continue
         except asyncio.CancelledError:
             pass

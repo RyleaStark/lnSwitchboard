@@ -6,6 +6,7 @@ from .lightning import (  # noqa: F401
     GetInfoRequest,
     GetInfoResponse,
     Invoice,
+    InvoiceSubscription,
     LightningStub,
     ListChannelsRequest,
     ListChannelsResponse,

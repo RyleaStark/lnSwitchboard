@@ -920,6 +920,25 @@ _field.number = 37
 _field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
 _field.type = descriptor_pb2.FieldDescriptorProto.TYPE_BYTES
 
+# InvoiceSubscription message
+_invoice_subscription = _file_proto.message_type.add()
+_invoice_subscription.name = "InvoiceSubscription"
+_field = _invoice_subscription.field.add()
+_field.name = "pending_only"
+_field.number = 1
+_field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+_field.type = descriptor_pb2.FieldDescriptorProto.TYPE_BOOL
+_field = _invoice_subscription.field.add()
+_field.name = "add_index"
+_field.number = 2
+_field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+_field.type = descriptor_pb2.FieldDescriptorProto.TYPE_UINT64
+_field = _invoice_subscription.field.add()
+_field.name = "settle_index"
+_field.number = 3
+_field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+_field.type = descriptor_pb2.FieldDescriptorProto.TYPE_UINT64
+
 # ListChannelsRequest message
 _list_channels_req = _file_proto.message_type.add()
 _list_channels_req.name = "ListChannelsRequest"
@@ -983,6 +1002,11 @@ _method = _service.method.add()
 _method.name = "ListChannels"
 _method.input_type = ".lnrpc.ListChannelsRequest"
 _method.output_type = ".lnrpc.ListChannelsResponse"
+_method = _service.method.add()
+_method.name = "SubscribeInvoices"
+_method.input_type = ".lnrpc.InvoiceSubscription"
+_method.output_type = ".lnrpc.Invoice"
+_method.server_streaming = True
 
 _pool = descriptor_pool.Default()
 try:
@@ -1006,6 +1030,7 @@ PaymentHash = _get_message_class("PaymentHash")
 Channel = _get_message_class("Channel")
 ListChannelsRequest = _get_message_class("ListChannelsRequest")
 ListChannelsResponse = _get_message_class("ListChannelsResponse")
+InvoiceSubscription = _get_message_class("InvoiceSubscription")
 
 
 class LightningStub:
@@ -1033,6 +1058,11 @@ class LightningStub:
             request_serializer=lambda msg: msg.SerializeToString(),
             response_deserializer=ListChannelsResponse.FromString,
         )
+        self._subscribe_invoices = channel.unary_stream(
+            "/lnrpc.Lightning/SubscribeInvoices",
+            request_serializer=lambda msg: msg.SerializeToString(),
+            response_deserializer=Invoice.FromString,
+        )
 
     async def AddInvoice(self, request: Invoice, *, metadata: Any | None = None) -> AddInvoiceResponse:
         return await self._add_invoice(request, metadata=metadata)
@@ -1047,3 +1077,8 @@ class LightningStub:
         self, request: ListChannelsRequest, *, metadata: Any | None = None
     ) -> ListChannelsResponse:
         return await self._list_channels(request, metadata=metadata)
+
+    def SubscribeInvoices(
+        self, request: InvoiceSubscription, *, metadata: Any | None = None
+    ):
+        return self._subscribe_invoices(request, metadata=metadata)

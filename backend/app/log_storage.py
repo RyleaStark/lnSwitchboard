@@ -223,6 +223,26 @@ class RequestLogStorage:
         payload.setdefault("domain", None)
         return payload
 
+    def _row_to_invoice_event(self, row: sqlite3.Row) -> InvoiceEvent:
+        return InvoiceEvent(
+            id=row["id"],
+            username=row["username"],
+            domain=row["domain"],
+            ip=row["ip"],
+            amount_msat=row["amount_msat"],
+            payment_hash=row["payment_hash"],
+            payment_request=row["payment_request"],
+            request_log_id=row["request_log_id"],
+            created_at=row["created_at"],
+            next_check_at=row["next_check_at"],
+            check_interval_seconds=row["check_interval_seconds"],
+            expires_at=row["expires_at"],
+            settled=bool(row["settled"]),
+            expired=bool(row["expired"]),
+            details=self._deserialize_details(row["details"]),
+            settled_at=row["settled_at"],
+        )
+
     def _serialize_details(self, details: Any) -> Optional[str]:
         if details is None:
             return None
@@ -436,29 +456,91 @@ class RequestLogStorage:
                     ).fetchall()
             except sqlite3.Error:
                 return []
-        events: List[InvoiceEvent] = []
-        for row in rows:
-            events.append(
-                InvoiceEvent(
-                    id=row["id"],
-                    username=row["username"],
-                    domain=row["domain"],
-                    ip=row["ip"],
-                    amount_msat=row["amount_msat"],
-                    payment_hash=row["payment_hash"],
-                    payment_request=row["payment_request"],
-                    request_log_id=row["request_log_id"],
-                    created_at=row["created_at"],
-                    next_check_at=row["next_check_at"],
-                    check_interval_seconds=row["check_interval_seconds"],
-                    expires_at=row["expires_at"],
-                    settled=bool(row["settled"]),
-                    expired=bool(row["expired"]),
-                    details=self._deserialize_details(row["details"]),
-                    settled_at=row["settled_at"],
-                )
-            )
-        return events
+        return [self._row_to_invoice_event(row) for row in rows]
+
+    async def get_invoice_event_by_hash(self, payment_hash: str) -> Optional[InvoiceEvent]:
+        normalized = (payment_hash or "").strip().lower()
+        if not normalized:
+            return None
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT
+                            id,
+                            username,
+                            domain,
+                            ip,
+                            amount_msat,
+                            payment_hash,
+                            payment_request,
+                            details,
+                            request_log_id,
+                            created_at,
+                            next_check_at,
+                            check_interval_seconds,
+                            expires_at,
+                            settled,
+                            expired,
+                            settled_at
+                        FROM invoice_events
+                        WHERE LOWER(payment_hash) = ?
+                        LIMIT 1
+                        """,
+                        (normalized,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return None
+        if not row:
+            return None
+        return self._row_to_invoice_event(row)
+
+    async def get_unsettled_invoice_events(
+        self,
+        *,
+        limit: int = 50,
+        min_id: int | None = None,
+    ) -> List[InvoiceEvent]:
+        limit = max(1, limit)
+        params: List[Any] = []
+        where = "WHERE settled = 0 AND expired = 0"
+        if min_id is not None:
+            where += " AND id > ?"
+            params.append(int(min_id))
+        params.append(limit)
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    rows = conn.execute(
+                        f"""
+                        SELECT
+                            id,
+                            username,
+                            domain,
+                            ip,
+                            amount_msat,
+                            payment_hash,
+                            payment_request,
+                            details,
+                            request_log_id,
+                            created_at,
+                            next_check_at,
+                            check_interval_seconds,
+                            expires_at,
+                            settled,
+                            expired,
+                            settled_at
+                        FROM invoice_events
+                        {where}
+                        ORDER BY id
+                        LIMIT ?
+                        """,
+                        tuple(params),
+                    ).fetchall()
+            except sqlite3.Error:
+                return []
+        return [self._row_to_invoice_event(row) for row in rows]
 
     async def apply_invoice_event_update(
         self,

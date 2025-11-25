@@ -21,6 +21,7 @@ from ..ln_client import LNClient
 from ..log_storage import RequestLogStorage
 from ..macaroon_store import MacaroonStore
 from ..env_settings import list_env_settings, update_env_settings
+from ..version import get_version
 
 
 logger = logging.getLogger(__name__)
@@ -228,6 +229,11 @@ async def public_channels(
         "channels": channels,
         "total_receiving_capacity_sat": total_receiving,
     }
+
+
+@router.get("/version")
+async def version_info() -> Dict[str, str]:
+    return {"version": get_version()}
 
 
 @router.delete("/logs/recent")

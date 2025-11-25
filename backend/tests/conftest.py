@@ -159,6 +159,16 @@ def test_client(monkeypatch) -> SimpleTestClient:
         "backend.app.ln_client.LNClient.lookup_invoice", fake_lookup_invoice
     )
 
+    async def fake_subscribe_invoices(self, **kwargs):
+        if False:  # pragma: no cover - required to make this an async generator
+            yield {}
+        while True:
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        "backend.app.ln_client.LNClient.subscribe_invoices", fake_subscribe_invoices
+    )
+
     async def fake_list_channels(self, public_only=True):
         return [
             {

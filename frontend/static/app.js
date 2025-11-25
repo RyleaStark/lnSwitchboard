@@ -14,7 +14,7 @@ const lnurlToggleBtn = document.getElementById("lnurl-toggle");
 const lnurlInstructions = document.getElementById("lnurl-instructions");
 const lnurlModal = document.getElementById("lnurl-modal");
 const lnurlModalCloseBtn = document.getElementById("lnurl-modal-close");
-const copyrightYearEl = document.getElementById("copyright-year");
+const footerCopyEls = document.querySelectorAll("[data-footer-copy]");
 const envSettingsCard = document.getElementById("env-settings-card");
 const envSettingsGroupsEl = document.getElementById("env-settings-groups");
 const envSettingsSaveBtn = document.getElementById("env-settings-save");
@@ -2810,9 +2810,25 @@ function startPolling() {
   setInterval(fetchMacaroonStatus, POLL_INTERVAL_MS);
 }
 
-function setCopyrightYear() {
-  if (!copyrightYearEl) return;
-  copyrightYearEl.textContent = String(new Date().getFullYear());
+async function populateFooterCopy() {
+  if (!footerCopyEls.length) return;
+  const currentYear = new Date().getFullYear();
+  let version = "0.0.0";
+  try {
+    const response = await fetch(buildApiUrl("api/version"));
+    if (response.ok) {
+      const data = await response.json();
+      if (data && typeof data.version === "string" && data.version.trim()) {
+        version = data.version.trim();
+      }
+    }
+  } catch (error) {
+    console.warn("Failed to load version info", error);
+  }
+  const footerHtml = `© ${currentYear} <a href="https://github.com/RyleaStark" target="_blank" rel="noopener noreferrer">Rylea Stark</a> · <a href="https://github.com/RyleaStark/lnSwitchboard" target="_blank" rel="noopener noreferrer">lnSwitchboard v${version}</a> · Tip sats ❤️ <a href="lnurlp://lnswitchboard+tips@bigbones.net">lnswitchboard+tips@bigbones.net</a>`;
+  footerCopyEls.forEach((el) => {
+    el.innerHTML = footerHtml;
+  });
 }
 
 function openDetails(details) {
@@ -2875,7 +2891,7 @@ function handleInvoicesSearchInput(event) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  setCopyrightYear();
+  populateFooterCopy();
   refreshMacaroonUI();
   refreshLnurlInstructions();
   refreshSidebarNav();

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, AsyncIterator, Dict, List, Tuple
 
 import grpc
 from google.protobuf.json_format import MessageToDict
@@ -13,6 +13,7 @@ from google.protobuf.json_format import MessageToDict
 from .lnrpc import (
     GetInfoRequest,
     Invoice,
+    InvoiceSubscription,
     LightningStub,
     ListChannelsRequest,
     PaymentHash,
@@ -142,7 +143,73 @@ class LNClient:
         binary_request = PaymentHash()
         binary_request.r_hash = payment_hash_bytes
         response = await _call(binary_request)
+        return self._build_invoice_snapshot(response)
 
+    async def subscribe_invoices(
+        self,
+        *,
+        pending_only: bool | None = None,
+        add_index: int | None = None,
+        settle_index: int | None = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        stub = await self._load_stub()
+        metadata = await self._metadata()
+        request = InvoiceSubscription()
+        if pending_only is not None:
+            request.pending_only = bool(pending_only)
+        if add_index is not None:
+            request.add_index = max(0, int(add_index))
+        if settle_index is not None:
+            request.settle_index = max(0, int(settle_index))
+        call = stub.SubscribeInvoices(request, metadata=metadata)
+        try:
+            async for invoice in call:
+                yield self._build_invoice_snapshot(invoice)
+        finally:
+            call.cancel()
+
+    async def list_channels(self, public_only: bool = False) -> List[Dict[str, Any]]:
+        stub = await self._load_stub()
+        metadata = await self._metadata()
+        request = ListChannelsRequest()
+        if public_only:
+            request.public_only = True
+        request.peer_alias_lookup = True
+        response = await stub.ListChannels(request, metadata=metadata)
+        channels: List[Dict[str, Any]] = []
+        for chan in getattr(response, "channels", []):
+            chan_id_raw = getattr(chan, "chan_id", 0)
+            chan_id_str = ""
+            if chan_id_raw:
+                try:
+                    chan_id_str = str(int(chan_id_raw))
+                except (TypeError, ValueError):
+                    chan_id_str = ""
+            local_balance = int(getattr(chan, "local_balance", 0))
+            remote_balance = int(getattr(chan, "remote_balance", 0))
+            local_reserve = int(getattr(chan, "local_chan_reserve_sat", 0))
+            remote_reserve = int(getattr(chan, "remote_chan_reserve_sat", 0))
+            entry = {
+                "active": bool(getattr(chan, "active", False)),
+                "private": bool(getattr(chan, "private", False)),
+                "capacity_sat": int(getattr(chan, "capacity", 0)),
+                "local_balance_sat": local_balance,
+                "remote_balance_sat": remote_balance,
+                "local_chan_reserve_sat": local_reserve,
+                "remote_chan_reserve_sat": remote_reserve,
+                "channel_point": getattr(chan, "channel_point", ""),
+                "remote_pubkey": getattr(chan, "remote_pubkey", ""),
+                "peer_alias": getattr(chan, "peer_alias", "") or "",
+                "channel_id": chan_id_str,
+            }
+            if public_only and entry["private"]:
+                continue
+            entry["receiving_capacity_sat"] = max(remote_balance - remote_reserve, 0)
+            entry["sendable_balance_sat"] = max(local_balance - local_reserve, 0)
+            channels.append(entry)
+        return channels
+
+    def _build_invoice_snapshot(self, response: Invoice) -> Dict[str, Any]:
         response_dict = MessageToDict(response, preserving_proto_field_name=True)
 
         def _int_or_none(value: Any) -> int | None:
@@ -185,48 +252,23 @@ class LNClient:
             result["expires_at"] = expires_at_iso
         if is_expired is not None:
             result["is_expired"] = is_expired
-        return result
 
-    async def list_channels(self, public_only: bool = False) -> List[Dict[str, Any]]:
-        stub = await self._load_stub()
-        metadata = await self._metadata()
-        request = ListChannelsRequest()
-        if public_only:
-            request.public_only = True
-        request.peer_alias_lookup = True
-        response = await stub.ListChannels(request, metadata=metadata)
-        channels: List[Dict[str, Any]] = []
-        for chan in getattr(response, "channels", []):
-            chan_id_raw = getattr(chan, "chan_id", 0)
-            chan_id_str = ""
-            if chan_id_raw:
-                try:
-                    chan_id_str = str(int(chan_id_raw))
-                except (TypeError, ValueError):
-                    chan_id_str = ""
-            local_balance = int(getattr(chan, "local_balance", 0))
-            remote_balance = int(getattr(chan, "remote_balance", 0))
-            local_reserve = int(getattr(chan, "local_chan_reserve_sat", 0))
-            remote_reserve = int(getattr(chan, "remote_chan_reserve_sat", 0))
-            entry = {
-                "active": bool(getattr(chan, "active", False)),
-                "private": bool(getattr(chan, "private", False)),
-                "capacity_sat": int(getattr(chan, "capacity", 0)),
-                "local_balance_sat": local_balance,
-                "remote_balance_sat": remote_balance,
-                "local_chan_reserve_sat": local_reserve,
-                "remote_chan_reserve_sat": remote_reserve,
-                "channel_point": getattr(chan, "channel_point", ""),
-                "remote_pubkey": getattr(chan, "remote_pubkey", ""),
-                "peer_alias": getattr(chan, "peer_alias", "") or "",
-                "channel_id": chan_id_str,
-            }
-            if public_only and entry["private"]:
-                continue
-            entry["receiving_capacity_sat"] = max(remote_balance - remote_reserve, 0)
-            entry["sendable_balance_sat"] = max(local_balance - local_reserve, 0)
-            channels.append(entry)
-        return channels
+        add_index = _int_or_none(response_dict.get("add_index"))
+        if add_index is not None:
+            result["add_index"] = add_index
+        settle_index = _int_or_none(response_dict.get("settle_index"))
+        if settle_index is not None:
+            result["settle_index"] = settle_index
+        settle_date = _int_or_none(response_dict.get("settle_date"))
+        if settle_date is not None:
+            result["settle_date"] = settle_date
+        amt_paid_sat = _int_or_none(response_dict.get("amt_paid_sat"))
+        if amt_paid_sat is not None:
+            result["amt_paid_sat"] = amt_paid_sat
+        amt_paid_msat = _int_or_none(response_dict.get("amt_paid_msat"))
+        if amt_paid_msat is not None:
+            result["amt_paid_msat"] = amt_paid_msat
+        return result
 
     @staticmethod
     def _normalize_payment_hash(payment_hash: bytes | str) -> bytes:

@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import grpc
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +20,7 @@ from .routers import lnurl as lnurl_router
 from .routers import nip05 as nip05_router
 from .routers import ui as ui_router
 from .macaroon_store import MacaroonNotConfiguredError
-from .invoice_worker import InvoiceStatusWorker
+from .invoice_worker import InvoiceSubscriptionWorker, InvoiceFullRefreshWorker
 
 LOGGER = logging.getLogger("lnswitchboard")
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -32,9 +33,12 @@ async def lifespan(app: FastAPI):
     configure_logging(settings.data_store_path.parent)
     ln_client = await get_ln_client_dep()
     storage = await get_log_storage_dep()
-    invoice_worker = InvoiceStatusWorker(storage=storage, ln_client=ln_client)
-    await invoice_worker.start()
-    app.state.invoice_worker = invoice_worker
+    invoice_subscription_worker = InvoiceSubscriptionWorker(storage=storage, ln_client=ln_client)
+    invoice_full_refresh_worker = InvoiceFullRefreshWorker(storage=storage, ln_client=ln_client)
+    await invoice_subscription_worker.start()
+    await invoice_full_refresh_worker.start()
+    app.state.invoice_subscription_worker = invoice_subscription_worker
+    app.state.invoice_full_refresh_worker = invoice_full_refresh_worker
     try:
         connection_info = await ln_client.check_connection()
         if connection_info.get("info_permission", True):
@@ -46,12 +50,20 @@ async def lifespan(app: FastAPI):
             )
     except MacaroonNotConfiguredError:
         LOGGER.info("Macaroon not yet configured; LND connectivity check skipped")
-    except Exception as exc:  # pragma: no cover - network runtime
-        LOGGER.warning("Unable to verify LND connection: %s", exc)
+    except grpc.aio.AioRpcError as exc:  # pragma: no cover - network runtime
+        details = (exc.details() or "").lower()
+        if exc.code() == grpc.StatusCode.PERMISSION_DENIED or "permission denied" in details:
+            LOGGER.info(
+                "Skipping LND connection check (macaroon lacks GetInfo permission): %s",
+                exc.details() or exc,
+            )
+        else:
+            LOGGER.warning("Unable to verify LND connection: %s", exc)
     except Exception as exc:  # pragma: no cover - network runtime
         LOGGER.warning("Unable to verify LND connection: %s", exc)
     yield
-    await invoice_worker.stop()
+    await invoice_full_refresh_worker.stop()
+    await invoice_subscription_worker.stop()
     await ln_client.close()
 
 
