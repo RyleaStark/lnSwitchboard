@@ -20,6 +20,7 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY backend/app ./backend/app
 COPY frontend/static ./frontend/static
+COPY VERSION ./VERSION
 
 EXPOSE 22121
 
