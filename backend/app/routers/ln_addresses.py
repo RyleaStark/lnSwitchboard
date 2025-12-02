@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -17,6 +18,7 @@ api_router = APIRouter(prefix="/api/lnaddresses", tags=["ln_addresses"])
 LOCAL_PART_PATTERN = re.compile(r"^[a-z0-9._-]+$")
 DOMAIN_PATTERN = re.compile(r"^[a-z0-9.-]+$")
 MAX_TEMPLATE_CHARS = 512
+WEBHOOK_SCHEMES = {"http", "https"}
 
 
 def _clean_template(value: Optional[str]) -> Optional[str]:
@@ -24,6 +26,25 @@ def _clean_template(value: Optional[str]) -> Optional[str]:
         return None
     trimmed = value.strip()
     return trimmed or None
+
+
+def _normalize_webhook_url(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Invalid webhook URL")
+    candidate = value.strip()
+    if not candidate:
+        return None
+    parsed = urlsplit(candidate)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in WEBHOOK_SCHEMES:
+        raise ValueError("Webhook URL must start with http:// or https://")
+    if not parsed.netloc:
+        raise ValueError("Webhook URL must include a host")
+    path = parsed.path or "/"
+    normalized = urlunsplit((scheme, parsed.netloc.lower(), path, parsed.query, parsed.fragment))
+    return normalized
 
 
 class LNAddressPayload(BaseModel):
@@ -51,6 +72,16 @@ class LNAddressPayload(BaseModel):
         default=None,
         max_length=MAX_TEMPLATE_CHARS,
         description="Template used for the successAction message.",
+    )
+    webhook_urls: Optional[List[str]] = Field(
+        default=None,
+        description="List of HTTP(S) endpoints that receive a JSON payload when invoices settle for this handle (including +tags).",
+    )
+    legacy_webhook_url: Optional[str] = Field(
+        default=None,
+        alias="webhook_url",
+        exclude=True,
+        description="Deprecated single webhook field kept for backward compatibility.",
     )
 
     @field_validator("local_part")
@@ -84,12 +115,42 @@ class LNAddressPayload(BaseModel):
     def _trim_templates(cls, value: Optional[str]) -> Optional[str]:
         return _clean_template(value)
 
+    @field_validator("webhook_urls", mode="before")
+    @classmethod
+    def _normalize_webhook_list(cls, value: Optional[Any]) -> Optional[List[str]]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            candidates = [value]
+        elif isinstance(value, (list, tuple, set)):
+            candidates = list(value)
+        else:
+            raise ValueError("webhook_urls must be a list of strings")
+        normalized: List[str] = []
+        for entry in candidates:
+            if not isinstance(entry, str):
+                raise ValueError("Webhook URL must be a string")
+            parts = [part for part in re.split(r"[\n,]+", entry) if part]
+            if not parts:
+                parts = [entry]
+            for part in parts:
+                normalized_url = _normalize_webhook_url(part)
+                if normalized_url not in normalized:
+                    normalized.append(normalized_url)
+        return normalized
+
     @model_validator(mode="after")
     def _validate_bounds(self) -> "LNAddressPayload":
         min_sats = self.min_sats
         max_sats = self.max_sats
         if min_sats is not None and max_sats is not None and max_sats < min_sats:
             raise ValueError("max_sats cannot be smaller than min_sats")
+        urls = list(dict.fromkeys(self.webhook_urls or []))
+        if self.legacy_webhook_url:
+            legacy_url = _normalize_webhook_url(self.legacy_webhook_url)
+            if legacy_url not in urls:
+                urls.append(legacy_url)
+        self.webhook_urls = urls
         return self
 
 
@@ -98,6 +159,7 @@ def _serialize(record: Dict[str, Any]) -> Dict[str, Any]:
     domain = record["domain"]
     identifier = f"{local_part}@{domain}"
     base, _, tag = local_part.partition("+")
+    webhook_urls = record.get("webhook_urls") or []
     return {
         "id": record["id"],
         "local_part": local_part,
@@ -109,6 +171,8 @@ def _serialize(record: Dict[str, Any]) -> Dict[str, Any]:
         "max_sats": record.get("max_sendable_sat"),
         "metadata_description": record.get("metadata_description"),
         "success_message": record.get("success_message"),
+        "webhook_urls": webhook_urls,
+        "webhook_url": webhook_urls[0] if webhook_urls else None,
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
     }
@@ -133,6 +197,7 @@ async def create_address(
             max_sendable_sat=payload.max_sats,
             metadata_description=payload.metadata_description,
             success_message=payload.success_message,
+            webhook_urls=payload.webhook_urls,
         )
     except AddressConflictError as exc:
         raise HTTPException(
@@ -157,6 +222,7 @@ async def update_address(
             max_sendable_sat=payload.max_sats,
             metadata_description=payload.metadata_description,
             success_message=payload.success_message,
+            webhook_urls=payload.webhook_urls,
         )
     except AddressNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Address not found")

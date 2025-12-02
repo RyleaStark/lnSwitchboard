@@ -99,6 +99,8 @@ class Settings(BaseSettings):
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     ui_poll_seconds: int = _env_field(env="UI_POLL_SECONDS", default=10)
     macaroon_store_path: Path = _env_field(env="MACAROON_STORE_PATH", default=Path("secrets/macaroon.hex"))
+    webhook_max_retries: int = _env_field(env="WEBHOOK_MAX_RETRIES", default=5)
+    webhook_retry_window_seconds: int = _env_field(env="WEBHOOK_RETRY_WINDOW_SECONDS", default=600)
 
     @field_validator("lnd_tls_path", "data_store_path", "macaroon_store_path", mode="before")
     @classmethod
@@ -134,6 +136,20 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_payer_data(cls, value):
         return parse_payer_data_config(value)
+
+    @field_validator("webhook_max_retries")
+    @classmethod
+    def _validate_webhook_max_retries(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("WEBHOOK_MAX_RETRIES must be >= 0")
+        return value
+
+    @field_validator("webhook_retry_window_seconds")
+    @classmethod
+    def _validate_webhook_retry_window(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("WEBHOOK_RETRY_WINDOW_SECONDS must be >= 0")
+        return value
 
 
 @lru_cache()

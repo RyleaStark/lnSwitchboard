@@ -118,6 +118,7 @@ const addressMinInput = document.getElementById("address-min-sats");
 const addressMaxInput = document.getElementById("address-max-sats");
 const addressMetadataInput = document.getElementById("address-metadata-template");
 const addressSuccessInput = document.getElementById("address-success-template");
+const addressWebhookInput = document.getElementById("address-webhook-urls");
 const addressDeleteModal = document.getElementById("address-delete-modal");
 const addressDeleteMessage = document.getElementById("address-delete-message");
 const addressDeleteConfirmBtn = document.getElementById("address-delete-confirm");
@@ -1350,6 +1351,12 @@ function createAddressHandleCell(item) {
     badge.textContent = "Nostr identity linked";
     wrapper.appendChild(badge);
   }
+  if (Array.isArray(item.webhook_urls) && item.webhook_urls.length) {
+    const badge = document.createElement("span");
+    badge.className = "address-badge";
+    badge.textContent = item.webhook_urls.length === 1 ? "Webhook configured" : "Webhooks configured";
+    wrapper.appendChild(badge);
+  }
   if (item.tag) {
     const tagLine = document.createElement("p");
     tagLine.className = "address-handle-domain";
@@ -1443,6 +1450,7 @@ function getDisplayAddressItems() {
     const domain = (item.domain || "").toLowerCase();
     const metadata = (item.metadata_description || "").toLowerCase();
     const success = (item.success_message || "").toLowerCase();
+    const webhook = Array.isArray(item.webhook_urls) ? item.webhook_urls.join(" ").toLowerCase() : "";
     const min = typeof item.min_sats === "number" ? String(item.min_sats) : "";
     const max = typeof item.max_sats === "number" ? String(item.max_sats) : "";
     return (
@@ -1450,6 +1458,7 @@ function getDisplayAddressItems() {
       domain.includes(query) ||
       metadata.includes(query) ||
       success.includes(query) ||
+      webhook.includes(query) ||
       min.includes(query) ||
       max.includes(query)
     );
@@ -1562,6 +1571,10 @@ function openAddressEditForm(item) {
   if (addressSuccessInput) {
     addressSuccessInput.value = item.success_message || "";
   }
+  if (addressWebhookInput) {
+    const urls = Array.isArray(item.webhook_urls) ? item.webhook_urls.join("\n") : "";
+    addressWebhookInput.value = urls;
+  }
   setAddressFormFeedback("");
   setAddressFormVisible(true);
 }
@@ -1573,6 +1586,7 @@ function collectAddressFormData() {
   const maxRaw = addressMaxInput?.value.trim() || "";
   const metadata = addressMetadataInput?.value.trim() || "";
   const success = addressSuccessInput?.value.trim() || "";
+  const webhookRaw = addressWebhookInput?.value || "";
   if (!localPart || !domain) {
     setAddressFormFeedback("Local-part and domain are required.", true);
     return null;
@@ -1599,6 +1613,30 @@ function collectAddressFormData() {
     setAddressFormFeedback("Maximum sats must be greater than or equal to the minimum.", true);
     return null;
   }
+  const webhookUrls = [];
+  if (webhookRaw) {
+    const entries = webhookRaw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (const entry of entries) {
+      let parsed;
+      try {
+        parsed = new URL(entry);
+      } catch (error) {
+        setAddressFormFeedback("Each webhook URL must be a valid http(s) address.", true);
+        return null;
+      }
+      if (!/^https?:$/i.test(parsed.protocol) || !parsed.hostname) {
+        setAddressFormFeedback("Webhook URLs must start with http(s):// and include a host.", true);
+        return null;
+      }
+      const normalized = parsed.toString();
+      if (!webhookUrls.includes(normalized)) {
+        webhookUrls.push(normalized);
+      }
+    }
+  }
   return {
     local_part: localPart,
     domain,
@@ -1606,6 +1644,7 @@ function collectAddressFormData() {
     max_sats: maxSats,
     metadata_description: metadata || null,
     success_message: success || null,
+    webhook_urls: webhookUrls,
   };
 }
 
@@ -1724,7 +1763,7 @@ function setAddressDeleteVisible(visible) {
 function openAddressDeleteModal(entry) {
   addressState.pendingDeleteId = entry.id;
   if (addressDeleteMessage) {
-    addressDeleteMessage.textContent = `Remove ${getAddressIdentifier(entry)} from LN Addresses? This stops any custom limits, templates, or future webhooks.`;
+    addressDeleteMessage.textContent = `Remove ${getAddressIdentifier(entry)} from LN Addresses? This stops any custom limits, templates, or webhook automation.`;
   }
   if (addressDeleteConfirmBtn) {
     const defaultText = addressDeleteConfirmBtn.dataset.defaultText || "Delete LN Address";

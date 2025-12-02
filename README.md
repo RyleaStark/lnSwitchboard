@@ -33,7 +33,7 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 | **Dashboard** | Live metrics, trend charts, and a status chip that pings `/api/health` every 10 seconds so you know your node is reachable. |
 | **Invoices hub** | Dedicated `/invoices/` page backed by a SQLite `invoice_events` table. Real-time updates come from a gRPC subscription worker plus a periodic full refresh loop. |
 | **Request log** | Searchable log of discovery, invoice, verify, and rate-limit events with metadata previews, payers’ comments, and proxy headers for forensic-level visibility. |
-| **LN address customization** | Pin custom min/max sats and template text to any `local_part@domain`. Tags automatically inherit the base handle. |
+| **LN address customization** | Pin custom min/max sats, template text, and multi-webhook automations to any `local_part@domain`. Tags automatically inherit from the base handle. |
 | **NIP-05 identities** | Manage Nostr mappings (npub/hex + relay list) from the UI, and serve `/.well-known/nostr.json` with proper CORS. |
 | **Env + macaroon management** | Update `.env` safely via the UI, rotate invoice macaroons, and apply changes without restarting the container. |
 
@@ -89,7 +89,7 @@ Populate `secrets/tls.cert`, `secrets/macaroon.hex`, and (optionally) `.env` bef
 - **Invoices:** Paginated table with per-invoice modals showing hashes, sats, expiry, and settle timestamps.
 - **Liquidity:** Channel table (peer alias, Amboss links, local/remote balances) plus the largest receivable metric powered by `list_channels`.
 - **Logs:** Filterable event log with modal JSON viewer - perfect for debugging wallet interactions.
-- **LN Addresses:** Create/edit/delete overrides with validation, variable hints, and identity badges when a matching NIP-05 entry exists.
+- **LN Addresses:** Create/edit/delete overrides with validation, variable hints, Nostr identity badges, and webhook badges when automations are attached to a handle.
 - **Identities:** CRUD for `local_part@domain` → `npub` mappings plus relay lists.
 - **Settings:** Macaroon upload/rotation, `.env` editor with grouped hints, and a reverse-proxy snippet you can copy into Nginx/Caddy.
 

@@ -72,7 +72,7 @@
             <p class="page-eyebrow">Mapping</p>
             <h1>LN Addresses</h1>
             <p class="muted">
-              Track the handles you plan to customize. Everything listed here can carry its own limits, copy, and soon webhooks or notifications.
+              Track the handles you plan to customize. Everything listed here can carry its own limits, copy, and webhook automation.
             </p>
           </div>
         </header>
@@ -83,8 +83,8 @@
               <div>
                 <p class="card-eyebrow">Admin</p>
                 <h2>Lightning Addresses</h2>
-                <p class="muted">Add a handle when you want unique behavior or plan to attach webhooks/notifications.</p>
-              </div>
+                <p class="muted">Add a handle when you want unique behavior or to attach webhooks/notifications.</p>
+          </div>
               <div class="card-actions">
                 <button class="primary-btn" type="button" id="address-new-btn">Add Address</button>
               </div>
@@ -94,7 +94,7 @@
               <ul>
                 <li>Set a custom <strong>minimum</strong> or <strong>maximum</strong> sats window (still capped by inbound liquidity).</li>
                 <li>Show different metadata or success text for partners, campaigns, or tip jars.</li>
-                <li>Prepare for per-address webhooks or notifications (coming soon).</li>
+                <li>Attach a webhook URL so every settled payment (including +tags) pings your automations.</li>
                 <li>Remember that the base handle covers every +tag (for example, <code>alice</code> also covers <code>alice+vip</code>).</li>
               </ul>
               <div class="address-variables">
@@ -164,7 +164,7 @@
             <p class="card-eyebrow" id="address-form-eyebrow">Create</p>
             <h2 id="address-form-title">Add LN address</h2>
             <p class="muted address-form-subtitle">
-              Local part and domain identify the handle. Leave any optional field blank to keep the global default until you are ready to customize.
+              Local part and domain identify the handle. Leave any optional field blank to keep the global default until you are ready to customize. Webhooks fire for the base handle and every +tag underneath it.
             </p>
           </div>
           <button class="modal-close" id="address-modal-close" aria-label="Close LN address form" data-close="address-modal">
@@ -241,6 +241,19 @@
                 placeholder="{ln_address} stacked {amount_sat} sats!"
               ></textarea>
               <span class="address-field-hint">Displayed after payment (must stay under 144 chars once rendered; supports {amount_sat}). Leave blank to inherit the global success message.</span>
+            </label>
+            <label class="address-field address-field-full">
+              <span class="address-field-label">Webhook URLs</span>
+              <textarea
+                id="address-webhook-urls"
+                class="input"
+                rows="3"
+                placeholder="https://hooks.example.com/payment"
+              ></textarea>
+              <span class="address-field-hint">
+                Enter one URL per line (HTTP or HTTPS). Every time this handle or any +tag settles a payment we’ll POST the payload to each URL you list.
+                <a href="https://github.com/RyleaStark/lnSwitchboard/wiki/%F0%9F%AA%9D-Webhooks" target="_blank" rel="noreferrer noopener">Webhook Docs.</a>
+              </span>
             </label>
           </div>
           <p class="address-form-feedback" id="address-form-feedback" role="status"></p>

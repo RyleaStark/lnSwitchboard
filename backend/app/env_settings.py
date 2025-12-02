@@ -129,6 +129,24 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "visible": False,
     },
     {
+        "key": "WEBHOOK_MAX_RETRIES",
+        "attr": "webhook_max_retries",
+        "label": "Webhook Max Retries",
+        "type": "number",
+        "category": "Webhooks",
+        "description": "Number of times to retry a webhook after the initial attempt.",
+        "editable": True,
+    },
+    {
+        "key": "WEBHOOK_RETRY_WINDOW_SECONDS",
+        "attr": "webhook_retry_window_seconds",
+        "label": "Retry Window (seconds)",
+        "type": "number",
+        "category": "Webhooks",
+        "description": "How long to spread webhook retries before giving up.",
+        "editable": True,
+    },
+    {
         "key": "RATE_LIMIT_PER_MIN",
         "attr": "rate_limit_per_min",
         "label": "Rate Limit (per minute)",
@@ -334,5 +352,6 @@ def update_env_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
     deps._get_log_storage.cache_clear()
     deps._get_macaroon_store.cache_clear()
     deps._get_nip05_store.cache_clear()
+    deps._get_webhook_dispatcher.cache_clear()
 
     return changed

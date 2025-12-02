@@ -76,6 +76,7 @@ def configure_env(tmp_path):
     deps._get_rate_limiter.cache_clear()
     deps._get_ln_client.cache_clear()
     deps._get_macaroon_store.cache_clear()
+    deps._get_webhook_dispatcher.cache_clear()
     yield
     config.get_settings.cache_clear()
     deps._get_log_storage.cache_clear()
@@ -84,6 +85,7 @@ def configure_env(tmp_path):
     deps._get_rate_limiter.cache_clear()
     deps._get_ln_client.cache_clear()
     deps._get_macaroon_store.cache_clear()
+    deps._get_webhook_dispatcher.cache_clear()
 
 
 @pytest.fixture

@@ -277,12 +277,14 @@ def test_lnurl_address_overrides(test_client: TestClient):
     body = discovery.json()
     assert body["minSendable"] == 50 * 1000
     assert body["maxSendable"] == 400 * 1000
+    assert "webhook_url" not in body
     metadata_entries = json.loads(body["metadata"])
     assert metadata_entries[0][1] == "bones@testserver is live on testserver"
 
     invoice_resp = test_client.get("/.well-known/lnurlp/bones", params={"amount": 120000})
     assert invoice_resp.status_code == 200
     invoice_body = invoice_resp.json()
+    assert "webhook_url" not in invoice_body
     assert invoice_body["successAction"]["message"] == "bones@testserver handled 120 sats"
 
     vip_payload = {
@@ -652,6 +654,8 @@ def test_env_settings_get(test_client: TestClient):
     keys = {item["key"] for item in payload["settings"]}
     assert "LNURL_METADATA_DESCRIPTION" in keys
     assert "RATE_LIMIT_PER_MIN" in keys
+    assert "WEBHOOK_MAX_RETRIES" in keys
+    assert "WEBHOOK_RETRY_WINDOW_SECONDS" in keys
     assert "SERVICE_PORT" not in keys
     assert "REQUEST_LOG_PATH" not in keys
     assert "DATA_STORE_PATH" not in keys
@@ -670,9 +674,23 @@ def test_env_settings_update(test_client: TestClient):
     entry = next(item for item in refreshed["settings"] if item["key"] == "LNURL_METADATA_DESCRIPTION")
     assert entry["value"] == "Edit"
 
+    retry_update = test_client.put(
+        "/api/settings/env",
+        json={"values": {"WEBHOOK_MAX_RETRIES": 4}},
+    )
+    assert retry_update.status_code == 200
+    refreshed = test_client.get("/api/settings/env").json()
+    retry_entry = next(item for item in refreshed["settings"] if item["key"] == "WEBHOOK_MAX_RETRIES")
+    assert retry_entry["value"] == "4"
+
     reset = test_client.put(
         "/api/settings/env",
-        json={"values": {"LNURL_METADATA_DESCRIPTION": "Pay"}},
+        json={
+            "values": {
+                "LNURL_METADATA_DESCRIPTION": "Pay",
+                "WEBHOOK_MAX_RETRIES": 5,
+            }
+        },
     )
     assert reset.status_code == 200
 

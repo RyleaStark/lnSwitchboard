@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
-from .deps import get_ln_client_dep, get_log_storage_dep
+from .deps import get_ln_client_dep, get_log_storage_dep, get_webhook_dispatcher_dep
 from .logging_utils import configure_logging
 from .routers import ln_addresses as ln_addresses_router
 from .routers import lnurl as lnurl_router
@@ -33,12 +33,22 @@ async def lifespan(app: FastAPI):
     configure_logging(settings.data_store_path.parent)
     ln_client = await get_ln_client_dep()
     storage = await get_log_storage_dep()
-    invoice_subscription_worker = InvoiceSubscriptionWorker(storage=storage, ln_client=ln_client)
-    invoice_full_refresh_worker = InvoiceFullRefreshWorker(storage=storage, ln_client=ln_client)
+    webhook_dispatcher = await get_webhook_dispatcher_dep()
+    invoice_subscription_worker = InvoiceSubscriptionWorker(
+        storage=storage,
+        ln_client=ln_client,
+        webhook_dispatcher=webhook_dispatcher,
+    )
+    invoice_full_refresh_worker = InvoiceFullRefreshWorker(
+        storage=storage,
+        ln_client=ln_client,
+        webhook_dispatcher=webhook_dispatcher,
+    )
     await invoice_subscription_worker.start()
     await invoice_full_refresh_worker.start()
     app.state.invoice_subscription_worker = invoice_subscription_worker
     app.state.invoice_full_refresh_worker = invoice_full_refresh_worker
+    app.state.webhook_dispatcher = webhook_dispatcher
     try:
         connection_info = await ln_client.check_connection()
         if connection_info.get("info_permission", True):

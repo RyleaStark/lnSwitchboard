@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from .ln_client import LNClient
 from .log_storage import InvoiceEvent, RequestLogStorage
+from .webhook_dispatcher import WebhookDispatcher
 
 LOGGER = logging.getLogger("lnswitchboard.invoice_worker")
 
@@ -84,6 +85,21 @@ def _merge_invoice_snapshot(
     return details
 
 
+async def _dispatch_webhook_if_needed(
+    dispatcher: Optional[WebhookDispatcher],
+    *,
+    event: InvoiceEvent,
+    details: Dict[str, Any],
+    settled_at: Optional[datetime],
+) -> None:
+    if dispatcher is None:
+        return
+    try:
+        await dispatcher.dispatch_payment_settled(event=event, details=details, settled_at=settled_at)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        LOGGER.warning("Webhook dispatcher raised for invoice event %s: %s", event.id, exc)
+
+
 async def refresh_invoice_statuses(
     storage: RequestLogStorage,
     ln_client: LNClient,
@@ -96,6 +112,7 @@ async def refresh_invoice_statuses(
     batch_size: int = 50,
     logger: Optional[logging.Logger] = None,
     events: Optional[List[InvoiceEvent]] = None,
+    webhook_dispatcher: Optional[WebhookDispatcher] = None,
 ) -> int:
     logger = logger or LOGGER
     if events is None:
@@ -211,6 +228,13 @@ async def refresh_invoice_statuses(
             interval_seconds=interval_seconds,
             settled_at=settled_at_dt,
         )
+        if newly_settled:
+            await _dispatch_webhook_if_needed(
+                webhook_dispatcher,
+                event=event,
+                details=details,
+                settled_at=settled_at_dt,
+            )
 
     return processed
 
@@ -226,6 +250,7 @@ async def refresh_all_pending_invoices(
     mid_interval_seconds: int = 60,
     slow_interval_seconds: int = 900,
     logger: Optional[logging.Logger] = None,
+    webhook_dispatcher: Optional[WebhookDispatcher] = None,
 ) -> int:
     logger = logger or LOGGER
     total = 0
@@ -245,6 +270,7 @@ async def refresh_all_pending_invoices(
             batch_size=batch_size,
             logger=logger,
             events=events,
+            webhook_dispatcher=webhook_dispatcher,
         )
         total += len(events)
         last_id = events[-1].id
@@ -264,6 +290,7 @@ class InvoiceSubscriptionWorker:
         pending_interval_seconds: int = 300,
         backoff_initial_seconds: int = 5,
         backoff_max_seconds: int = 60,
+        webhook_dispatcher: Optional[WebhookDispatcher] = None,
     ) -> None:
         self._storage = storage
         self._ln_client = ln_client
@@ -272,6 +299,7 @@ class InvoiceSubscriptionWorker:
         self._backoff_max = max(self._backoff_initial, backoff_max_seconds)
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
+        self._webhook_dispatcher = webhook_dispatcher
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -362,6 +390,13 @@ class InvoiceSubscriptionWorker:
             interval_seconds=interval_seconds,
             settled_at=settled_at_dt,
         )
+        if newly_settled:
+            await _dispatch_webhook_if_needed(
+                self._webhook_dispatcher,
+                event=event,
+                details=details,
+                settled_at=settled_at_dt,
+            )
 
 
 class InvoiceFullRefreshWorker:
@@ -374,6 +409,7 @@ class InvoiceFullRefreshWorker:
         *,
         interval_seconds: int = 1_800,
         batch_size: int = 250,
+        webhook_dispatcher: Optional[WebhookDispatcher] = None,
     ) -> None:
         self._storage = storage
         self._ln_client = ln_client
@@ -381,6 +417,7 @@ class InvoiceFullRefreshWorker:
         self._batch_size = max(1, batch_size)
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
+        self._webhook_dispatcher = webhook_dispatcher
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -409,6 +446,7 @@ class InvoiceFullRefreshWorker:
             self._storage,
             self._ln_client,
             batch_size=self._batch_size,
+            webhook_dispatcher=self._webhook_dispatcher,
         )
 
     async def _run(self) -> None:

@@ -7,8 +7,12 @@ from backend.app.invoice_worker import (
     InvoiceSubscriptionWorker,
     InvoiceFullRefreshWorker,
     refresh_all_pending_invoices,
+    refresh_invoice_statuses,
 )
 from backend.app.log_storage import RequestLogStorage
+from backend.app.ln_address_store import LNAddressStore
+from backend.app.version import get_version
+from backend.app.webhook_dispatcher import WebhookDispatcher
 
 
 class DummySubscriptionClient:
@@ -224,3 +228,94 @@ async def _exercise_full_refresh_worker(tmp_path):
         assert listing["items"][0]["settled"] is True
     finally:
         await worker.stop()
+
+
+def test_webhook_dispatch_on_settlement(tmp_path):
+    asyncio.run(_exercise_webhook_dispatch(tmp_path))
+
+
+async def _exercise_webhook_dispatch(tmp_path):
+    db_path = tmp_path / "webhooks.db"
+    storage = RequestLogStorage(db_path)
+    address_store = LNAddressStore(db_path)
+    address = await address_store.add_address(
+        local_part="pay",
+        domain="testserver",
+        min_sendable_sat=None,
+        max_sendable_sat=None,
+        metadata_description=None,
+        success_message=None,
+        webhook_urls=[
+            "https://hooks.example.com/payments",
+            "https://hooks.example.com/audit",
+        ],
+    )
+    payment_hash = "be" * 32
+    details = {
+        "ln_address": "pay+vip@testserver",
+        "username_raw": "pay+vip",
+        "domain": "testserver",
+        "payment_hash": payment_hash,
+        "address_override": {
+            "id": address["id"],
+            "local_part": address["local_part"],
+            "domain": address["domain"],
+        },
+        "invoice": {"payment_hash": payment_hash, "settled": False},
+    }
+    await storage.log_invoice_event(
+        username="pay",
+        domain="testserver",
+        amount_msat=2000,
+        ip="127.0.0.1",
+        payment_hash=payment_hash,
+        payment_request="lnbc1test",
+        details=details,
+        request_log_id=None,
+        expires_at=None,
+    )
+    events = await storage.get_due_invoice_events(limit=5)
+
+    class SettledLookupClient:
+        async def lookup_invoice(self, payment_hash_bytes):
+            return {
+                "settled": True,
+                "r_hash": payment_hash_bytes,
+                "payment_request": "lnbc1test",
+            }
+
+    captured = []
+
+    async def fake_sender(url, payload, headers):
+        captured.append({"url": url, "payload": payload, "headers": headers})
+
+    dispatcher = WebhookDispatcher(address_store=address_store, sender=fake_sender)
+    await refresh_invoice_statuses(
+        storage,
+        SettledLookupClient(),
+        events=events,
+        webhook_dispatcher=dispatcher,
+    )
+    assert {call["url"] for call in captured} == {
+        "https://hooks.example.com/payments",
+        "https://hooks.example.com/audit",
+    }
+    delivery = captured[0]
+    payload = delivery["payload"]
+    assert payload["event"] == "payment.settled"
+    assert payload["ln_address"] == "pay+vip@testserver"
+    assert payload["tag"] == "vip"
+    assert payload["amount_msat"] == 2000
+    assert payload["amount_sat"] == 2
+    assert payload["payment_hash"] == payment_hash
+    assert payload["payment_request"] == "lnbc1test"
+    assert payload["address_id"] == address["id"]
+    assert payload["invoice_event_id"] == events[0].id
+    assert payload["source"] == "lnswitchboard"
+    assert payload["version"] == get_version()
+    assert payload["settled_at"].endswith("+00:00")
+    headers = delivery["headers"]
+    assert headers["User-Agent"] == f"lnSwitchboard/{get_version()}"
+    assert headers["X-LnSwitchboard-Event"] == "payment.settled"
+    assert headers["X-LnSwitchboard-Version"] == get_version()
+    assert headers["X-LnSwitchboard-Address-Id"] == address["id"]

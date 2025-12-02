@@ -14,6 +14,7 @@ from .macaroon_store import MacaroonStore
 from .nip05_store import NostrIdentityStore
 from .rate_limiter import RateLimiter
 from .request_utils import get_client_ip, get_proxy_debug_info
+from .webhook_dispatcher import WebhookDispatcher
 
 
 @lru_cache()
@@ -61,6 +62,16 @@ def _get_ln_client() -> LNClient:
     )
 
 
+@lru_cache()
+def _get_webhook_dispatcher() -> WebhookDispatcher:
+    settings = get_settings()
+    return WebhookDispatcher(
+        address_store=_get_ln_address_store(),
+        max_retries=settings.webhook_max_retries,
+        retry_window_seconds=settings.webhook_retry_window_seconds,
+    )
+
+
 async def get_settings_dep() -> Settings:
     return get_settings()
 
@@ -87,6 +98,10 @@ async def get_nip05_store_dep() -> NostrIdentityStore:
 
 async def get_ln_address_store_dep() -> LNAddressStore:
     return _get_ln_address_store()
+
+
+async def get_webhook_dispatcher_dep() -> WebhookDispatcher:
+    return _get_webhook_dispatcher()
 
 
 async def enforce_rate_limit(
