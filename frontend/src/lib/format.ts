@@ -19,13 +19,25 @@ export function formatTimestamp(value?: string | null): { display: string; iso: 
   if (!value) return null
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return null
+  const iso = date.toISOString()
   return {
-    display: new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
+    display: formatDateForDisplay(date, iso),
+    iso,
+  }
+}
+
+function formatDateForDisplay(date: Date, iso: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
       timeZoneName: "short",
-    }).format(date),
-    iso: date.toISOString(),
+    }).format(date)
+  } catch {
+    return iso.replace("T", " ").replace(/\.\d{3}Z$/, " UTC")
   }
 }
 

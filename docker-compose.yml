@@ -10,6 +10,7 @@ services:
       LND_HOST: LND_HOST_IP
       LND_GRPC_PORT: 10009
       LND_TLS_PATH: /lnd/tls.cert
+      LND_TLS_SERVER_NAME: localhost
       LND_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/invoice.macaroon
     volumes:
       - ./secrets:/app/secrets:rw

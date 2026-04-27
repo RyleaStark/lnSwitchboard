@@ -59,6 +59,16 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "visible": False,
     },
     {
+        "key": "LND_TLS_SERVER_NAME",
+        "attr": "lnd_tls_server_name",
+        "label": "TLS Server Name",
+        "type": "text",
+        "category": "LND Node",
+        "description": "Certificate server name used for LND TLS verification. Defaults to localhost for mounted LND certs.",
+        "editable": False,
+        "visible": False,
+    },
+    {
         "key": "LND_MACAROON_PATH",
         "attr": "lnd_macaroon_path",
         "label": "Mounted Macaroon Path",

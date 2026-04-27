@@ -59,6 +59,7 @@ def _get_ln_client() -> LNClient:
         port=settings.lnd_grpc_port,
         macaroon_store=_get_macaroon_store(),
         tls_path=settings.lnd_tls_path,
+        tls_server_name=settings.lnd_tls_server_name,
     )
 
 

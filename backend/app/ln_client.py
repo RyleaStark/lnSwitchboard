@@ -25,11 +25,18 @@ class LNClient:
     """Async helper that communicates with the local LND gRPC interface."""
 
     def __init__(
-        self, *, host: str, port: int, macaroon_store: MacaroonStore, tls_path: Path
+        self,
+        *,
+        host: str,
+        port: int,
+        macaroon_store: MacaroonStore,
+        tls_path: Path,
+        tls_server_name: str | None = None,
     ) -> None:
         self._target = f"{host}:{port}"
         self._macaroon_store = macaroon_store
         self._tls_path = tls_path
+        self._tls_server_name = tls_server_name
         self._stub: LightningStub | None = None
         self._channel: grpc.aio.Channel | None = None
         self._lock = asyncio.Lock()
@@ -40,7 +47,15 @@ class LNClient:
                 if self._stub is None:
                     cert = self._tls_path.read_bytes()
                     credentials = grpc.ssl_channel_credentials(root_certificates=cert)
-                    self._channel = grpc.aio.secure_channel(self._target, credentials)
+                    options = []
+                    if self._tls_server_name:
+                        options.extend(
+                            [
+                                ("grpc.ssl_target_name_override", self._tls_server_name),
+                                ("grpc.default_authority", self._tls_server_name),
+                            ]
+                        )
+                    self._channel = grpc.aio.secure_channel(self._target, credentials, options=options)
                     self._stub = LightningStub(self._channel)
         return self._stub
 
