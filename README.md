@@ -56,10 +56,13 @@ The repo ships with a ready-to-edit [`docker-compose.yml`](./docker-compose.yml)
 volumes:
   - ${APP_LIGHTNING_NODE_DATA_DIR}:/lnd:ro
 environment:
+  DEP_ENV: DOCKER
   LND_TLS_PATH: /lnd/tls.cert
   LND_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/invoice.macaroon
   LND_READONLY_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/readonly.macaroon
 ```
+
+`DEP_ENV` controls the upstream host shown in the in-app reverse proxy reference. Use `DOCKER` for standalone Compose, `UMBREL` for the Umbrel store app, or `UMBREL-DEV` for the extended Umbrel dev app name.
 
 Then run:
 

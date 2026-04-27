@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     )
 
     service_port: int = _env_field(env="SERVICE_PORT", default=22121)
+    dep_env: str = _env_field(env="DEP_ENV", default="DOCKER")
     lnd_host: str = _env_field(env="LND_HOST", default=...)
     lnd_grpc_port: int = _env_field(env="LND_GRPC_PORT", default=10009)
     lnd_tls_path: Path = _env_field(env="LND_TLS_PATH", default=Path("secrets/tls.cert"))
@@ -128,6 +129,18 @@ class Settings(BaseSettings):
         if trimmed.lower() in {"", "none", "false", "off", "disabled"}:
             return None
         return trimmed
+
+    @field_validator("dep_env", mode="before")
+    @classmethod
+    def _normalize_dep_env(cls, value: Optional[str]) -> str:
+        if value is None:
+            return "DOCKER"
+        normalized = str(value).strip().upper().replace("_", "-")
+        if not normalized:
+            return "DOCKER"
+        if normalized not in {"DOCKER", "UMBREL", "UMBREL-DEV"}:
+            raise ValueError("DEP_ENV must be one of DOCKER, UMBREL, or UMBREL-DEV")
+        return normalized
 
     @field_validator("max_sendable_sat")
     @classmethod

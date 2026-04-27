@@ -253,8 +253,10 @@ async def public_channels(
 
 
 @router.get("/version")
-async def version_info() -> Dict[str, str]:
-    return {"version": get_version()}
+async def version_info(
+    settings: Settings = Depends(get_settings_dep),
+) -> Dict[str, str]:
+    return {"version": get_version(), "dep_env": settings.dep_env}
 
 
 @router.delete("/logs/recent")

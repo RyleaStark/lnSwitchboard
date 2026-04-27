@@ -3,17 +3,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { KeyRoundIcon, SaveIcon, ServerCogIcon } from "lucide-react"
 import { toast } from "sonner"
 
-import { CodeBlock, CopyButton, LoadingRows, PageError, PageHeader } from "@/components/common"
+import { LoadingRows, PageError, PageHeader } from "@/components/common"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { api, type AuthStatus, type EnvSetting } from "@/lib/api"
+
+const settingsTabs = [
+  { value: "auth", label: "Macaroon", icon: KeyRoundIcon },
+  { value: "env", label: "Environment", icon: ServerCogIcon },
+]
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
@@ -61,14 +65,23 @@ export function SettingsPage() {
       <PageHeader
         eyebrow="Configuration"
         title="Settings"
-        description="Rotate the invoice macaroon, edit safe environment settings, and copy reverse-proxy routes for public LNURL and Nostr endpoints."
+        description="Rotate the invoice macaroon and edit safe environment settings."
       />
-      <Tabs defaultValue="auth" className="flex flex-col gap-5">
-        <TabsList className="grid w-full grid-cols-3 md:w-fit">
-          <TabsTrigger value="auth">Macaroon</TabsTrigger>
-          <TabsTrigger value="env">Environment</TabsTrigger>
-          <TabsTrigger value="proxy">Proxy</TabsTrigger>
-        </TabsList>
+      <Tabs defaultValue="auth" className="flex flex-col gap-6">
+        <div className="flex">
+          <TabsList variant="line" className="h-11 w-fit justify-start gap-2 p-0">
+            {settingsTabs.map((item) => (
+              <TabsTrigger
+                key={item.value}
+                value={item.value}
+                className="h-11 flex-none rounded-none border-0 bg-transparent px-3 data-active:bg-transparent dark:data-active:bg-transparent"
+              >
+                <item.icon />
+                <span>{item.label}</span>
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </div>
         <TabsContent value="auth">
           <Card>
             <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -176,9 +189,6 @@ export function SettingsPage() {
             </CardContent>
           </Card>
         </TabsContent>
-        <TabsContent value="proxy">
-          <ProxyCard />
-        </TabsContent>
       </Tabs>
     </>
   )
@@ -251,52 +261,6 @@ function EnvField({
         ) : null}
       </FieldDescription>
     </Field>
-  )
-}
-
-function ProxyCard() {
-  const host = window.location.host || "your-domain.example"
-  const nginx = `location /.well-known/lnurlp/ {\n  proxy_pass http://127.0.0.1:22121;\n  proxy_set_header Host $host;\n  proxy_set_header X-Forwarded-Proto $scheme;\n  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n}\n\nlocation = /.well-known/nostr.json {\n  proxy_pass http://127.0.0.1:22121;\n  proxy_set_header Host $host;\n  proxy_set_header X-Forwarded-Proto $scheme;\n}`
-  const caddy = `${host} {\n  reverse_proxy /.well-known/lnurlp/* 127.0.0.1:22121\n  reverse_proxy /.well-known/nostr.json 127.0.0.1:22121\n}`
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Serve LNURL + Nostr from your domain</CardTitle>
-        <CardDescription>Expose only well-known public endpoints to wallets. Keep the operator UI private.</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-5">
-        <div className="rounded-md border bg-muted/20 p-4 text-sm text-muted-foreground">
-          Public routes: <code className="font-mono">/.well-known/lnurlp/*</code> and <code className="font-mono">/.well-known/nostr.json</code>
-        </div>
-        <Dialog>
-          <DialogTrigger asChild>
-            <Button variant="outline">Show proxy snippets</Button>
-          </DialogTrigger>
-          <DialogContent className="min-w-0 max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-3xl">
-            <DialogHeader>
-              <DialogTitle>Proxy snippets</DialogTitle>
-              <DialogDescription>Copy the block that matches your reverse proxy and adjust the upstream if your service port differs.</DialogDescription>
-            </DialogHeader>
-            <div className="flex min-w-0 flex-col gap-4">
-              <Snippet title="Nginx" value={nginx} />
-              <Snippet title="Caddy" value={caddy} />
-            </div>
-          </DialogContent>
-        </Dialog>
-      </CardContent>
-    </Card>
-  )
-}
-
-function Snippet({ title, value }: { title: string; value: string }) {
-  return (
-    <section className="flex min-w-0 flex-col gap-2">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">{title}</h3>
-        <CopyButton value={value} label="Copy" copiedLabel={`${title} snippet copied`} />
-      </div>
-      <CodeBlock>{value}</CodeBlock>
-    </section>
   )
 }
 

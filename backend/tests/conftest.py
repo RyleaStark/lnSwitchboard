@@ -62,6 +62,7 @@ def configure_env(tmp_path):
     os.environ.pop("LND_MACAROON_PATH", None)
     os.environ.pop("LND_READONLY_MACAROON_PATH", None)
     os.environ["SERVICE_PORT"] = "22121"
+    os.environ.pop("DEP_ENV", None)
     os.environ["DATA_STORE_PATH"] = str(data_store_path)
     os.environ["LND_GRPC_PORT"] = "10009"
     os.environ["MACAROON_STORE_PATH"] = str(macaroon)
@@ -83,6 +84,7 @@ def configure_env(tmp_path):
     yield
     os.environ.pop("LND_MACAROON_PATH", None)
     os.environ.pop("LND_READONLY_MACAROON_PATH", None)
+    os.environ.pop("DEP_ENV", None)
     config.get_settings.cache_clear()
     deps._get_log_storage.cache_clear()
     deps._get_nip05_store.cache_clear()

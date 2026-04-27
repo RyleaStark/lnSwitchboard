@@ -2,22 +2,29 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import {
   BadgeDollarSignIcon,
+  ChevronRightIcon,
   CircleIcon,
   GaugeIcon,
   HeartIcon,
   HelpCircleIcon,
   HomeIcon,
   IdCardIcon,
+  InfoIcon,
   ListIcon,
   MenuIcon,
   PlugZapIcon,
   SettingsIcon,
+  WebhookIcon,
 } from "lucide-react"
-import { useEffect } from "react"
+import { useEffect, useMemo } from "react"
 import { toast } from "sonner"
 
+import { CodeBlock, CopyButton } from "@/components/common"
+import { TemplateVariablesDialog } from "@/components/template-variables-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import {
   Sidebar,
   SidebarContent,
@@ -30,12 +37,16 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { api } from "@/lib/api"
 import { copyText } from "@/lib/format"
+import { buildProxyHelpItems, type ProxyEngine, type ProxyHelpItem } from "@/lib/proxy-snippets"
 import { cn } from "@/lib/utils"
 
 const TIP_ADDRESS = "lnswitchboard+tips@bigbones.net"
@@ -75,7 +86,7 @@ export function AppShell() {
   })
 
   useEffect(() => {
-    if (auth.data?.configured === false && !location.pathname.startsWith("/settings")) {
+    if (auth.data?.configured === false && !isSetupAllowedRoute(location.pathname)) {
       navigate("/settings/", { replace: true })
     }
   }, [auth.data?.configured, location.pathname, navigate])
@@ -90,6 +101,7 @@ export function AppShell() {
   const tlsTone = lndStatus.data ? tlsStatusTone(lndStatus.data.tls_status) : "pending"
   const macaroonValue = auth.data ? macaroonStatusLabel(auth.data) : "Checking"
   const macaroonTone = auth.data ? (configured ? "ok" : "error") : "pending"
+  const proxyHelpItems = useMemo(() => buildProxyHelpItems(version.data?.dep_env), [version.data?.dep_env])
 
   return (
     <TooltipProvider>
@@ -126,11 +138,43 @@ export function AppShell() {
               <SidebarGroupContent>
                 <SidebarMenu>
                   <SidebarMenuItem>
-                    <SidebarMenuButton asChild tooltip="Project wiki">
-                      <a href="https://github.com/RyleaStark/lnSwitchboard/wiki" target="_blank" rel="noreferrer">
-                        <HelpCircleIcon />
-                        <span>Help</span>
-                      </a>
+                    <Collapsible defaultOpen className="group/collapsible">
+                      <CollapsibleTrigger asChild>
+                        <SidebarMenuButton type="button" tooltip="Reverse Proxy Setup">
+                          <HelpCircleIcon />
+                          <span>Reverse Proxy Setup</span>
+                          <ChevronRightIcon className="ml-auto transition-transform group-data-[state=open]/collapsible:rotate-90" />
+                        </SidebarMenuButton>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent>
+                        <SidebarMenuSub>
+                          {proxyHelpItems.map((item) => (
+                            <SidebarMenuSubItem key={item.label}>
+                              <ProxyHelpDialog item={item} />
+                            </SidebarMenuSubItem>
+                          ))}
+                        </SidebarMenuSub>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </SidebarMenuItem>
+                  <SidebarMenuItem>
+                    <TemplateVariablesDialog
+                      trigger={(
+                        <SidebarMenuButton asChild>
+                          <button type="button">
+                            <InfoIcon />
+                            <span>Variables</span>
+                          </button>
+                        </SidebarMenuButton>
+                      )}
+                    />
+                  </SidebarMenuItem>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton asChild isActive={isActiveRoute(location.pathname, "/webhooks/")} tooltip="Webhooks">
+                      <NavLink to="/webhooks/">
+                        <WebhookIcon />
+                        <span>Webhooks</span>
+                      </NavLink>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 </SidebarMenu>
@@ -199,6 +243,67 @@ export function AppShell() {
         </SidebarInset>
       </SidebarProvider>
     </TooltipProvider>
+  )
+}
+
+function ProxyHelpDialog({
+  item,
+}: {
+  item: ProxyHelpItem
+}) {
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <SidebarMenuSubButton asChild>
+          <button type="button">
+            <ProxyEngineIcon engine={item.icon} />
+            <span>{item.label}</span>
+          </button>
+        </SidebarMenuSubButton>
+      </DialogTrigger>
+      <DialogContent className="min-w-0 max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{item.title}</DialogTitle>
+          <DialogDescription>{item.description}</DialogDescription>
+        </DialogHeader>
+        <section className="flex min-w-0 flex-col gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm font-medium">Snippet</h3>
+            <CopyButton value={item.snippet} label="Copy" copiedLabel={`${item.title} copied`} />
+          </div>
+          <CodeBlock>{item.snippet}</CodeBlock>
+        </section>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ProxyEngineIcon({ engine }: { engine: ProxyEngine }) {
+  if (engine === "nginx") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="#009639" d="M12 1.8 3.5 6.7v9.8l8.5 4.9 8.5-4.9V6.7L12 1.8Z" />
+        <path fill="#ffffff" d="M7.7 16.5v-9h2.1l4.3 5.2V7.5h2.2v9h-2l-4.4-5.3v5.3H7.7Z" />
+      </svg>
+    )
+  }
+
+  if (engine === "caddy") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9.5" fill="#1f8fff" />
+        <path fill="#ffffff" d="M16.8 15.1a5.6 5.6 0 1 1 0-6.2l-1.9 1.1a3.4 3.4 0 1 0 0 4l1.9 1.1Z" />
+        <path fill="#9bf2ff" d="M14.4 6.8c2.1.7 3.6 2.8 3.6 5.2s-1.5 4.5-3.6 5.2l-.8-1.7a3.7 3.7 0 0 0 0-7l.8-1.7Z" opacity="0.9" />
+      </svg>
+    )
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="#f38020" d="M9.5 8.2a5 5 0 0 1 9.3 1.7 3.9 3.9 0 0 1-.6 7.8H7.5a4.1 4.1 0 0 1-.6-8.2 5 5 0 0 1 2.6-1.3Z" />
+      <path fill="#faae40" d="M15.6 8.9a4.7 4.7 0 0 1 4.4 3.1 3 3 0 0 1-.7 5.8h-7.7a3.4 3.4 0 0 1-.3-6.8 4.8 4.8 0 0 1 4.3-2.1Z" />
+      <path fill="#ffffff" d="M6.9 17.6h12.5a2.4 2.4 0 0 0 1.7-.7 3.1 3.1 0 0 1-1.8.5H7.5a3 3 0 0 1-2.2-.9 4 4 0 0 0 1.6 1.1Z" opacity="0.85" />
+    </svg>
   )
 }
 
@@ -310,4 +415,8 @@ function ProductFooter({
 function isActiveRoute(pathname: string, target: string) {
   if (target === "/") return pathname === "/"
   return pathname.startsWith(target)
+}
+
+function isSetupAllowedRoute(pathname: string) {
+  return pathname.startsWith("/settings") || pathname.startsWith("/webhooks")
 }

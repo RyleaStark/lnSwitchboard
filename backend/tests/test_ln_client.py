@@ -120,6 +120,12 @@ def test_lookup_invoice_uses_binary_payment_hash(tmp_path):
         invoice.creation_date = int(datetime.now(timezone.utc).timestamp())
         invoice.expiry = 3600
         invoice.state = 1
+        htlc = invoice.htlcs.add()
+        htlc.chan_id = 123456
+        htlc.htlc_index = 7
+        htlc.amt_msat = 2000
+        htlc.resolve_time = 1710000000
+        htlc.state = 1
         fake_stub = FakeLightningStub(payment_hash_bytes, invoice_response=invoice)
         client._stub = fake_stub
         result = await client.lookup_invoice(payment_hash_hex)
@@ -138,6 +144,15 @@ def test_lookup_invoice_uses_binary_payment_hash(tmp_path):
     assert result["state"] == "SETTLED"
     assert result["creation_date"] == invoice.creation_date
     assert result["expiry"] == invoice.expiry
+    assert result["htlcs"] == [
+        {
+            "chan_id": "123456",
+            "htlc_index": "7",
+            "amt_msat": "2000",
+            "resolve_time": "1710000000",
+            "state": "SETTLED",
+        }
+    ]
     expected_expires = datetime.fromtimestamp(
         invoice.creation_date + invoice.expiry, tz=timezone.utc
     ).isoformat()
@@ -406,6 +421,7 @@ def test_list_channels_formats_response(tmp_path):
         channel.remote_balance = 1250
         channel.remote_pubkey = "deadbeef"
         channel.channel_point = "abc:0"
+        channel.peer_alias = "Bargly"
         response = ListChannelsResponse()
         response.channels.extend([channel])
         stub = ListChannelsStub(response)
@@ -422,6 +438,7 @@ def test_list_channels_formats_response(tmp_path):
     assert entry["receiving_capacity_sat"] == 1250
     assert entry["remote_pubkey"] == "deadbeef"
     assert entry["channel_point"] == "abc:0"
+    assert entry["peer_alias"] == "Bargly"
     assert stub.requests and stub.requests[0].public_only is False
 
 

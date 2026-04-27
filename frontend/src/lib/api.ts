@@ -65,8 +65,10 @@ export type InvoiceEvent = {
 export type Channel = {
   active?: boolean
   alias?: string | null
+  peer_alias?: string | null
   remote_pubkey?: string | null
   chan_id?: string | number | null
+  channel_id?: string | number | null
   channel_point?: string | null
   capacity_sat?: number | null
   local_balance_sat?: number | null
@@ -74,6 +76,7 @@ export type Channel = {
   local_chan_reserve_sat?: number | null
   remote_chan_reserve_sat?: number | null
   receiving_capacity_sat?: number | null
+  sendable_balance_sat?: number | null
   sendable_capacity_sat?: number | null
 }
 
@@ -132,6 +135,13 @@ export type EnvSetting = {
   editable: boolean
   value: string
   hint_link?: { label?: string; href: string }
+}
+
+export type DeploymentEnv = "DOCKER" | "UMBREL" | "UMBREL-DEV"
+
+export type VersionInfo = {
+  version: string
+  dep_env: DeploymentEnv
 }
 
 export type AuthStatus = {
@@ -208,7 +218,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<{ status: string }>("api/health"),
-  version: () => request<{ version: string }>("api/version"),
+  version: () => request<VersionInfo>("api/version"),
   lndStatus: () => request<LndStatus>("api/lnd/status"),
   authStatus: () => request<AuthStatus>("api/auth/status"),
   saveMacaroon: (macaroon: string) =>

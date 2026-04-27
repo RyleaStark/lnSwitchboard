@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { api, type Channel } from "@/lib/api"
-import { channelPeer, formatSats, receivableCapacity, reserveTotal, sendableCapacity } from "@/lib/format"
+import { channelPeer, channelPeerIdentifier, formatSats, receivableCapacity, reserveTotal, sendableCapacity } from "@/lib/format"
 
 export function LiquidityPage() {
   const channels = useQuery({
@@ -81,7 +81,7 @@ export function LiquidityPage() {
                       </TableHeader>
                       <TableBody>
                         {rows.map((channel, index) => (
-                          <TableRow key={String(channel.chan_id || channel.channel_point || index)}>
+                          <TableRow key={String(channel.channel_id || channel.chan_id || channel.channel_point || index)}>
                             <TableCell><Peer channel={channel} /></TableCell>
                             <TableCell><Status active={channel.active} /></TableCell>
                             <TableCell>
@@ -99,7 +99,7 @@ export function LiquidityPage() {
                   </div>
                   <div className="grid gap-3 lg:hidden">
                     {rows.map((channel, index) => (
-                      <Card key={String(channel.chan_id || channel.channel_point || index)}>
+                      <Card key={String(channel.channel_id || channel.chan_id || channel.channel_point || index)}>
                         <CardHeader>
                           <CardTitle className="text-base"><Peer channel={channel} /></CardTitle>
                           <CardDescription><Status active={channel.active} /></CardDescription>
@@ -125,15 +125,26 @@ export function LiquidityPage() {
 
 function Peer({ channel }: { channel: Channel }) {
   const label = channelPeer(channel)
+  const identifier = channelPeerIdentifier(channel, { compact: true })
+  const showIdentifier = Boolean(identifier && identifier !== label)
+  const content = (
+    <>
+      <span className="inline-flex min-w-0 items-center gap-1">
+        <span className="truncate">{label}</span>
+        {channel.remote_pubkey ? <ExternalLinkIcon /> : null}
+      </span>
+      {showIdentifier ? <code className="truncate font-mono text-xs text-muted-foreground">{identifier}</code> : null}
+    </>
+  )
+
   if (channel.remote_pubkey) {
     return (
-      <a className="inline-flex items-center gap-1 font-medium underline-offset-4 hover:underline" href={`https://amboss.space/node/${encodeURIComponent(channel.remote_pubkey)}`} target="_blank" rel="noreferrer">
-        <span className="truncate">{label}</span>
-        <ExternalLinkIcon />
+      <a className="flex min-w-0 max-w-fit flex-col gap-1 font-medium underline-offset-4 hover:underline" href={`https://amboss.space/node/${encodeURIComponent(channel.remote_pubkey)}`} target="_blank" rel="noreferrer">
+        {content}
       </a>
     )
   }
-  return <span className="font-medium">{label}</span>
+  return <span className="flex min-w-0 flex-col gap-1 font-medium">{content}</span>
 }
 
 function Status({ active }: { active?: boolean }) {

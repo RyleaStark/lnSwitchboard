@@ -717,9 +717,25 @@ def test_env_settings_get(test_client: TestClient):
     assert "RATE_LIMIT_PER_MIN" in keys
     assert "WEBHOOK_MAX_RETRIES" in keys
     assert "WEBHOOK_RETRY_WINDOW_SECONDS" in keys
+    assert "DEP_ENV" in keys
     assert "SERVICE_PORT" not in keys
     assert "REQUEST_LOG_PATH" not in keys
     assert "DATA_STORE_PATH" not in keys
+    dep_env = next(item for item in payload["settings"] if item["key"] == "DEP_ENV")
+    assert dep_env["value"] == "DOCKER"
+    assert dep_env["editable"] is False
+
+
+def test_version_includes_deployment_environment(test_client: TestClient, monkeypatch):
+    response = test_client.get("/api/version")
+    assert response.status_code == 200
+    assert response.json()["dep_env"] == "DOCKER"
+
+    monkeypatch.setenv("DEP_ENV", "umbrel_dev")
+    config.get_settings.cache_clear()
+    response = test_client.get("/api/version")
+    assert response.status_code == 200
+    assert response.json()["dep_env"] == "UMBREL-DEV"
 
 
 def test_env_settings_update(test_client: TestClient):

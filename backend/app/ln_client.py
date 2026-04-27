@@ -293,6 +293,28 @@ class LNClient:
         amt_paid_msat = _int_or_none(response_dict.get("amt_paid_msat"))
         if amt_paid_msat is not None:
             result["amt_paid_msat"] = amt_paid_msat
+        htlcs = response_dict.get("htlcs")
+        if isinstance(htlcs, list):
+            normalized_htlcs: list[dict[str, Any]] = []
+            for htlc in htlcs:
+                if not isinstance(htlc, dict):
+                    continue
+                entry: dict[str, Any] = {}
+                for source, target in (
+                    ("chan_id", "chan_id"),
+                    ("htlc_index", "htlc_index"),
+                    ("amt_msat", "amt_msat"),
+                    ("accept_time", "accept_time"),
+                    ("resolve_time", "resolve_time"),
+                    ("state", "state"),
+                ):
+                    value = htlc.get(source)
+                    if value is not None:
+                        entry[target] = value
+                if entry:
+                    normalized_htlcs.append(entry)
+            if normalized_htlcs:
+                result["htlcs"] = normalized_htlcs
         return result
 
     @staticmethod

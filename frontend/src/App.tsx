@@ -10,6 +10,7 @@ import { InvoicesPage } from "@/pages/invoices"
 import { LiquidityPage } from "@/pages/liquidity"
 import { LogsPage } from "@/pages/logs"
 import { SettingsPage } from "@/pages/settings"
+import { WebhooksPage } from "@/pages/webhooks"
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -33,6 +34,7 @@ export default function App() {
             <Route path="addresses/" element={<AddressesPage />} />
             <Route path="identities/" element={<IdentitiesPage />} />
             <Route path="settings/" element={<SettingsPage />} />
+            <Route path="webhooks/" element={<WebhooksPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

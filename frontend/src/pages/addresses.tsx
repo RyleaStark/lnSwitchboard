@@ -130,16 +130,6 @@ export function AddressesPage() {
         description="Create handle-specific min/max amounts, invoice templates, success messages, and webhook automation."
         action={<Button onClick={openCreate}><PlusIcon data-icon="inline-start" /> Add address</Button>}
       />
-      <div className="grid gap-3 md:grid-cols-3">
-        {["{ln_address}", "{local_part}", "{domain}"].map((token) => (
-          <Card key={token}>
-            <CardHeader>
-              <CardDescription>Template variable</CardDescription>
-              <CardTitle className="font-mono text-base">{token}</CardTitle>
-            </CardHeader>
-          </Card>
-        ))}
-      </div>
       <Card>
         <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>

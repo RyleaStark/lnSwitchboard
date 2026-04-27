@@ -81,6 +81,8 @@ def _merge_invoice_snapshot(
         if isinstance(preimage_value, bytes):
             preimage_value = preimage_value.hex()
         invoice_details["r_preimage"] = preimage_value
+    if "htlcs" in snapshot and isinstance(snapshot["htlcs"], list):
+        invoice_details["htlcs"] = snapshot["htlcs"]
     invoice_details["last_checked_at"] = datetime.now(tz=timezone.utc).isoformat()
     return details
 

@@ -25,7 +25,7 @@ from .invoice_worker import InvoiceSubscriptionWorker, InvoiceFullRefreshWorker
 LOGGER = logging.getLogger("lnswitchboard")
 BASE_DIR = Path(__file__).resolve().parents[2]
 STATIC_DIR = BASE_DIR / "frontend" / "static"
-SPA_ROUTES = ("/logs/", "/liquidity/", "/settings/", "/identities/", "/addresses/", "/invoices/")
+SPA_ROUTES = ("/logs/", "/liquidity/", "/settings/", "/identities/", "/addresses/", "/invoices/", "/webhooks/")
 
 
 @asynccontextmanager
@@ -107,7 +107,7 @@ def _register_client_redirect(path: str) -> None:
         return RedirectResponse(url=target, status_code=307)
 
 
-for _client_path in ("/logs", "/liquidity", "/settings", "/identities", "/addresses", "/invoices"):
+for _client_path in ("/logs", "/liquidity", "/settings", "/identities", "/addresses", "/invoices", "/webhooks"):
     _register_client_redirect(_client_path)
 
 if STATIC_DIR.exists():

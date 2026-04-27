@@ -29,6 +29,15 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "visible": False,
     },
     {
+        "key": "DEP_ENV",
+        "attr": "dep_env",
+        "label": "Deployment Environment",
+        "type": "text",
+        "category": "System",
+        "description": "Deployment target used to generate in-app reverse proxy references. Supported values: DOCKER, UMBREL, UMBREL-DEV.",
+        "editable": False,
+    },
+    {
         "key": "LND_HOST",
         "attr": "lnd_host",
         "label": "LND Host",

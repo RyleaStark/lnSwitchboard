@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { EyeIcon, SearchIcon } from "lucide-react"
+import { ChevronRightIcon, EyeIcon, SearchIcon } from "lucide-react"
 
 import { CodeBlock, CopyButton, EmptyPanel, LoadingRows, PageError, PageHeader, Timestamp } from "@/components/common"
 import { Badge } from "@/components/ui/badge"
@@ -15,8 +15,8 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { api, type InvoiceEvent } from "@/lib/api"
-import { formatNumber, formatSats, invoiceAmountSats, invoiceRecipient, shortHash } from "@/lib/format"
+import { api, type Channel, type InvoiceEvent, type JsonValue } from "@/lib/api"
+import { formatNumber, formatSats, invoiceAmountSats, invoiceRecipientParts, shortHash } from "@/lib/format"
 
 const PAGE_SIZE = 10
 
@@ -28,6 +28,12 @@ export function InvoicesPage() {
     queryKey: ["invoices", page, query],
     queryFn: () => api.invoices(page, PAGE_SIZE, query),
     refetchInterval: 10_000,
+  })
+  const channels = useQuery({
+    queryKey: ["channels"],
+    queryFn: api.channels,
+    enabled: Boolean(selected),
+    refetchInterval: selected ? 10_000 : false,
   })
 
   const items = invoices.data?.items ?? []
@@ -84,7 +90,7 @@ export function InvoicesPage() {
                     {items.map((invoice) => (
                       <TableRow key={invoice.id}>
                         <TableCell><Timestamp value={invoice.created_at} /></TableCell>
-                        <TableCell>{invoiceRecipient(invoice)}</TableCell>
+                        <TableCell className="max-w-72"><Recipient invoice={invoice} /></TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2">
                             <StatusBadge status={invoice.status} />
@@ -107,7 +113,7 @@ export function InvoicesPage() {
                 {items.map((invoice) => (
                   <Card key={invoice.id}>
                     <CardHeader>
-                      <CardTitle className="text-base">{invoiceRecipient(invoice)}</CardTitle>
+                      <CardTitle className="min-w-0 text-base"><Recipient invoice={invoice} /></CardTitle>
                       <CardDescription><Timestamp value={invoice.created_at} /></CardDescription>
                     </CardHeader>
                     <CardContent className="flex flex-col gap-3">
@@ -128,17 +134,30 @@ export function InvoicesPage() {
           ) : null}
         </CardContent>
       </Card>
-      <InvoiceDetails invoice={selected} onOpenChange={(open) => !open && setSelected(null)} />
+      <InvoiceDetails
+        channels={channels.data?.channels ?? []}
+        invoice={selected}
+        onOpenChange={(open) => !open && setSelected(null)}
+      />
     </>
   )
 }
 
-function InvoiceDetails({ invoice, onOpenChange }: { invoice: InvoiceEvent | null; onOpenChange: (open: boolean) => void }) {
+function InvoiceDetails({
+  channels,
+  invoice,
+  onOpenChange,
+}: {
+  channels: Channel[]
+  invoice: InvoiceEvent | null
+  onOpenChange: (open: boolean) => void
+}) {
+  const settlementHtlcs = invoice ? invoiceSettlementHtlcs(invoice) : []
   return (
     <Dialog open={Boolean(invoice)} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-3xl">
         <DialogHeader className="min-w-0 pr-10">
-          <DialogTitle className="break-words">{invoice ? `Invoice for ${invoiceRecipient(invoice)}` : "Invoice details"}</DialogTitle>
+          <DialogTitle className="break-words">{invoice ? `Invoice for ${invoiceRecipientParts(invoice).taggedRecipient}` : "Invoice details"}</DialogTitle>
           <DialogDescription>Settlement, expiry, hash, and payment request details.</DialogDescription>
         </DialogHeader>
         {invoice ? (
@@ -151,6 +170,7 @@ function InvoiceDetails({ invoice, onOpenChange }: { invoice: InvoiceEvent | nul
               <Detail label="Next check"><Timestamp value={invoice.next_check_at} /></Detail>
               <Detail label="Settled"><Timestamp value={invoice.settled_at} fallback={invoice.settled ? "Unknown" : "-"} /></Detail>
             </div>
+            {invoice.settled ? <SettlementPath channels={channels} htlcs={settlementHtlcs} /> : null}
             <div className="flex min-w-0 flex-col gap-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-medium">Payment hash</span>
@@ -185,6 +205,83 @@ function StatusBadge({ status }: { status?: string }) {
   const normalized = status === "settled" || status === "expired" || status === "pending" ? status : "unknown"
   const variant = normalized === "settled" ? "default" : normalized === "expired" ? "destructive" : "secondary"
   return <Badge variant={variant}>{normalized.charAt(0).toUpperCase() + normalized.slice(1)}</Badge>
+}
+
+function Recipient({ invoice }: { invoice: InvoiceEvent }) {
+  const parts = invoiceRecipientParts(invoice)
+  return (
+    <span className="inline-flex min-w-0 items-center gap-2">
+      {parts.tag ? <Badge variant="secondary" className="shrink-0 font-mono">{parts.tag}</Badge> : null}
+      <span className="truncate">{parts.recipient}</span>
+    </span>
+  )
+}
+
+function SettlementPath({ channels, htlcs }: { channels: Channel[]; htlcs: SettledHtlc[] }) {
+  const htlc = htlcs[0]
+  const incomingChannel = htlc ? findChannelById(channels, htlc.chan_id) : undefined
+  const incomingLabel = incomingChannel?.peer_alias || incomingChannel?.alias || (htlc ? `Channel ${htlc.chan_id}` : "Incoming channel unavailable")
+  const incomingDetail = htlc?.amt_msat ? formatSats(Number(htlc.amt_msat) / 1000) : null
+
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      <span className="text-sm font-medium">Settlement path</span>
+      <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border bg-muted/20 p-3 text-sm">
+        <Badge variant="secondary">Previous hops hidden</Badge>
+        <PathArrow />
+        <span className="min-w-0 truncate font-medium">{incomingLabel}</span>
+        <PathArrow />
+        <span className="font-medium">This node</span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Lightning receivers can only see the incoming HTLC/channel; earlier payer route hops are hidden by onion routing.
+        {incomingDetail ? ` Incoming amount: ${incomingDetail}.` : ""}
+      </p>
+    </div>
+  )
+}
+
+function PathArrow() {
+  return <ChevronRightIcon className="size-4 text-muted-foreground" />
+}
+
+type SettledHtlc = {
+  chan_id: string
+  amt_msat?: string | number | null
+  state?: string | null
+}
+
+function invoiceSettlementHtlcs(invoice: InvoiceEvent): SettledHtlc[] {
+  const invoiceDetails = invoiceDetailsObject(invoice)
+  const htlcs = invoiceDetails?.htlcs
+  if (!Array.isArray(htlcs)) return []
+  return htlcs
+    .map((value) => normalizeHtlc(value))
+    .filter((htlc): htlc is SettledHtlc => Boolean(htlc))
+    .filter((htlc) => !htlc.state || htlc.state === "SETTLED")
+}
+
+function invoiceDetailsObject(invoice: InvoiceEvent): Record<string, JsonValue> | null {
+  const details = invoice.details
+  if (!details || typeof details !== "object" || Array.isArray(details)) return null
+  const invoiceDetails = details.invoice
+  if (!invoiceDetails || typeof invoiceDetails !== "object" || Array.isArray(invoiceDetails)) return null
+  return invoiceDetails
+}
+
+function normalizeHtlc(value: JsonValue): SettledHtlc | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const chanId = value.chan_id
+  if (chanId === null || chanId === undefined || chanId === "") return null
+  return {
+    chan_id: String(chanId),
+    amt_msat: typeof value.amt_msat === "string" || typeof value.amt_msat === "number" ? value.amt_msat : null,
+    state: typeof value.state === "string" ? value.state : null,
+  }
+}
+
+function findChannelById(channels: Channel[], chanId: string): Channel | undefined {
+  return channels.find((channel) => String(channel.channel_id || channel.chan_id || "") === chanId)
 }
 
 export function Pager({
