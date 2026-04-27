@@ -136,7 +136,7 @@ Screenshots coming soon - until then, install on Umbrel or fire up the Docker im
 
 ## Docs, Support & Contributing
 
-- 📚 **Documentation:** Check the app's **References** section for quick how-to guides; the [lnSwitchboard Wiki](https://github.com/RyleaStark/lnSwitchboard/wiki) covers architecture, API reference, and deeper setup notes.
+- 📚 **Documentation:** Check the app's **References** section for quick how-to guides.
 - 📦 **Docker package:** [`ghcr.io/RyleaStark/lnswitchboard`](https://github.com/RyleaStark/lnSwitchboard/pkgs/container/lnswitchboard).
 - 🐛 **Issues & feature requests:** Open a ticket on [GitHub Issues](https://github.com/RyleaStark/lnSwitchboard/issues).
 - ⚡ **Tips:** Send sats to `tips+ln@bigbones.net` to keep the project zapping.
