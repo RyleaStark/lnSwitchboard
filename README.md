@@ -2,7 +2,7 @@
 
 **Turns any Lightning node into a sovereign Lightning Address switchboard that speaks LNURL, watches your liquidity, and lets you manage identities without touching the command line.**
 
-Published on the [Umbrel App Store](https://umbrel.com/), shipped as a public [Docker package](https://github.com/RyleaStark/lnSwitchboard/pkgs/container/lnswitchboard), and fully documented in the [project wiki](https://github.com/RyleaStark/lnSwitchboard/wiki).
+Published on the [Umbrel App Store](https://umbrel.com/), shipped as a public [Docker package](https://github.com/RyleaStark/lnSwitchboard/pkgs/container/lnswitchboard).
 
 ---
 
