@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
+import grpc
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
@@ -19,7 +20,7 @@ from ..deps import (
 )
 from ..ln_client import LNClient
 from ..log_storage import RequestLogStorage
-from ..macaroon_store import MacaroonStore
+from ..macaroon_store import MacaroonNotConfiguredError, MacaroonStore
 from ..env_settings import list_env_settings, update_env_settings
 from ..version import get_version
 
@@ -36,6 +37,22 @@ class EnvSettingsUpdate(BaseModel):
 
 class MacaroonPayload(BaseModel):
     macaroon: str
+
+
+class MacaroonStatusPayload(BaseModel):
+    configured: bool
+    source: str
+    manual_entry_allowed: bool
+    path: Optional[str] = None
+    error: Optional[str] = None
+
+
+class LndStatusPayload(BaseModel):
+    connected: bool
+    status: str
+    message: str
+    info_permission: Optional[bool] = None
+    invoice_permissions: Optional[bool] = None
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -249,12 +266,53 @@ async def healthcheck() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@router.get("/lnd/status")
+async def lnd_status(
+    ln_client: LNClient = Depends(get_ln_client_dep),
+) -> LndStatusPayload:
+    try:
+        connection_info = await ln_client.check_connection()
+    except MacaroonNotConfiguredError:
+        return LndStatusPayload(
+            connected=False,
+            status="not_configured",
+            message="Invoice macaroon not configured",
+        )
+    except grpc.RpcError as exc:
+        details = exc.details() if hasattr(exc, "details") else None
+        return LndStatusPayload(
+            connected=False,
+            status="error",
+            message=details or str(exc) or "Unable to connect to LND",
+        )
+    except Exception as exc:
+        return LndStatusPayload(
+            connected=False,
+            status="error",
+            message=str(exc) or "Unable to connect to LND",
+        )
+
+    return LndStatusPayload(
+        connected=True,
+        status="connected",
+        message="Connected to LND",
+        info_permission=connection_info.get("info_permission", True),
+        invoice_permissions=connection_info.get("invoice_permissions", True),
+    )
+
+
 @router.get("/auth/status")
 async def macaroon_status(
     store: MacaroonStore = Depends(get_macaroon_store_dep),
-) -> Dict[str, bool]:
-    configured = await store.is_configured()
-    return {"configured": configured}
+) -> MacaroonStatusPayload:
+    current = await store.status()
+    return MacaroonStatusPayload(
+        configured=current.configured,
+        source=current.source,
+        manual_entry_allowed=current.manual_entry_allowed,
+        path=current.path,
+        error=current.error,
+    )
 
 
 @router.post("/auth/macaroon")
@@ -264,6 +322,10 @@ async def set_macaroon(
 ) -> Dict[str, str]:
     try:
         await store.set(payload.macaroon)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)

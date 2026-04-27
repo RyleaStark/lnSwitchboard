@@ -8,3 +8,9 @@ secrets/
 .DS_Store
 .env
 .ruff_cache/
+.agents/
+skills-lock.json
+frontend/node_modules/
+frontend/static/
+frontend/coverage/
+frontend/.vite/

@@ -21,7 +21,7 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 - **Wallet compatibility out of the box.** Implements the core LNURL LUDs (06/09/12/16/17/18/20/21) plus NIP-05, so everything from Alby to Wallet of Satoshi, or Bitcoin Well... “just works.”
 - **Actionable visibility.** The built-in dashboard shows 24h/7d request volume, invoices generated vs. paid, sats routed, inbound liquidity, and a searchable activity log with proxy/IP context.
 - **Security-first defaults.** Rate limiting (per-IP), macaroon validation, TLS handling, and proxy-aware callback URLs keep the public face minimal while admin routes stay private.
-- **Umbrel & Docker native.** Install with one click on Umbrel or run anywhere with Docker/Compose/k8s, mounting your `secrets/` folder for TLS + macaroons.
+- **Umbrel & Docker native.** Install with one click on Umbrel or run anywhere with Docker/Compose/k8s, mounting LND's data directory read-only for TLS and macaroons.
 
 ---
 
@@ -35,7 +35,7 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 | **Request log** | Searchable log of discovery, invoice, verify, and rate-limit events with metadata previews, payers’ comments, and proxy headers for forensic-level visibility. |
 | **LN address customization** | Pin custom min/max sats, template text, and multi-webhook automations to any `local_part@domain`. Tags automatically inherit from the base handle. |
 | **NIP-05 identities** | Manage Nostr mappings (npub/hex + relay list) from the UI, and serve `/.well-known/nostr.json` with proper CORS. |
-| **Env + macaroon management** | Update `.env` safely via the UI, rotate invoice macaroons, and apply changes without restarting the container. |
+| **Env + macaroon management** | Update `.env` safely via the UI, use LND's mounted `invoice.macaroon`, or manually paste/upload a macaroon when no file path is configured. |
 
 ---
 
@@ -44,13 +44,22 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 ### 🚀 Umbrel
 1. Open the Umbrel App Store and search for **“lnSwitchboard.”**
 2. Click **Install** and wait for Umbrel to launch the container on port `22121`.
-3. Visit `http://umbrel.local:22121/` (or your Umbrel’s IP), paste your invoice macaroon, and follow the sidebar instructions to point `/.well-known/lnurlp/` at the service.
+3. Visit `http://umbrel.local:22121/` (or your Umbrel’s IP) and follow the proxy instructions to point `/.well-known/lnurlp/` at the service.
 
 Umbrel keeps lnSwitchboard updated automatically, so you always receive the latest features and security fixes.
 
 ### 🐳 Docker Compose
 
-The repo ships with a ready-to-edit [`docker-compose.yml`](./docker-compose.yml). Mount `secrets/`, set `LND_HOST`, then run:
+The repo ships with a ready-to-edit [`docker-compose.yml`](./docker-compose.yml). Mount LND's data directory read-only, set `LND_HOST`, and point `LND_MACAROON_PATH` at the existing LND invoice macaroon:
+
+```yaml
+volumes:
+  - ${APP_LIGHTNING_NODE_DATA_DIR}:/lnd:ro
+environment:
+  LND_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/invoice.macaroon
+```
+
+Then run:
 
 ```bash
 docker compose up -d
@@ -63,10 +72,11 @@ Once the service is running, point your reverse proxy so that only `/.well-known
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt
+cd frontend && npm ci && npm run build && cd ..
 .venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 22121
 ```
 
-Populate `secrets/tls.cert`, `secrets/macaroon.hex`, and (optionally) `.env` before launching.
+Set `LND_TLS_PATH` and `LND_MACAROON_PATH` to existing LND files before launching. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`.
 
 ---
 
@@ -91,7 +101,7 @@ Populate `secrets/tls.cert`, `secrets/macaroon.hex`, and (optionally) `.env` bef
 - **Logs:** Filterable event log with modal JSON viewer - perfect for debugging wallet interactions.
 - **LN Addresses:** Create/edit/delete overrides with validation, variable hints, Nostr identity badges, and webhook badges when automations are attached to a handle.
 - **Identities:** CRUD for `local_part@domain` → `npub` mappings plus relay lists.
-- **Settings:** Macaroon upload/rotation, `.env` editor with grouped hints, and a reverse-proxy snippet you can copy into Nginx/Caddy.
+- **Settings:** Mounted macaroon status, manual macaroon paste/upload fallback, `.env` editor with grouped hints, and a reverse-proxy snippet you can copy into Nginx/Caddy.
 
 Screenshots coming soon - until then, install on Umbrel or fire up the Docker image to explore in minutes.
 

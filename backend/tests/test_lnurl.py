@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
@@ -377,11 +378,50 @@ def test_macaroon_status_endpoint(test_client: TestClient):
     response = test_client.get("/api/auth/status")
     assert response.status_code == 200
     assert response.json()["configured"] is True
+    assert response.json()["source"] == "manual"
+    assert response.json()["manual_entry_allowed"] is True
+
+
+def test_external_macaroon_status_endpoint(test_client: TestClient, tmp_path):
+    mounted_macaroon = tmp_path / "invoice.macaroon"
+    mounted_macaroon.write_bytes(b"\x00\x01binary")
+    os.environ["LND_MACAROON_PATH"] = str(mounted_macaroon)
+    config.get_settings.cache_clear()
+    deps._get_macaroon_store.cache_clear()
+
+    response = test_client.get("/api/auth/status")
+    assert response.status_code == 200
+    assert response.json()["configured"] is True
+    assert response.json()["source"] == "file"
+    assert response.json()["manual_entry_allowed"] is False
 
 
 def test_macaroon_validation(test_client: TestClient):
     response = test_client.post("/api/auth/macaroon", json={"macaroon": "not-hex"})
     assert response.status_code == 400
+
+
+def test_lnd_status_endpoint_reports_connection(test_client: TestClient):
+    response = test_client.get("/api/lnd/status")
+    assert response.status_code == 200
+    assert response.json()["connected"] is True
+    assert response.json()["status"] == "connected"
+
+
+def test_lnd_status_endpoint_reports_errors(test_client: TestClient, monkeypatch):
+    async def fake_check_connection(self):
+        raise RuntimeError("tls.cert missing")
+
+    monkeypatch.setattr(
+        "backend.app.ln_client.LNClient.check_connection",
+        fake_check_connection,
+    )
+
+    response = test_client.get("/api/lnd/status")
+    assert response.status_code == 200
+    assert response.json()["connected"] is False
+    assert response.json()["status"] == "error"
+    assert response.json()["message"] == "tls.cert missing"
 
 
 def test_callback_and_ip_respect_forwarded_headers(test_client: TestClient):

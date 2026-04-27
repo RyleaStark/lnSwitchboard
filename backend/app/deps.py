@@ -36,7 +36,7 @@ def _get_rate_limiter() -> RateLimiter:
 @lru_cache()
 def _get_macaroon_store() -> MacaroonStore:
     settings = get_settings()
-    return MacaroonStore(settings.macaroon_store_path)
+    return MacaroonStore(settings.macaroon_store_path, settings.lnd_macaroon_path)
 
 
 @lru_cache()

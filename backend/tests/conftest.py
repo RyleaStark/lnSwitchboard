@@ -59,6 +59,7 @@ def configure_env(tmp_path):
 
     os.environ["LND_HOST"] = "127.0.0.1"
     os.environ["LND_TLS_PATH"] = str(tls)
+    os.environ.pop("LND_MACAROON_PATH", None)
     os.environ["SERVICE_PORT"] = "22121"
     os.environ["DATA_STORE_PATH"] = str(data_store_path)
     os.environ["LND_GRPC_PORT"] = "10009"
@@ -78,6 +79,7 @@ def configure_env(tmp_path):
     deps._get_macaroon_store.cache_clear()
     deps._get_webhook_dispatcher.cache_clear()
     yield
+    os.environ.pop("LND_MACAROON_PATH", None)
     config.get_settings.cache_clear()
     deps._get_log_storage.cache_clear()
     deps._get_nip05_store.cache_clear()

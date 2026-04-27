@@ -8,7 +8,7 @@ from pathlib import Path
 
 import grpc
 from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -25,6 +25,7 @@ from .invoice_worker import InvoiceSubscriptionWorker, InvoiceFullRefreshWorker
 LOGGER = logging.getLogger("lnswitchboard")
 BASE_DIR = Path(__file__).resolve().parents[2]
 STATIC_DIR = BASE_DIR / "frontend" / "static"
+SPA_ROUTES = ("/logs/", "/liquidity/", "/settings/", "/identities/", "/addresses/", "/invoices/")
 
 
 @asynccontextmanager
@@ -110,4 +111,13 @@ for _client_path in ("/logs", "/liquidity", "/settings", "/identities", "/addres
     _register_client_redirect(_client_path)
 
 if STATIC_DIR.exists():
+    @app.get("/", include_in_schema=False)
+    async def _spa_root() -> FileResponse:
+        return FileResponse(STATIC_DIR / "index.html")
+
+    for _spa_path in SPA_ROUTES:
+        @app.get(_spa_path, include_in_schema=False)
+        async def _spa_route() -> FileResponse:
+            return FileResponse(STATIC_DIR / "index.html")
+
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

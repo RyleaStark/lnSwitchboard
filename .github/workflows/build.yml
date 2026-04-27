@@ -41,6 +41,13 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
       # -----------------------
       #       DEPENDENCIES
       # -----------------------
@@ -49,17 +56,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt pytest ruff
 
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
       # -----------------------
       #       LINTING
       # -----------------------
       - name: Lint backend
         run: ruff check backend/
 
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
       # -----------------------
       #       TESTING
       # -----------------------
       - name: Run tests
         run: pytest backend/tests
+
+      - name: Run frontend tests
+        working-directory: frontend
+        run: npm run test
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
 
       # -----------------------
       #     DOCKER  SETUP

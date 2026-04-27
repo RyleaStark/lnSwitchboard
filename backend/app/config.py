@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     ui_poll_seconds: int = _env_field(env="UI_POLL_SECONDS", default=10)
     macaroon_store_path: Path = _env_field(env="MACAROON_STORE_PATH", default=Path("secrets/macaroon.hex"))
+    lnd_macaroon_path: Optional[Path] = _env_field(env="LND_MACAROON_PATH", default=None)
     webhook_max_retries: int = _env_field(env="WEBHOOK_MAX_RETRIES", default=5)
     webhook_retry_window_seconds: int = _env_field(env="WEBHOOK_RETRY_WINDOW_SECONDS", default=600)
 
@@ -107,6 +108,13 @@ class Settings(BaseSettings):
     def _expand_path(cls, value: Optional[str | Path]) -> Path:
         if value is None:
             raise ValueError("Path cannot be None")
+        return Path(value).expanduser().resolve()
+
+    @field_validator("lnd_macaroon_path", mode="before")
+    @classmethod
+    def _expand_optional_path(cls, value: Optional[str | Path]) -> Optional[Path]:
+        if value is None or value == "":
+            return None
         return Path(value).expanduser().resolve()
 
     @field_validator("max_sendable_sat")
