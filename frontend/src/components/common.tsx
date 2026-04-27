@@ -19,11 +19,13 @@ export function PageHeader({
   title,
   description,
   action,
+  actionAlign = "end",
 }: {
   eyebrow: string
   title: string
   description: string
   action?: React.ReactNode
+  actionAlign?: "start" | "end"
 }) {
   return (
     <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
@@ -32,7 +34,7 @@ export function PageHeader({
         <h1 className="text-3xl font-semibold tracking-normal text-foreground md:text-4xl">{title}</h1>
         <p className="text-sm leading-6 text-muted-foreground">{description}</p>
       </div>
-      {action ? <div className="flex shrink-0 items-center gap-2">{action}</div> : null}
+      {action ? <div className={cn("flex shrink-0 items-center gap-2", actionAlign === "start" && "md:self-start")}>{action}</div> : null}
     </div>
   )
 }

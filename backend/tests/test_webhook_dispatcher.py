@@ -183,6 +183,17 @@ async def _exercise_delivery_history_and_hmac_headers(tmp_path):
     assert delivery["status"] == "delivered"
     assert delivery["target"] == "https://hooks.example.com/payments"
     assert delivery["last_attempt"]["success"] is True
+    delivery_logs = [entry for entry in await storage.get_recent() if entry["event"] == "webhook_delivery"]
+    assert len(delivery_logs) == 1
+    delivery_log = delivery_logs[0]
+    assert delivery_log["status"] == "ok"
+    assert delivery_log["username"] == "pay+vip"
+    assert delivery_log["domain"] == "testserver"
+    assert delivery_log["amount_msat"] == 2000
+    assert delivery_log["details"]["delivery_id"] == delivery["id"]
+    assert delivery_log["details"]["delivery_status"] == "delivered"
+    assert delivery_log["details"]["attempt_number"] == 1
+    assert delivery_log["details"]["headers"]["X-LnSwitchboard-Signature"].startswith("sha256=")
 
 
 def test_webhook_filters_skip_non_matching_endpoint(tmp_path):
@@ -228,6 +239,11 @@ async def _exercise_webhook_filters_skip_non_matching_endpoint(tmp_path):
     assert captured == []
     deliveries = await storage.list_deliveries(page=1, page_size=5)
     assert deliveries["items"][0]["status"] == "skipped"
+    delivery_logs = [entry for entry in await storage.get_recent() if entry["event"] == "webhook_delivery"]
+    assert len(delivery_logs) == 1
+    assert delivery_logs[0]["status"] == "skipped"
+    assert delivery_logs[0]["details"]["delivery_status"] == "skipped"
+    assert delivery_logs[0]["details"]["target"] == "https://hooks.example.com/payments"
 
 
 def test_webhook_retry_resumes_after_restart(tmp_path):
@@ -261,6 +277,11 @@ async def _exercise_webhook_retry_resumes_after_restart(tmp_path):
     delivery = deliveries["items"][0]
     assert delivery["status"] == "retrying"
     assert delivery["last_attempt"]["success"] is False
+    delivery_logs = [entry for entry in await storage.get_recent() if entry["event"] == "webhook_delivery"]
+    assert len(delivery_logs) == 1
+    assert delivery_logs[0]["status"] == "retrying"
+    assert delivery_logs[0]["details"]["delivery_status"] == "retrying"
+    assert delivery_logs[0]["details"]["attempt_number"] == 1
 
     resumed_event = asyncio.Event()
     captured = []
@@ -287,3 +308,6 @@ async def _exercise_webhook_retry_resumes_after_restart(tmp_path):
     delivery_after = await storage.get_delivery(int(delivery["id"]))
     assert delivery_after is not None
     assert delivery_after["status"] == "delivered"
+    delivery_logs = [entry for entry in await storage.get_recent() if entry["event"] == "webhook_delivery"]
+    assert [entry["details"]["delivery_status"] for entry in delivery_logs] == ["retrying", "delivered"]
+    assert [entry["details"]["attempt_number"] for entry in delivery_logs] == [1, 2]

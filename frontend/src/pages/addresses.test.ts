@@ -51,6 +51,34 @@ describe("collectAddressPayload", () => {
     expect(result).toContain("reserved")
   })
 
+  it("builds webhook automation filters without route controls", () => {
+    const payload = collectAddressPayload({
+      local_part: "tips",
+      domain: "example.com",
+      min_sats: "",
+      max_sats: "",
+      metadata_description: "",
+      success_message: "",
+      webhook_urls: "https://hooks.example/payments",
+      webhook_secret: "receiver-secret",
+      webhook_tags: "vip,promo",
+      webhook_min_sats: "10",
+      webhook_max_sats: "100",
+      webhook_require_comment: true,
+      webhook_payer_data_field: "identifier",
+    })
+
+    expect(typeof payload).toBe("object")
+    if (typeof payload === "string") throw new Error(payload)
+    expect(payload.webhook_endpoints?.[0].filters).toEqual({
+      tags: ["vip", "promo"],
+      min_msat: 10000,
+      max_msat: 100000,
+      require_comment: true,
+      payer_data_field: "identifier",
+    })
+  })
+
   it("requires current validation for forwarding addresses", () => {
     const form = {
       local_part: "Tips",

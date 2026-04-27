@@ -53,7 +53,7 @@ export function LogsPage() {
       <PageHeader
         eyebrow="Request trail"
         title="Request Logs"
-        description="Search LNURL discovery, invoice, verification, and rate-limit events with raw JSON context when needed."
+        description="Search LNURL discovery, invoice, verification, webhook delivery, and rate-limit events with raw JSON context when needed."
         action={
           <AlertDialog>
             <AlertDialogTrigger asChild>
@@ -200,9 +200,10 @@ function Recipient({ entry }: { entry: RequestLog }) {
 function EventBadge({ entry }: { entry: RequestLog }) {
   const event = entry.event || "unknown"
   const status = entry.status || "ok"
+  const destructive = status === "error" || status === "failed" || status === "retrying"
   return (
     <span className="inline-flex items-center gap-2">
-      <Badge variant={status === "error" ? "destructive" : "secondary"}>{event.replace(/_/g, " ")}</Badge>
+      <Badge variant={destructive ? "destructive" : "secondary"}>{event.replace(/_/g, " ")}</Badge>
       {status !== "ok" ? <span className="text-xs text-muted-foreground">{status}</span> : null}
     </span>
   )

@@ -17,10 +17,11 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { api, type LNAddress, type LNAddressPayload } from "@/lib/api"
 import { formatNumber, normalizeDomainInput } from "@/lib/format"
@@ -37,7 +38,6 @@ type AddressFormState = {
   webhook_tags?: string
   webhook_min_sats?: string
   webhook_max_sats?: string
-  webhook_route?: "any" | "local" | "forwarded"
   webhook_require_comment?: boolean
   webhook_payer_data_field?: string
   payer_data?: string
@@ -52,7 +52,6 @@ type ForwardingFormState = {
   webhook_tags?: string
   webhook_min_sats?: string
   webhook_max_sats?: string
-  webhook_route?: "any" | "local" | "forwarded"
   webhook_require_comment?: boolean
   webhook_payer_data_field?: string
 }
@@ -75,7 +74,6 @@ const emptyForm: AddressFormState = {
   webhook_tags: "",
   webhook_min_sats: "",
   webhook_max_sats: "",
-  webhook_route: "any",
   webhook_require_comment: false,
   webhook_payer_data_field: "",
   payer_data: "",
@@ -90,7 +88,6 @@ const emptyForwardingForm: ForwardingFormState = {
   webhook_tags: "",
   webhook_min_sats: "",
   webhook_max_sats: "",
-  webhook_route: "any",
   webhook_require_comment: false,
   webhook_payer_data_field: "",
 }
@@ -346,121 +343,154 @@ export function AddressesPage() {
         </CardContent>
       </Card>
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="max-h-[calc(100vh-2rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-4xl">
           <DialogHeader>
             <DialogTitle>{editing ? `Edit ${editing.identifier}` : "Add LN address"}</DialogTitle>
             <DialogDescription>Configure only the base handle. Tags like user+vip inherit from the base local-part.</DialogDescription>
           </DialogHeader>
-          <form onSubmit={submit}>
-            <FieldGroup>
-              <div className="grid gap-4 md:grid-cols-2">
-                <Field data-invalid={Boolean(formError)}>
-                  <FieldLabel htmlFor="address-local">Local-part</FieldLabel>
-                  <Input id="address-local" value={form.local_part} onChange={(event) => setForm({ ...form, local_part: event.target.value.toLowerCase() })} aria-invalid={Boolean(formError)} />
-                  <FieldDescription>Do not include @ or +tags.</FieldDescription>
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="address-domain">Domain</FieldLabel>
-                  <Input id="address-domain" value={form.domain} onChange={(event) => setForm({ ...form, domain: event.target.value })} />
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="address-min">Minimum sats</FieldLabel>
-                  <Input id="address-min" type="number" min={1} value={form.min_sats} onChange={(event) => setForm({ ...form, min_sats: event.target.value })} placeholder="Global minimum" />
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="address-max">Maximum sats</FieldLabel>
-                  <Input id="address-max" type="number" min={1} value={form.max_sats} onChange={(event) => setForm({ ...form, max_sats: event.target.value })} placeholder="Channel max" />
-                </Field>
+          <form onSubmit={submit} className="flex min-h-0 flex-col gap-4">
+            <Tabs defaultValue="handle" className="min-h-0">
+              <div className="flex">
+                <TabsList variant="line" className="h-10 w-fit justify-start gap-2 p-0">
+                  <TabsTrigger value="handle" className="h-10 flex-none rounded-none border-0 bg-transparent px-3 data-active:bg-transparent dark:data-active:bg-transparent">Handle</TabsTrigger>
+                  <TabsTrigger value="lnurl" className="h-10 flex-none rounded-none border-0 bg-transparent px-3 data-active:bg-transparent dark:data-active:bg-transparent">LNURL</TabsTrigger>
+                  <TabsTrigger value="automation" className="h-10 flex-none rounded-none border-0 bg-transparent px-3 data-active:bg-transparent dark:data-active:bg-transparent">Automation</TabsTrigger>
+                </TabsList>
               </div>
-              <Field>
-                <FieldLabel htmlFor="address-metadata">Metadata description</FieldLabel>
-                <Textarea id="address-metadata" rows={3} value={form.metadata_description} onChange={(event) => setForm({ ...form, metadata_description: event.target.value })} placeholder="Inherits global default" />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="address-success">Success message</FieldLabel>
-                <Textarea id="address-success" rows={3} value={form.success_message} onChange={(event) => setForm({ ...form, success_message: event.target.value })} placeholder="Inherits global default" />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="address-webhooks">Webhook URLs</FieldLabel>
-                <Textarea id="address-webhooks" rows={4} value={form.webhook_urls} onChange={(event) => setForm({ ...form, webhook_urls: event.target.value })} placeholder="https://example.com/webhook" />
-                <FieldDescription>One HTTP(S) endpoint per line. Duplicate URLs are ignored.</FieldDescription>
-              </Field>
-              <WebhookAutomationFields
-                prefix="address"
-                secret={form.webhook_secret || ""}
-                tags={form.webhook_tags || ""}
-                minSats={form.webhook_min_sats || ""}
-                maxSats={form.webhook_max_sats || ""}
-                route={form.webhook_route || "any"}
-                requireComment={Boolean(form.webhook_require_comment)}
-                payerDataField={form.webhook_payer_data_field || ""}
-                onChange={(updates) => setForm({ ...form, ...updates })}
-              />
-              <Field>
-                <FieldLabel htmlFor="address-payer-data">Payer data fields</FieldLabel>
-                <Textarea id="address-payer-data" rows={3} value={form.payer_data} onChange={(event) => setForm({ ...form, payer_data: event.target.value })} placeholder='{"name": false, "identifier": true}' />
-                <FieldDescription>Optional LUD-18 schema for this handle. Use JSON or shorthand such as name,!identifier. The auth field is intentionally disabled.</FieldDescription>
-              </Field>
-              <FieldError>{formError}</FieldError>
-              <div className="flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={() => setFormOpen(false)}>Cancel</Button>
-                <Button type="submit" disabled={save.isPending}>{save.isPending ? "Saving..." : editing ? "Save changes" : "Create override"}</Button>
-              </div>
-            </FieldGroup>
+              <TabsContent value="handle" className="max-h-[calc(100vh-17rem)] overflow-y-auto pt-4 pr-1">
+                <FieldGroup>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <Field data-invalid={Boolean(formError)}>
+                      <FieldLabel htmlFor="address-local">Local-part</FieldLabel>
+                      <Input id="address-local" value={form.local_part} onChange={(event) => setForm({ ...form, local_part: event.target.value.toLowerCase() })} aria-invalid={Boolean(formError)} />
+                      <FieldDescription>Do not include @ or +tags.</FieldDescription>
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="address-domain">Domain</FieldLabel>
+                      <Input id="address-domain" value={form.domain} onChange={(event) => setForm({ ...form, domain: event.target.value })} />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="address-min">Minimum sats</FieldLabel>
+                      <Input id="address-min" type="number" min={1} value={form.min_sats} onChange={(event) => setForm({ ...form, min_sats: event.target.value })} placeholder="Global minimum" />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="address-max">Maximum sats</FieldLabel>
+                      <Input id="address-max" type="number" min={1} value={form.max_sats} onChange={(event) => setForm({ ...form, max_sats: event.target.value })} placeholder="Channel max" />
+                    </Field>
+                  </div>
+                </FieldGroup>
+              </TabsContent>
+              <TabsContent value="lnurl" className="max-h-[calc(100vh-17rem)] overflow-y-auto pt-4 pr-1">
+                <FieldGroup>
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <Field>
+                      <FieldLabel htmlFor="address-metadata">Metadata description</FieldLabel>
+                      <Textarea id="address-metadata" rows={5} value={form.metadata_description} onChange={(event) => setForm({ ...form, metadata_description: event.target.value })} placeholder="Inherits global default" />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="address-success">Success message</FieldLabel>
+                      <Textarea id="address-success" rows={5} value={form.success_message} onChange={(event) => setForm({ ...form, success_message: event.target.value })} placeholder="Inherits global default" />
+                    </Field>
+                  </div>
+                  <Field>
+                    <FieldLabel htmlFor="address-payer-data">Payer data fields</FieldLabel>
+                    <Textarea id="address-payer-data" rows={4} value={form.payer_data} onChange={(event) => setForm({ ...form, payer_data: event.target.value })} placeholder='{"name": false, "identifier": true}' />
+                    <FieldDescription>Optional LUD-18 schema for this handle. Use JSON or shorthand such as name,!identifier. The auth field is intentionally disabled.</FieldDescription>
+                  </Field>
+                </FieldGroup>
+              </TabsContent>
+              <TabsContent value="automation" className="max-h-[calc(100vh-17rem)] overflow-y-auto pt-4 pr-1">
+                <FieldGroup>
+                  <Field>
+                    <FieldLabel htmlFor="address-webhooks">Webhook URLs</FieldLabel>
+                    <Textarea id="address-webhooks" rows={4} value={form.webhook_urls} onChange={(event) => setForm({ ...form, webhook_urls: event.target.value })} placeholder="https://example.com/webhook" />
+                    <FieldDescription>One HTTP(S) endpoint per line. Duplicate URLs are ignored.</FieldDescription>
+                  </Field>
+                  <WebhookAutomationFields
+                    prefix="address"
+                    secret={form.webhook_secret || ""}
+                    tags={form.webhook_tags || ""}
+                    minSats={form.webhook_min_sats || ""}
+                    maxSats={form.webhook_max_sats || ""}
+                    requireComment={Boolean(form.webhook_require_comment)}
+                    payerDataField={form.webhook_payer_data_field || ""}
+                    onChange={(updates) => setForm({ ...form, ...updates })}
+                  />
+                </FieldGroup>
+              </TabsContent>
+            </Tabs>
+            <FieldError>{formError}</FieldError>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setFormOpen(false)}>Cancel</Button>
+              <Button type="submit" disabled={save.isPending}>{save.isPending ? "Saving..." : editing ? "Save changes" : "Create override"}</Button>
+            </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
       <Dialog open={forwardFormOpen} onOpenChange={setForwardFormOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-h-[calc(100vh-2rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-4xl">
           <DialogHeader>
             <DialogTitle>{editing ? `Edit ${editing.identifier}` : "Add forwarding address"}</DialogTitle>
             <DialogDescription>Map a local handle to a validated external Lightning Address.</DialogDescription>
           </DialogHeader>
-          <form onSubmit={submitForwarding}>
-            <FieldGroup>
-              <div className="grid gap-4 md:grid-cols-2">
-                <Field data-invalid={Boolean(forwardFormError)}>
-                  <FieldLabel htmlFor="forward-local">Local-part</FieldLabel>
-                  <Input id="forward-local" value={forwardForm.local_part} onChange={(event) => setForwardForm({ ...forwardForm, local_part: event.target.value.toLowerCase() })} aria-invalid={Boolean(forwardFormError)} />
-                  <FieldDescription>Do not include @ or +tags.</FieldDescription>
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="forward-domain">Domain</FieldLabel>
-                  <Input id="forward-domain" value={forwardForm.domain} onChange={(event) => setForwardForm({ ...forwardForm, domain: event.target.value })} />
-                </Field>
+          <form onSubmit={submitForwarding} className="flex min-h-0 flex-col gap-4">
+            <Tabs defaultValue="route" className="min-h-0">
+              <div className="flex">
+                <TabsList variant="line" className="h-10 w-fit justify-start gap-2 p-0">
+                  <TabsTrigger value="route" className="h-10 flex-none rounded-none border-0 bg-transparent px-3 data-active:bg-transparent dark:data-active:bg-transparent">Route</TabsTrigger>
+                  <TabsTrigger value="automation" className="h-10 flex-none rounded-none border-0 bg-transparent px-3 data-active:bg-transparent dark:data-active:bg-transparent">Automation</TabsTrigger>
+                </TabsList>
               </div>
-              <Field data-invalid={forwardValidation.status === "invalid"}>
-                <FieldLabel htmlFor="forward-target">Forward to LN Address</FieldLabel>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <Input id="forward-target" value={forwardForm.forward_to} onChange={(event) => updateForwardTo(event.target.value)} placeholder="username@domain.com" aria-invalid={forwardValidation.status === "invalid"} />
-                  <Button type="button" variant="outline" onClick={validateForwardTarget} disabled={validateForwarding.isPending || !forwardForm.forward_to.trim()}>
-                    {validateForwarding.isPending ? "Validating..." : "Validate"}
-                  </Button>
-                </div>
-                <FieldDescription>{forwardValidation.status === "valid" ? forwardValidation.message : "The target must return a valid LNURL-pay payload before this address can be created."}</FieldDescription>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="forward-webhooks">Webhook URLs</FieldLabel>
-                <Textarea id="forward-webhooks" rows={4} value={forwardForm.webhook_urls} onChange={(event) => setForwardForm({ ...forwardForm, webhook_urls: event.target.value })} placeholder="https://example.com/webhook" />
-                <FieldDescription>One HTTP(S) endpoint per line. Forwarded paid webhooks only fire when the target returns a usable verify URL.</FieldDescription>
-              </Field>
-              <WebhookAutomationFields
-                prefix="forward"
-                secret={forwardForm.webhook_secret || ""}
-                tags={forwardForm.webhook_tags || ""}
-                minSats={forwardForm.webhook_min_sats || ""}
-                maxSats={forwardForm.webhook_max_sats || ""}
-                route={forwardForm.webhook_route || "any"}
-                requireComment={Boolean(forwardForm.webhook_require_comment)}
-                payerDataField={forwardForm.webhook_payer_data_field || ""}
-                onChange={(updates) => setForwardForm({ ...forwardForm, ...updates })}
-              />
-              <FieldError>{forwardFormError}</FieldError>
-              <div className="flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={() => setForwardFormOpen(false)}>Cancel</Button>
-                <Button type="submit" disabled={save.isPending || !forwardTargetValidated}>{save.isPending ? "Saving..." : editing ? "Save changes" : "Create forwarding address"}</Button>
-              </div>
-            </FieldGroup>
+              <TabsContent value="route" className="max-h-[calc(100vh-17rem)] overflow-y-auto pt-4 pr-1">
+                <FieldGroup>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <Field data-invalid={Boolean(forwardFormError)}>
+                      <FieldLabel htmlFor="forward-local">Local-part</FieldLabel>
+                      <Input id="forward-local" value={forwardForm.local_part} onChange={(event) => setForwardForm({ ...forwardForm, local_part: event.target.value.toLowerCase() })} aria-invalid={Boolean(forwardFormError)} />
+                      <FieldDescription>Do not include @ or +tags.</FieldDescription>
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="forward-domain">Domain</FieldLabel>
+                      <Input id="forward-domain" value={forwardForm.domain} onChange={(event) => setForwardForm({ ...forwardForm, domain: event.target.value })} />
+                    </Field>
+                  </div>
+                  <Field data-invalid={forwardValidation.status === "invalid"}>
+                    <FieldLabel htmlFor="forward-target">Forward to LN Address</FieldLabel>
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <Input id="forward-target" value={forwardForm.forward_to} onChange={(event) => updateForwardTo(event.target.value)} placeholder="username@domain.com" aria-invalid={forwardValidation.status === "invalid"} />
+                      <Button type="button" variant="outline" onClick={validateForwardTarget} disabled={validateForwarding.isPending || !forwardForm.forward_to.trim()}>
+                        {validateForwarding.isPending ? "Validating..." : "Validate"}
+                      </Button>
+                    </div>
+                    <FieldDescription>{forwardValidation.status === "valid" ? forwardValidation.message : "The target must return a valid LNURL-pay payload before this address can be created."}</FieldDescription>
+                  </Field>
+                </FieldGroup>
+              </TabsContent>
+              <TabsContent value="automation" className="max-h-[calc(100vh-17rem)] overflow-y-auto pt-4 pr-1">
+                <FieldGroup>
+                  <Field>
+                    <FieldLabel htmlFor="forward-webhooks">Webhook URLs</FieldLabel>
+                    <Textarea id="forward-webhooks" rows={4} value={forwardForm.webhook_urls} onChange={(event) => setForwardForm({ ...forwardForm, webhook_urls: event.target.value })} placeholder="https://example.com/webhook" />
+                    <FieldDescription>One HTTP(S) endpoint per line. Forwarded paid webhooks only fire when the target returns a usable verify URL.</FieldDescription>
+                  </Field>
+                  <WebhookAutomationFields
+                    prefix="forward"
+                    secret={forwardForm.webhook_secret || ""}
+                    tags={forwardForm.webhook_tags || ""}
+                    minSats={forwardForm.webhook_min_sats || ""}
+                    maxSats={forwardForm.webhook_max_sats || ""}
+                    requireComment={Boolean(forwardForm.webhook_require_comment)}
+                    payerDataField={forwardForm.webhook_payer_data_field || ""}
+                    onChange={(updates) => setForwardForm({ ...forwardForm, ...updates })}
+                  />
+                </FieldGroup>
+              </TabsContent>
+            </Tabs>
+            <FieldError>{forwardFormError}</FieldError>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setForwardFormOpen(false)}>Cancel</Button>
+              <Button type="submit" disabled={save.isPending || !forwardTargetValidated}>{save.isPending ? "Saving..." : editing ? "Save changes" : "Create forwarding address"}</Button>
+            </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
@@ -557,7 +587,6 @@ type WebhookAutomationState = Pick<
   | "webhook_tags"
   | "webhook_min_sats"
   | "webhook_max_sats"
-  | "webhook_route"
   | "webhook_require_comment"
   | "webhook_payer_data_field"
 >
@@ -574,7 +603,6 @@ function collectWebhookEndpoints(urls: string[], form: WebhookAutomationState): 
     tags.length > 0 ||
     min !== null ||
     max !== null ||
-    (form.webhook_route || "any") !== "any" ||
     Boolean(form.webhook_require_comment) ||
     Boolean((form.webhook_payer_data_field || "").trim())
   if (!hasAutomation) return undefined
@@ -582,7 +610,6 @@ function collectWebhookEndpoints(urls: string[], form: WebhookAutomationState): 
     tags,
     min_msat: min === null ? null : min * 1000,
     max_msat: max === null ? null : max * 1000,
-    route: form.webhook_route || "any",
     require_comment: Boolean(form.webhook_require_comment),
     payer_data_field: (form.webhook_payer_data_field || "").trim() || null,
   }
@@ -650,7 +677,6 @@ function endpointFormFields(item: LNAddress): WebhookAutomationState {
     webhook_tags: (filters.tags || []).join(","),
     webhook_min_sats: typeof filters.min_msat === "number" ? String(Math.floor(filters.min_msat / 1000)) : "",
     webhook_max_sats: typeof filters.max_msat === "number" ? String(Math.floor(filters.max_msat / 1000)) : "",
-    webhook_route: filters.route || "any",
     webhook_require_comment: Boolean(filters.require_comment),
     webhook_payer_data_field: filters.payer_data_field || "",
   }
@@ -667,7 +693,6 @@ function WebhookAutomationFields({
   tags,
   minSats,
   maxSats,
-  route,
   requireComment,
   payerDataField,
   onChange,
@@ -677,7 +702,6 @@ function WebhookAutomationFields({
   tags: string
   minSats: string
   maxSats: string
-  route: "any" | "local" | "forwarded"
   requireComment: boolean
   payerDataField: string
   onChange: (updates: Partial<WebhookAutomationState>) => void
@@ -700,19 +724,6 @@ function WebhookAutomationFields({
       <Field>
         <FieldLabel htmlFor={`${prefix}-webhook-max`}>Filter maximum sats</FieldLabel>
         <Input id={`${prefix}-webhook-max`} type="number" min={1} value={maxSats} onChange={(event) => onChange({ webhook_max_sats: event.target.value })} />
-      </Field>
-      <Field>
-        <FieldLabel htmlFor={`${prefix}-webhook-route`}>Route filter</FieldLabel>
-        <select
-          id={`${prefix}-webhook-route`}
-          value={route}
-          onChange={(event) => onChange({ webhook_route: event.target.value as "any" | "local" | "forwarded" })}
-          className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-        >
-          <option value="any">Any payment</option>
-          <option value="local">Local invoices</option>
-          <option value="forwarded">Forwarded invoices</option>
-        </select>
       </Field>
       <Field>
         <FieldLabel htmlFor={`${prefix}-webhook-payer-field`}>Required payer data field</FieldLabel>

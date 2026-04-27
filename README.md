@@ -32,10 +32,10 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 | **LNURL Router** | LNURL-pay discovery + invoice endpoints that understand tags, long descriptions, payer data, comments, and lightning-fast verification links. |
 | **Dashboard** | Live metrics, trend charts, and a status chip that pings `/api/health` every 10 seconds so you know your node is reachable. |
 | **Invoices hub** | Dedicated `/invoices/` page backed by a SQLite `invoice_events` table. Real-time updates come from a gRPC subscription worker plus a periodic full refresh loop. |
-| **Request log** | Searchable log of discovery, invoice, verify, and rate-limit events with metadata previews, payers’ comments, and proxy headers for forensic-level visibility. |
+| **Request log** | Searchable log of discovery, invoice, verify, webhook delivery, and rate-limit events with metadata previews, payers' comments, and proxy headers for forensic-level visibility. |
 | **LN address customization** | Pin custom min/max sats, template text, per-handle payer data, signed webhook automation, and delivery filters to any `local_part@domain`. Tags automatically inherit from the base handle. |
 | **NIP-05 + zaps** | Manage Nostr mappings (npub/hex + relay list), serve `/.well-known/nostr.json`, advertise NIP-57 zap support when a local identity has a signer, and publish kind `9735` receipts after settlement. |
-| **Delivery center** | Persist webhook and Nostr relay delivery attempts, inspect failures, replay HTTP webhook payloads, and send test payloads from the UI. |
+| **Webhook observability** | Persist HTTP webhook and Nostr relay delivery attempts, record each attempt in Request Logs, and send signed test payloads from the Webhooks reference. |
 | **Env + macaroon management** | Update `.env` safely via the UI, use LND's mounted `invoice.macaroon`, or manually paste/upload a macaroon when no file path is configured. |
 
 ---
@@ -116,9 +116,9 @@ docker exec <lnswitchboard-container> lnswitchboard-diagnose-lnd
 - **LN Addresses:** Create/edit/delete overrides with validation, variable hints, Nostr identity badges, payer-data schemas, signed webhook filters, and webhook badges when automations are attached to a handle.
 - **Identities:** CRUD for `local_part@domain` → `npub` mappings plus relay lists.
 - **Settings:** Mounted macaroon status, manual macaroon paste/upload fallback, Nostr zap signer generation/import, `.env` editor with grouped hints, and a reverse-proxy snippet you can copy into Nginx/Caddy.
-- **Webhooks:** Delivery history, replay, test sends, signed receiver headers, forwarded-invoice caveats, and payload reference material.
+- **Webhooks:** Request-log delivery events, test sends, signed receiver headers, forwarded-invoice caveats, and payload reference material.
 
-Screenshots coming soon - until then, install on Umbrel or fire up the Docker image to explore the dashboard, delivery center, signer controls, and address automation tools in minutes.
+Screenshots coming soon - until then, install on Umbrel or fire up the Docker image to explore the dashboard, request logs, signer controls, and address automation tools in minutes.
 
 ---
 

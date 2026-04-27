@@ -350,6 +350,194 @@ class RequestLogStorage:
             "response_body": row["response_body"],
         }
 
+    def _row_to_delivery_log_attempt(
+        self,
+        *,
+        delivery_id: int,
+        attempted_at: str,
+        attempt_number: int,
+        success: bool,
+        status_code: Optional[int],
+        latency_ms: Optional[int],
+        error: Optional[str],
+        response_body: Optional[str],
+    ) -> Dict[str, Any]:
+        return {
+            "delivery_id": delivery_id,
+            "attempted_at": attempted_at,
+            "attempt_number": attempt_number,
+            "success": success,
+            "status_code": status_code,
+            "latency_ms": latency_ms,
+            "error": error,
+            "response_body": response_body,
+        }
+
+    def _delivery_payload_context(self, payload: Any) -> tuple[str, str | None, int | None, Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return "webhook", None, None, {}
+        domain = payload.get("domain") if isinstance(payload.get("domain"), str) else None
+        ln_address = payload.get("ln_address") if isinstance(payload.get("ln_address"), str) else None
+        username = payload.get("username") if isinstance(payload.get("username"), str) else None
+        local_part = payload.get("local_part") if isinstance(payload.get("local_part"), str) else None
+        if not username and ln_address:
+            local, _, address_domain = ln_address.rpartition("@")
+            if local and address_domain:
+                username = local
+                domain = domain or address_domain
+            else:
+                username = ln_address
+        username = (username or local_part or "webhook").strip() or "webhook"
+        amount_msat: int | None = None
+        raw_amount = payload.get("amount_msat")
+        if raw_amount not in (None, ""):
+            try:
+                amount_msat = int(raw_amount)
+            except (TypeError, ValueError):
+                amount_msat = None
+        details: Dict[str, Any] = {}
+        for key in ("ln_address", "username_raw", "tag", "forwarded", "forward_to", "settlement_source"):
+            if key in payload:
+                details[key] = payload[key]
+        return username, domain, amount_msat, details
+
+    def _delivery_log_status(self, delivery_status: str, success: bool | None = None) -> str:
+        if delivery_status == "delivered":
+            return "ok"
+        if delivery_status in {"failed", "retrying", "skipped"}:
+            return delivery_status
+        if success is True:
+            return "ok"
+        return "error"
+
+    def _delivery_log_message(
+        self,
+        *,
+        kind: str,
+        target: str,
+        delivery_status: str,
+        attempt_number: Optional[int] = None,
+        error: Optional[str] = None,
+    ) -> str:
+        action = {
+            "delivered": "delivered",
+            "retrying": "retrying",
+            "failed": "failed",
+            "skipped": "skipped",
+            "pending": "queued",
+        }.get(delivery_status, delivery_status)
+        attempt_text = f" on attempt {attempt_number}" if attempt_number else ""
+        target_text = f" to {target}" if action != "skipped" else f" for {target}"
+        error_text = f": {error}" if error else ""
+        return f"{kind} {action}{target_text}{attempt_text}{error_text}"
+
+    def _insert_request_log_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        timestamp: str,
+        username: str,
+        ip: str,
+        event: str,
+        domain: str | None,
+        amount_msat: int | None,
+        status: str,
+        message: str | None,
+        details: Dict[str, Any] | None,
+    ) -> Optional[int]:
+        normalized_details = _normalize_details(details)
+        cursor = conn.execute(
+            """
+            INSERT INTO request_logs (
+                timestamp, username, ip, event, domain, amount_msat, status, message, details
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                timestamp,
+                username,
+                ip,
+                event,
+                domain,
+                amount_msat,
+                status,
+                message,
+                self._serialize_details(normalized_details),
+            ),
+        )
+        row_id = cursor.lastrowid
+        payload: Dict[str, Any] = {
+            "id": row_id,
+            "timestamp": timestamp,
+            "username": username,
+            "ip": ip,
+            "event": event,
+            "domain": domain,
+            "amount_msat": amount_msat,
+            "status": status,
+            "message": message,
+            "details": normalized_details,
+        }
+        payload.setdefault("domain", None)
+        self._recent.append(payload)
+        return int(row_id) if row_id is not None else None
+
+    def _insert_delivery_request_log_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        delivery: Dict[str, Any],
+        timestamp: str,
+        delivery_status: str,
+        attempt: Optional[Dict[str, Any]] = None,
+    ) -> Optional[int]:
+        payload = delivery.get("payload")
+        username, domain, amount_msat, recipient_details = self._delivery_payload_context(payload)
+        kind = str(delivery.get("kind") or "webhook")
+        target = str(delivery.get("target") or "")
+        success = bool(attempt.get("success")) if isinstance(attempt, dict) else None
+        attempt_number = attempt.get("attempt_number") if isinstance(attempt, dict) else None
+        error = attempt.get("error") if isinstance(attempt, dict) else None
+        details: Dict[str, Any] = {
+            **recipient_details,
+            "delivery_id": delivery.get("id"),
+            "kind": kind,
+            "target": target,
+            "delivery_event": delivery.get("event"),
+            "delivery_status": delivery_status,
+            "address_id": delivery.get("address_id"),
+            "invoice_event_id": delivery.get("invoice_event_id"),
+            "request_log_id": delivery.get("request_log_id"),
+            "delivery_key": delivery.get("delivery_key"),
+            "payload": payload,
+            "headers": delivery.get("headers") or {},
+        }
+        if attempt is not None:
+            details["attempt"] = attempt
+            details["attempt_number"] = attempt_number
+            details["status_code"] = attempt.get("status_code")
+            details["latency_ms"] = attempt.get("latency_ms")
+            details["error"] = error
+            details["response_body"] = attempt.get("response_body")
+        return self._insert_request_log_locked(
+            conn,
+            timestamp=timestamp,
+            username=username,
+            ip="internal",
+            event="webhook_delivery",
+            domain=domain,
+            amount_msat=amount_msat,
+            status=self._delivery_log_status(delivery_status, success),
+            message=self._delivery_log_message(
+                kind=kind,
+                target=target,
+                delivery_status=delivery_status,
+                attempt_number=int(attempt_number) if attempt_number is not None else None,
+                error=str(error) if error else None,
+            ),
+            details=details,
+        )
+
     def _parse_timestamp(self, value: Any) -> Optional[datetime]:
         if not isinstance(value, str):
             return None
@@ -471,7 +659,29 @@ class RequestLogStorage:
                             delivery_key,
                         ),
                     )
-                    return int(cursor.lastrowid)
+                    delivery_id = int(cursor.lastrowid)
+                    if status != "pending":
+                        self._insert_delivery_request_log_locked(
+                            conn,
+                            delivery={
+                                "id": delivery_id,
+                                "created_at": now_iso,
+                                "updated_at": now_iso,
+                                "kind": kind,
+                                "event": event,
+                                "target": target,
+                                "status": status,
+                                "payload": payload,
+                                "headers": headers or {},
+                                "address_id": address_id,
+                                "invoice_event_id": invoice_event_id,
+                                "request_log_id": request_log_id,
+                                "delivery_key": delivery_key,
+                            },
+                            timestamp=now_iso,
+                            delivery_status=status,
+                        )
+                    return delivery_id
             except sqlite3.Error:
                 return 0
 
@@ -510,10 +720,13 @@ class RequestLogStorage:
         status_code: Optional[int],
         latency_ms: Optional[int],
         response_body: Optional[str],
+        delivery_status: Optional[str] = None,
     ) -> None:
         if delivery_id <= 0:
             return
         attempted_at = datetime.now(tz=timezone.utc).isoformat()
+        final_status = delivery_status or ("delivered" if success else "failed")
+        redacted_response = self._redact_response_body(response_body)
         async with self._lock:
             try:
                 with self._connect() as conn:
@@ -544,13 +757,39 @@ class RequestLogStorage:
                             status_code,
                             latency_ms,
                             error,
-                            self._redact_response_body(response_body),
+                            redacted_response,
                         ),
                     )
                     conn.execute(
                         "UPDATE webhook_deliveries SET status = ?, updated_at = ? WHERE id = ?",
-                        ("delivered" if success else "failed", attempted_at, delivery_id),
+                        (final_status, attempted_at, delivery_id),
                     )
+                    delivery_row = conn.execute(
+                        """
+                        SELECT id, created_at, updated_at, kind, event, target, status, payload, headers,
+                               address_id, invoice_event_id, request_log_id, delivery_key
+                        FROM webhook_deliveries
+                        WHERE id = ?
+                        """,
+                        (delivery_id,),
+                    ).fetchone()
+                    if delivery_row:
+                        self._insert_delivery_request_log_locked(
+                            conn,
+                            delivery=self._row_to_delivery(delivery_row),
+                            timestamp=attempted_at,
+                            delivery_status=final_status,
+                            attempt=self._row_to_delivery_log_attempt(
+                                delivery_id=delivery_id,
+                                attempted_at=attempted_at,
+                                attempt_number=attempt_number,
+                                success=success,
+                                status_code=status_code,
+                                latency_ms=latency_ms,
+                                error=error,
+                                response_body=redacted_response,
+                            ),
+                        )
             except sqlite3.Error:
                 return
 

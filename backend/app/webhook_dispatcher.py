@@ -411,6 +411,7 @@ class WebhookDispatcher:
                     status_code=200,
                     latency_ms=latency_ms,
                     response_body=None,
+                    delivery_status="delivered",
                 )
             if attempt == 1:
                 self._logger.info("Webhook delivered to %s", url)
@@ -422,10 +423,11 @@ class WebhookDispatcher:
             status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
             response_body = exc.response.text if isinstance(exc, httpx.HTTPStatusError) else None
             will_retry = attempt < self._max_attempts and self._max_retries > 0
+            delivery_status = "retrying" if will_retry else "failed"
             if self._delivery_storage is not None and delivery_id:
                 await self._delivery_storage.update_delivery_status(
                     delivery_id=delivery_id,
-                    status="retrying" if will_retry else "failed",
+                    status=delivery_status,
                     headers=headers,
                 )
                 await self._delivery_storage.record_delivery_attempt(
@@ -435,13 +437,8 @@ class WebhookDispatcher:
                     status_code=status_code,
                     latency_ms=latency_ms,
                     response_body=response_body,
+                    delivery_status=delivery_status,
                 )
-                if will_retry:
-                    await self._delivery_storage.update_delivery_status(
-                        delivery_id=delivery_id,
-                        status="retrying",
-                        headers=headers,
-                    )
             if attempt >= self._max_attempts or self._max_retries == 0:
                 self._logger.warning("Webhook delivery failed for %s after %s attempts: %s", url, attempt, exc)
                 return False

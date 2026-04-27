@@ -197,7 +197,7 @@ export function SettingsPage() {
                 <CardTitle className="flex items-center gap-2"><RadioTowerIcon /> Nostr zap signer</CardTitle>
                 <CardDescription>Signs NIP-57 zap receipts after linked Lightning invoices settle.</CardDescription>
               </div>
-              <Badge variant={zapSigner.data?.configured ? "default" : "secondary"}>
+              <Badge variant={zapSigner.data?.configured ? "default" : "destructive"}>
                 {zapSigner.data?.configured ? "Configured" : "Not configured"}
               </Badge>
             </CardHeader>
