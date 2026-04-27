@@ -1,6 +1,6 @@
 import { useMemo } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { CheckCircle2Icon, ClockIcon, GlobeLockIcon, RouteIcon, WebhookIcon } from "lucide-react"
+import { CheckCircle2Icon, ClockIcon, ForwardIcon, GlobeLockIcon, RouteIcon, ShieldCheckIcon, WebhookIcon } from "lucide-react"
 
 import { CodeBlock, CopyButton, LoadingRows, PageError, PageHeader } from "@/components/common"
 import { Badge } from "@/components/ui/badge"
@@ -24,6 +24,9 @@ const fieldRows = [
   ["payment_hash", "32-byte hex hash that uniquely identifies the invoice."],
   ["payment_request", "BOLT11 invoice string for reconciliation with other systems."],
   ["settled_at", "ISO-8601 UTC timestamp for when lnSwitchboard marked the invoice settled."],
+  ["forwarded", "True when the payment came through a forwarded LN address. Omitted for older/local-only events."],
+  ["forward_to", "Target Lightning Address for forwarded payments, such as user@wallet.example."],
+  ["settlement_source", "remote_verify for forwarded invoices that were confirmed by the target provider's verify URL."],
   ["comment", "Payer note from LUD-12, or null when the payer did not provide one."],
   ["payer_data", "Parsed JSON object from LUD-18 when payer data is allowed or required."],
   ["payer_data_raw", "Original payer data string, useful when the receiver needs the untouched payload."],
@@ -42,8 +45,15 @@ const headerRows = [
 const tips = [
   "Accept application/json POST requests.",
   "Respond within a couple seconds so the delivery is treated as successful.",
-  "Use verify_url when a receiver needs a second check against your node.",
+  "Use verify_url when a receiver needs a second settlement check.",
   "Keep the endpoint on HTTPS, use an unguessable path, or reject requests missing the lnSwitchboard headers.",
+] as const
+
+const forwardedCaveats = [
+  "Paid webhooks for forwarded invoices only fire when the target provider returns a usable verify URL.",
+  "If the target omits verify, the request log still shows a forward event, but no payment.settled webhook is dispatched.",
+  "Forwarded invoice status is shown as Forwarded in the invoice ledger even after remote settlement is confirmed.",
+  "Wallet-facing LNURL metadata is preserved from the target provider so spec-compliant wallets do not reject the invoice.",
 ] as const
 
 export function WebhooksPage() {
@@ -87,6 +97,7 @@ export function WebhooksPage() {
   const appVersion = version.data.version
   const headerExample = buildHeaderExample(appVersion)
   const payloadExample = buildPayloadExample(appVersion)
+  const forwardedPayloadExample = buildForwardedPayloadExample(appVersion)
   const nginxExample = buildNginxExample(appVersion)
   const caddyExample = buildCaddyExample(appVersion)
 
@@ -139,6 +150,37 @@ export function WebhooksPage() {
         <CardContent className="grid gap-5">
           <DocCode title="Headers" value={headerExample} />
           <DocCode title="Payload" value={payloadExample} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><ForwardIcon /> Forwarded invoices</CardTitle>
+          <CardDescription>Forwarded LN addresses use the target provider's invoice and can only prove settlement when that provider exposes a verify endpoint.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-5">
+          <div className="grid gap-3 lg:grid-cols-3">
+            <StepCard icon={<ShieldCheckIcon />} title="Remote verify required" description="lnSwitchboard polls the target verify URL instead of local LND. Without verify, paid webhook automation is unavailable for that forwarded invoice." />
+            <StepCard icon={<WebhookIcon />} title="Same event type" description="Successful forwarded settlements still post payment.settled, with forwarded, forward_to, and settlement_source fields added to the payload." />
+            <StepCard icon={<RouteIcon />} title="Metadata stays intact" description="The target wallet text is preserved because LNURL invoices bind the BOLT11 invoice to the discovery metadata hash." />
+          </div>
+          <div className="overflow-hidden rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Caveat</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {forwardedCaveats.map((caveat) => (
+                  <TableRow key={caveat}>
+                    <TableCell className="whitespace-normal leading-6 text-muted-foreground">{caveat}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          <DocCode title="Forwarded payload differences" value={forwardedPayloadExample} />
         </CardContent>
       </Card>
 
@@ -318,6 +360,35 @@ function buildPayloadExample(version: string): string {
       verify_url: "https://testserver/.well-known/lnurlp/pay/verify/4c51...e9af",
       invoice_event_id: 137,
       request_log_id: 912,
+    },
+    null,
+    2,
+  )
+}
+
+function buildForwardedPayloadExample(version: string): string {
+  return JSON.stringify(
+    {
+      event: "payment.settled",
+      source: "lnswitchboard",
+      version,
+      address_id: "6b28d3c6-2cf5-4c87-97d6-0a9d38b2df2c",
+      ln_address: "tips@testserver",
+      local_part: "tips",
+      username: "tips",
+      tag: null,
+      domain: "testserver",
+      amount_msat: 21000,
+      amount_sat: 21,
+      payment_hash: "8d21...b47a",
+      payment_request: "lnbc21000n1pforwarded",
+      settled_at: "2024-05-01T12:34:56.789012+00:00",
+      verify_url: "https://target.example/lnurl/verify/8d21...b47a",
+      forwarded: true,
+      forward_to: "bones@walletofsatoshi.com",
+      settlement_source: "remote_verify",
+      invoice_event_id: 138,
+      request_log_id: 913,
     },
     null,
     2,

@@ -134,6 +134,12 @@ class WebhookDispatcher:
             "invoice_event_id": event.id,
             "request_log_id": event.request_log_id,
         }
+        if details.get("forwarded") is not None:
+            payload["forwarded"] = bool(details.get("forwarded"))
+        if details.get("forward_to"):
+            payload["forward_to"] = details.get("forward_to")
+        if details.get("settlement_source"):
+            payload["settlement_source"] = details.get("settlement_source")
         return payload
 
     def _build_headers(self, *, address_id: Optional[str]) -> Dict[str, str]:

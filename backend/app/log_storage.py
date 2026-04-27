@@ -628,8 +628,9 @@ class RequestLogStorage:
                    OR LOWER(domain) LIKE ?
                    OR LOWER(COALESCE(payment_hash, '')) LIKE ?
                    OR LOWER(COALESCE(payment_request, '')) LIKE ?
+                   OR LOWER(COALESCE(details, '')) LIKE ?
             """
-            params.extend([like, like, like, like])
+            params.extend([like, like, like, like, like])
 
         async with self._lock:
             try:
@@ -679,6 +680,7 @@ class RequestLogStorage:
             details = self._deserialize_details(row["details"])
             settled = bool(row["settled"])
             expired = bool(row["expired"])
+            forwarded = isinstance(details, dict) and bool(details.get("forwarded"))
             items.append(
                 {
                     "id": row["id"],
@@ -692,7 +694,7 @@ class RequestLogStorage:
                     "payment_request": row["payment_request"],
                     "settled": settled,
                     "expired": expired,
-                    "status": "settled" if settled else ("expired" if expired else "pending"),
+                    "status": "forwarded" if forwarded else ("settled" if settled else ("expired" if expired else "pending")),
                     "next_check_at": row["next_check_at"],
                     "last_checked_at": row["last_checked_at"],
                     "expires_at": row["expires_at"],

@@ -22,7 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api, type JsonValue, type RequestLog } from "@/lib/api"
-import { formatMsatAsSats } from "@/lib/format"
+import { formatMsatAsSats, requestLogRecipientParts } from "@/lib/format"
 import { Pager, paginationLabel } from "@/pages/invoices"
 
 const PAGE_SIZE = 10
@@ -127,13 +127,13 @@ export function LogsPage() {
                 {items.map((entry, index) => (
                   <Card key={`${entry.timestamp}-${index}`}>
                     <CardHeader>
-                      <CardTitle className="text-base">{recipient(entry)}</CardTitle>
+                      <CardTitle className="min-w-0 text-base"><Recipient entry={entry} /></CardTitle>
                       <CardDescription><Timestamp value={entry.timestamp} /></CardDescription>
                     </CardHeader>
                     <CardContent className="flex flex-col gap-3">
                       <div className="flex items-center justify-between gap-3">
                         <EventBadge entry={entry} />
-                        <span className="text-sm">{entry.amount_msat ? formatMsatAsSats(entry.amount_msat) : "-"}</span>
+                        <LogAmount entry={entry} />
                       </div>
                       {entry.message ? <p className="text-sm text-muted-foreground">{entry.message}</p> : null}
                       <Button type="button" variant="outline" size="sm" disabled={!entry.details} onClick={() => setDetails(entry.details ?? null)}>
@@ -166,8 +166,8 @@ function LogTableRow({ entry, onDetails }: { entry: RequestLog; onDetails: (deta
     <>
       <TableRow>
         <TableCell><Timestamp value={entry.timestamp} /></TableCell>
-        <TableCell>{recipient(entry)}</TableCell>
-        <TableCell>{entry.amount_msat ? formatMsatAsSats(entry.amount_msat) : "-"}</TableCell>
+        <TableCell><Recipient entry={entry} /></TableCell>
+        <TableCell><LogAmount entry={entry} /></TableCell>
         <TableCell><EventBadge entry={entry} /></TableCell>
         <TableCell className="text-right">
           <Button type="button" variant="outline" size="sm" disabled={!entry.details} onClick={() => onDetails(entry.details ?? null)}>
@@ -187,6 +187,16 @@ function LogTableRow({ entry, onDetails }: { entry: RequestLog; onDetails: (deta
   )
 }
 
+function Recipient({ entry }: { entry: RequestLog }) {
+  const parts = requestLogRecipientParts(entry)
+  return (
+    <span className="inline-flex min-w-0 items-center gap-2">
+      {parts.tag ? <Badge variant="secondary" className="shrink-0 font-mono">{parts.tag}</Badge> : null}
+      <span className="truncate">{parts.recipient}</span>
+    </span>
+  )
+}
+
 function EventBadge({ entry }: { entry: RequestLog }) {
   const event = entry.event || "unknown"
   const status = entry.status || "ok"
@@ -198,9 +208,18 @@ function EventBadge({ entry }: { entry: RequestLog }) {
   )
 }
 
-function recipient(entry: RequestLog): string {
-  const username = entry.username?.trim()
-  const domain = entry.domain?.trim()
-  if (username && domain) return `${username}@${domain}`
-  return username || domain || entry.ip || "-"
+function LogAmount({ entry }: { entry: RequestLog }) {
+  const amount = entry.amount_msat ? formatMsatAsSats(entry.amount_msat) : "-"
+  if (!isForwardedLog(entry)) return <span className="text-sm">{amount}</span>
+  return (
+    <span className="inline-flex flex-wrap items-center justify-end gap-2 text-sm">
+      <Badge variant="secondary">Forwarded</Badge>
+      <span>{amount}</span>
+    </span>
+  )
+}
+
+function isForwardedLog(entry: RequestLog): boolean {
+  const details = entry.details
+  return Boolean(details && typeof details === "object" && !Array.isArray(details) && details.forwarded === true)
 }

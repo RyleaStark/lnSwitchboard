@@ -1,10 +1,12 @@
-import type { Channel, InvoiceEvent } from "@/lib/api"
+import type { Channel, InvoiceEvent, JsonValue, RequestLog } from "@/lib/api"
 
-export type InvoiceRecipientParts = {
+export type RecipientParts = {
   recipient: string
   taggedRecipient: string
   tag: string | null
 }
+
+export type InvoiceRecipientParts = RecipientParts
 
 export function formatNumber(value: unknown): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-"
@@ -81,8 +83,30 @@ export function invoiceRecipientParts(invoice: InvoiceEvent): InvoiceRecipientPa
   }
 }
 
+export function requestLogRecipientParts(entry: RequestLog): RecipientParts {
+  const lnAddress = detailString(entry.details, "ln_address")
+  const addressParts = splitInvoiceAddress(lnAddress)
+  const usernameRaw = detailString(entry.details, "username_raw")
+  const username = entry.username?.trim()
+  const domain = entry.domain?.trim() || addressParts.domain
+  const localParts = splitInvoiceLocalPart(usernameRaw || addressParts.local || username)
+  const tag = localParts.tag || detailString(entry.details, "tag")
+  const localPart = localParts.local || username || addressParts.local
+  const recipient = localPart && domain ? `${localPart}@${domain}` : localPart || domain || entry.ip || "-"
+  const taggedRecipient = tag && localPart ? `${localPart}+${tag}${domain ? `@${domain}` : ""}` : recipient
+
+  return {
+    recipient,
+    taggedRecipient,
+    tag,
+  }
+}
+
 function invoiceDetailString(invoice: InvoiceEvent, key: string): string | null {
-  const details = invoice.details
+  return detailString(invoice.details, key)
+}
+
+function detailString(details: JsonValue | undefined, key: string): string | null {
   if (!details || typeof details !== "object" || Array.isArray(details)) return null
   const value = details[key]
   if (typeof value !== "string") return null
@@ -159,5 +183,49 @@ export function reserveTotal(channel: Channel): number {
 }
 
 export async function copyText(value: string): Promise<void> {
-  await navigator.clipboard.writeText(value)
+  const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : undefined
+  const secureContext = typeof window === "undefined" || window.isSecureContext !== false
+  let clipboardError: unknown
+
+  if (secureContext && clipboard?.writeText) {
+    try {
+      await clipboard.writeText(value)
+      return
+    } catch (error) {
+      clipboardError = error
+    }
+  }
+
+  try {
+    fallbackCopyText(value)
+  } catch (fallbackError) {
+    throw clipboardError instanceof Error ? clipboardError : fallbackError
+  }
+}
+
+function fallbackCopyText(value: string): void {
+  if (typeof document === "undefined" || !document.body || typeof document.execCommand !== "function") {
+    throw new Error("Clipboard copy is not available")
+  }
+
+  const textArea = document.createElement("textarea")
+  textArea.value = value
+  textArea.setAttribute("readonly", "")
+  textArea.style.position = "fixed"
+  textArea.style.top = "-1000px"
+  textArea.style.left = "-1000px"
+  textArea.style.opacity = "0"
+
+  document.body.appendChild(textArea)
+  textArea.focus()
+  textArea.select()
+  textArea.setSelectionRange(0, value.length)
+
+  try {
+    if (!document.execCommand("copy")) {
+      throw new Error("Clipboard copy failed")
+    }
+  } finally {
+    textArea.remove()
+  }
 }

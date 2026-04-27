@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..deps import get_ln_address_store_dep
 from ..ln_address_store import AddressConflictError, AddressNotFoundError, LNAddressStore
+from ..lnurl_forwarding import ForwardingTarget, ForwardingTargetError, fetch_forwarding_discovery
 
 
 api_router = APIRouter(prefix="/api/lnaddresses", tags=["ln_addresses"])
@@ -53,6 +54,14 @@ class LNAddressPayload(BaseModel):
         description="local-part used before the '@'. Configure the base handle only (tags like user+vip inherit automatically).",
     )
     domain: str = Field(..., description="Domain that hosts the LNURL endpoint.")
+    routing_mode: Literal["local", "forward"] = Field(
+        default="local",
+        description="local mints invoices with this node; forward proxies to another Lightning Address.",
+    )
+    forward_to: Optional[str] = Field(
+        default=None,
+        description="Target Lightning Address when routing_mode is forward.",
+    )
     min_sats: Optional[int] = Field(
         default=None,
         ge=1,
@@ -110,6 +119,16 @@ class LNAddressPayload(BaseModel):
             raise ValueError("domain may include lowercase letters, numbers, dashes, and dots")
         return normalized
 
+    @field_validator("forward_to", mode="before")
+    @classmethod
+    def _trim_forward_to(cls, value: Optional[Any]) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("forward_to must be a Lightning Address string")
+        trimmed = value.strip()
+        return trimmed or None
+
     @field_validator("metadata_description", "success_message", mode="before")
     @classmethod
     def _trim_templates(cls, value: Optional[str]) -> Optional[str]:
@@ -145,6 +164,8 @@ class LNAddressPayload(BaseModel):
         max_sats = self.max_sats
         if min_sats is not None and max_sats is not None and max_sats < min_sats:
             raise ValueError("max_sats cannot be smaller than min_sats")
+        if self.routing_mode == "forward" and not self.forward_to:
+            raise ValueError("forward_to is required for forwarded addresses")
         urls = list(dict.fromkeys(self.webhook_urls or []))
         if self.legacy_webhook_url:
             legacy_url = _normalize_webhook_url(self.legacy_webhook_url)
@@ -152,6 +173,10 @@ class LNAddressPayload(BaseModel):
                 urls.append(legacy_url)
         self.webhook_urls = urls
         return self
+
+
+class ForwardingValidationPayload(BaseModel):
+    forward_to: str = Field(..., description="Lightning Address to validate as a forwarding target.")
 
 
 def _serialize(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -165,6 +190,8 @@ def _serialize(record: Dict[str, Any]) -> Dict[str, Any]:
         "local_part": local_part,
         "domain": domain,
         "identifier": identifier,
+        "routing_mode": record.get("routing_mode") or "local",
+        "forward_to": record.get("forward_to"),
         "base_local_part": base,
         "tag": tag or None,
         "min_sats": record.get("min_sendable_sat"),
@@ -178,10 +205,47 @@ def _serialize(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+async def _resolve_forwarding_target(payload: LNAddressPayload) -> Optional[ForwardingTarget]:
+    if payload.routing_mode != "forward":
+        return None
+    try:
+        target = await fetch_forwarding_discovery(payload.forward_to or "")
+    except ForwardingTargetError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    local_identifier = f"{payload.local_part}@{payload.domain}"
+    if target.address == local_identifier:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Forwarding target cannot be the same as the local address",
+        )
+    return target
+
+
+def _forwarding_validation_response(target: ForwardingTarget) -> Dict[str, Any]:
+    payload = target.payload
+    return {
+        "valid": True,
+        "forward_to": target.address,
+        "callback": payload.get("callback"),
+        "min_sendable_msat": payload.get("minSendable"),
+        "max_sendable_msat": payload.get("maxSendable"),
+        "metadata": payload.get("metadata"),
+    }
+
+
 @api_router.get("")
 async def list_addresses(store: LNAddressStore = Depends(get_ln_address_store_dep)) -> Dict[str, Any]:
     items = await store.list_addresses()
     return {"items": [_serialize(item) for item in items]}
+
+
+@api_router.post("/forwarding/validate")
+async def validate_forwarding_address(payload: ForwardingValidationPayload) -> Dict[str, Any]:
+    try:
+        target = await fetch_forwarding_discovery(payload.forward_to)
+    except ForwardingTargetError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return _forwarding_validation_response(target)
 
 
 @api_router.post("", status_code=status.HTTP_201_CREATED)
@@ -189,10 +253,14 @@ async def create_address(
     payload: LNAddressPayload,
     store: LNAddressStore = Depends(get_ln_address_store_dep),
 ) -> Dict[str, Any]:
+    forwarding_target = await _resolve_forwarding_target(payload)
+    routing_mode = "forward" if forwarding_target else "local"
     try:
         created = await store.add_address(
             local_part=payload.local_part,
             domain=payload.domain,
+            routing_mode=routing_mode,
+            forward_to=forwarding_target.address if forwarding_target else None,
             min_sendable_sat=payload.min_sats,
             max_sendable_sat=payload.max_sats,
             metadata_description=payload.metadata_description,
@@ -213,11 +281,15 @@ async def update_address(
     payload: LNAddressPayload,
     store: LNAddressStore = Depends(get_ln_address_store_dep),
 ) -> Dict[str, Any]:
+    forwarding_target = await _resolve_forwarding_target(payload)
+    routing_mode = "forward" if forwarding_target else "local"
     try:
         updated = await store.update_address(
             address_id,
             local_part=payload.local_part,
             domain=payload.domain,
+            routing_mode=routing_mode,
+            forward_to=forwarding_target.address if forwarding_target else None,
             min_sendable_sat=payload.min_sats,
             max_sendable_sat=payload.max_sats,
             metadata_description=payload.metadata_description,

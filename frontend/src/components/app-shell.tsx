@@ -5,7 +5,6 @@ import {
   ChevronRightIcon,
   CircleIcon,
   GaugeIcon,
-  HeartIcon,
   HelpCircleIcon,
   HomeIcon,
   IdCardIcon,
@@ -15,6 +14,7 @@ import {
   PlugZapIcon,
   SettingsIcon,
   WebhookIcon,
+  ZapIcon,
 } from "lucide-react"
 import { useEffect, useMemo } from "react"
 import { toast } from "sonner"
@@ -49,7 +49,7 @@ import { copyText } from "@/lib/format"
 import { buildProxyHelpItems, type ProxyEngine, type ProxyHelpItem } from "@/lib/proxy-snippets"
 import { cn } from "@/lib/utils"
 
-const TIP_ADDRESS = "lnswitchboard+tips@bigbones.net"
+const TIP_ADDRESS = "tips+ln@bigbones.net"
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: HomeIcon },
@@ -381,7 +381,17 @@ function ProductFooter({
           {versionLabel}
         </Badge>
       </div>
-      <div className="text-[11px] leading-4 text-muted-foreground">&copy; 2026 Rylea Stark</div>
+      <div className="text-[11px] leading-4 text-muted-foreground">
+        &copy; 2026{" "}
+        <a
+          href="https://github.com/RyleaStark/lnSwitchboard"
+          target="_blank"
+          rel="noreferrer"
+          className="underline-offset-2 hover:underline"
+        >
+          Rylea Stark
+        </a>
+      </div>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
@@ -399,13 +409,12 @@ function ProductFooter({
               toast.success("Tip address copied")
             }}
           >
-            <HeartIcon data-icon="inline-start" />
-            <span>{compact ? "Copy tip address" : "Tip sats"}</span>
-            {compact ? null : <span className="min-w-0 truncate font-mono">{TIP_ADDRESS}</span>}
+            <ZapIcon data-icon="inline-start" />
+            <span className="min-w-0 truncate font-mono">{TIP_ADDRESS}</span>
           </Button>
         </TooltipTrigger>
         <TooltipContent side={compact ? "right" : "top"}>
-          <span className="font-mono">{TIP_ADDRESS}</span>
+          <span>Thank you for tipping 🧡</span>
         </TooltipContent>
       </Tooltip>
     </div>

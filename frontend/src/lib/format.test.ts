@@ -1,11 +1,13 @@
-import type { InvoiceEvent } from "@/lib/api"
+import type { InvoiceEvent, RequestLog } from "@/lib/api"
 
 import {
   channelPeer,
   channelPeerIdentifier,
+  copyText,
   formatTimestamp,
   invoiceRecipient,
   invoiceRecipientParts,
+  requestLogRecipientParts,
   sendableCapacity,
 } from "@/lib/format"
 
@@ -22,6 +24,41 @@ describe("formatTimestamp", () => {
     })
 
     Intl.DateTimeFormat = original
+  })
+})
+
+describe("copyText", () => {
+  it("uses the textarea fallback on insecure origins", async () => {
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard")
+    const secureContextDescriptor = Object.getOwnPropertyDescriptor(window, "isSecureContext")
+    const execCommandDescriptor = Object.getOwnPropertyDescriptor(document, "execCommand")
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const execCommand = vi.fn().mockReturnValue(true)
+
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: false,
+    })
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    })
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    })
+
+    try {
+      await copyText("lnswitchboard+tips@bigbones.net")
+
+      expect(writeText).not.toHaveBeenCalled()
+      expect(execCommand).toHaveBeenCalledWith("copy")
+      expect(document.querySelector("textarea")).toBeNull()
+    } finally {
+      restoreDescriptor(navigator, "clipboard", clipboardDescriptor)
+      restoreDescriptor(window, "isSecureContext", secureContextDescriptor)
+      restoreDescriptor(document, "execCommand", execCommandDescriptor)
+    }
   })
 })
 
@@ -84,6 +121,37 @@ describe("invoice recipient formatting", () => {
   })
 })
 
+describe("request log recipient formatting", () => {
+  it("splits plus tags from log detail metadata", () => {
+    const entry = requestLogFixture({
+      username: "plex",
+      domain: "bigbones.net",
+      details: {
+        username_raw: "plex+cf",
+        tag: "cf",
+        ln_address: "plex+cf@bigbones.net",
+      },
+    })
+
+    expect(requestLogRecipientParts(entry)).toEqual({
+      recipient: "plex@bigbones.net",
+      taggedRecipient: "plex+cf@bigbones.net",
+      tag: "cf",
+    })
+  })
+
+  it("splits plus tags from the logged username when details are unavailable", () => {
+    expect(requestLogRecipientParts(requestLogFixture({
+      username: "plex+cf",
+      domain: "bigbones.net",
+    }))).toEqual({
+      recipient: "plex@bigbones.net",
+      taggedRecipient: "plex+cf@bigbones.net",
+      tag: "cf",
+    })
+  })
+})
+
 function invoiceFixture(overrides: Partial<InvoiceEvent>): InvoiceEvent {
   return {
     id: 1,
@@ -93,5 +161,23 @@ function invoiceFixture(overrides: Partial<InvoiceEvent>): InvoiceEvent {
     expired: false,
     status: "pending",
     ...overrides,
+  }
+}
+
+function requestLogFixture(overrides: Partial<RequestLog>): RequestLog {
+  return {
+    timestamp: "2026-04-27T00:00:00.000Z",
+    username: "plex",
+    ip: "127.0.0.1",
+    event: "pay_request",
+    ...overrides,
+  }
+}
+
+function restoreDescriptor(target: object, key: string, descriptor: PropertyDescriptor | undefined) {
+  if (descriptor) {
+    Object.defineProperty(target, key, descriptor)
+  } else {
+    delete (target as Record<string, unknown>)[key]
   }
 }

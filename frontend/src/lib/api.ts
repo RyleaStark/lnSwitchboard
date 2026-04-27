@@ -85,6 +85,8 @@ export type LNAddress = {
   local_part: string
   domain: string
   identifier: string
+  routing_mode?: "local" | "forward"
+  forward_to?: string | null
   base_local_part?: string | null
   tag?: string | null
   min_sats?: number | null
@@ -100,11 +102,22 @@ export type LNAddress = {
 export type LNAddressPayload = {
   local_part: string
   domain: string
+  routing_mode?: "local" | "forward"
+  forward_to?: string | null
   min_sats: number | null
   max_sats: number | null
   metadata_description: string | null
   success_message: string | null
   webhook_urls: string[]
+}
+
+export type ForwardingValidation = {
+  valid: boolean
+  forward_to: string
+  callback: string
+  min_sendable_msat: number
+  max_sendable_msat: number
+  metadata: string
 }
 
 export type Identity = {
@@ -242,6 +255,11 @@ export const api = {
   channels: () =>
     request<{ channels: Channel[]; total_receiving_capacity_sat: number }>("api/channels/public"),
   addresses: () => request<{ items: LNAddress[] }>("api/lnaddresses"),
+  validateForwardingAddress: (payload: { forward_to: string }) =>
+    request<ForwardingValidation>("api/lnaddresses/forwarding/validate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   createAddress: (payload: LNAddressPayload) =>
     request<{ item: LNAddress }>("api/lnaddresses", {
       method: "POST",

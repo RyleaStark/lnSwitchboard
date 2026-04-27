@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { KeyRoundIcon, SaveIcon, ServerCogIcon } from "lucide-react"
 import { toast } from "sonner"
@@ -17,10 +17,15 @@ import { api, type AuthStatus, type EnvSetting } from "@/lib/api"
 const settingsTabs = [
   { value: "auth", label: "Macaroon", icon: KeyRoundIcon },
   { value: "env", label: "Environment", icon: ServerCogIcon },
-]
+] as const
+
+type SettingsTab = (typeof settingsTabs)[number]["value"]
+
+const hiddenEnvSettingKeys = new Set(["DEP_ENV"])
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
+  const [activeTab, setActiveTab] = useState<SettingsTab>("auth")
   const [macaroon, setMacaroon] = useState("")
   const [macaroonOpen, setMacaroonOpen] = useState(false)
   const [macaroonError, setMacaroonError] = useState("")
@@ -34,6 +39,7 @@ export function SettingsPage() {
       setMacaroon("")
       setMacaroonOpen(false)
       setMacaroonError("")
+      setActiveTab("env")
       await queryClient.invalidateQueries({ queryKey: ["auth-status"] })
     },
     onError: (error: Error) => setMacaroonError(error.message),
@@ -47,18 +53,26 @@ export function SettingsPage() {
       await queryClient.invalidateQueries({ queryKey: ["summary"] })
     },
   })
-  const grouped = useMemo(() => groupSettings(env.data?.settings ?? []), [env.data?.settings])
+  const envSettings = useMemo(() => visibleEnvSettings(env.data?.settings ?? []), [env.data?.settings])
+  const grouped = useMemo(() => groupSettings(envSettings), [envSettings])
   const dirtyValues = useMemo(() => {
     const values: Record<string, string> = {}
-    for (const field of env.data?.settings ?? []) {
+    for (const field of envSettings) {
       if (field.editable && draftValues[field.key] !== undefined && draftValues[field.key] !== field.value) {
         values[field.key] = draftValues[field.key]
       }
     }
     return values
-  }, [draftValues, env.data?.settings])
+  }, [draftValues, envSettings])
   const configured = auth.data?.configured === true
   const manualEntryAllowed = auth.data?.manual_entry_allowed !== false
+  const preferredTab = preferredSettingsTab(auth.data)
+
+  useEffect(() => {
+    if (preferredTab === "env") {
+      setActiveTab("env")
+    }
+  }, [preferredTab])
 
   return (
     <>
@@ -67,7 +81,7 @@ export function SettingsPage() {
         title="Settings"
         description="Rotate the invoice macaroon and edit safe environment settings."
       />
-      <Tabs defaultValue="auth" className="flex flex-col gap-6">
+      <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as SettingsTab)} className="flex flex-col gap-6">
         <div className="flex">
           <TabsList variant="line" className="h-11 w-fit justify-start gap-2 p-0">
             {settingsTabs.map((item) => (
@@ -199,6 +213,10 @@ export function macaroonStatusLabel(status?: AuthStatus): string {
   return status?.configured ? "Manual secret" : "Not configured"
 }
 
+export function preferredSettingsTab(status?: AuthStatus): SettingsTab {
+  return status?.configured ? "env" : "auth"
+}
+
 function macaroonDescription(status?: AuthStatus): string {
   if (status?.manual_entry_allowed === false) {
     return "Using LND's mounted invoice.macaroon directly. Manual replacement is disabled while LND_MACAROON_PATH is set."
@@ -262,6 +280,10 @@ function EnvField({
       </FieldDescription>
     </Field>
   )
+}
+
+export function visibleEnvSettings(settings: EnvSetting[]): EnvSetting[] {
+  return settings.filter((field) => !hiddenEnvSettingKeys.has(field.key))
 }
 
 function groupSettings(settings: EnvSetting[]) {

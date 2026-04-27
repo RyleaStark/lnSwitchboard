@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .ln_client import LNClient
+from .lnurl_forwarding import fetch_forwarding_verify
 from .log_storage import InvoiceEvent, RequestLogStorage
 from .webhook_dispatcher import WebhookDispatcher
 
@@ -102,6 +103,136 @@ async def _dispatch_webhook_if_needed(
         LOGGER.warning("Webhook dispatcher raised for invoice event %s: %s", event.id, exc)
 
 
+def _is_remote_verify_event(event: InvoiceEvent) -> bool:
+    details = event.details if isinstance(event.details, dict) else {}
+    return bool(details.get("forwarded")) and details.get("settlement_source") == "remote_verify"
+
+
+def _interval_for_age(
+    *,
+    created_at: Optional[str],
+    now: datetime,
+    quick_window: timedelta,
+    mid_window: timedelta,
+    quick_interval: timedelta,
+    mid_interval: timedelta,
+    slow_interval: timedelta,
+) -> timedelta:
+    created_at_dt = _parse_iso8601(created_at) or now
+    age = now - created_at_dt
+    if age <= quick_window:
+        return quick_interval
+    if age <= mid_window:
+        return mid_interval
+    return slow_interval
+
+
+async def _refresh_remote_verify_status(
+    storage: RequestLogStorage,
+    *,
+    event: InvoiceEvent,
+    now: datetime,
+    quick_window: timedelta,
+    mid_window: timedelta,
+    quick_interval: timedelta,
+    mid_interval: timedelta,
+    slow_interval: timedelta,
+    webhook_dispatcher: Optional[WebhookDispatcher],
+    logger: logging.Logger,
+) -> int:
+    details = event.details if isinstance(event.details, dict) else {}
+    verify_url = details.get("verify_url") or details.get("verify_url_http")
+    if not isinstance(verify_url, str) or not verify_url.strip():
+        await storage.apply_invoice_event_update(
+            event=event,
+            details=details,
+            settled=False,
+            expired=True,
+            next_check=None,
+            expires_at=None,
+            interval_seconds=0,
+            settled_at=None,
+        )
+        return 0
+
+    try:
+        snapshot = await fetch_forwarding_verify(verify_url)
+    except Exception as exc:  # pragma: no cover - network/runtime
+        logger.warning("Forwarded invoice verify failed for event %s: %s", event.id, exc)
+        await storage.apply_invoice_event_update(
+            event=event,
+            details=details,
+            settled=False,
+            expired=False,
+            next_check=now + quick_interval,
+            expires_at=_parse_iso8601(event.expires_at),
+            interval_seconds=int(quick_interval.total_seconds()),
+            settled_at=None,
+        )
+        return 0
+
+    status_value = snapshot.get("status")
+    status_text = status_value.upper() if isinstance(status_value, str) else ""
+    preimage = snapshot.get("preimage")
+    settled = bool(snapshot.get("settled")) or (isinstance(preimage, str) and bool(preimage.strip()))
+    expired_flag = status_text == "ERROR"
+    expires_at_dt = _parse_iso8601(event.expires_at)
+    if not settled and not expired_flag and expires_at_dt is not None:
+        expired_flag = now >= expires_at_dt
+
+    invoice_details = details.get("invoice")
+    if not isinstance(invoice_details, dict):
+        invoice_details = {}
+        details["invoice"] = invoice_details
+    invoice_details["settled"] = settled
+    invoice_details["expired"] = expired_flag
+    invoice_details["last_checked_at"] = now.isoformat()
+    invoice_details["remote_verify_response"] = snapshot
+    if preimage:
+        invoice_details["r_preimage"] = preimage
+    payment_request = snapshot.get("pr") or snapshot.get("payment_request")
+    if payment_request:
+        invoice_details.setdefault("payment_request", payment_request)
+    details["remote_verify_response"] = snapshot
+
+    interval = _interval_for_age(
+        created_at=event.created_at,
+        now=now,
+        quick_window=quick_window,
+        mid_window=mid_window,
+        quick_interval=quick_interval,
+        mid_interval=mid_interval,
+        slow_interval=slow_interval,
+    )
+    if settled or expired_flag:
+        next_check = None
+        interval_seconds = 0
+    else:
+        next_check = now + interval
+        interval_seconds = int(interval.total_seconds())
+
+    newly_settled = settled and not event.settled
+    settled_at_dt = now if newly_settled else None
+    await storage.apply_invoice_event_update(
+        event=event,
+        details=details,
+        settled=settled,
+        expired=expired_flag,
+        next_check=next_check,
+        expires_at=expires_at_dt,
+        interval_seconds=interval_seconds,
+        settled_at=settled_at_dt,
+    )
+    if newly_settled:
+        await _dispatch_webhook_if_needed(
+            webhook_dispatcher,
+            event=event,
+            details=details,
+            settled_at=settled_at_dt,
+        )
+    return 1
+
+
 async def refresh_invoice_statuses(
     storage: RequestLogStorage,
     ln_client: LNClient,
@@ -131,6 +262,20 @@ async def refresh_invoice_statuses(
 
     processed = 0
     for event in events:
+        if _is_remote_verify_event(event):
+            processed += await _refresh_remote_verify_status(
+                storage,
+                event=event,
+                now=now,
+                quick_window=quick_window,
+                mid_window=mid_window,
+                quick_interval=quick_interval,
+                mid_interval=mid_interval,
+                slow_interval=slow_interval,
+                webhook_dispatcher=webhook_dispatcher,
+                logger=logger,
+            )
+            continue
         payment_hash_hex = (event.payment_hash or "").strip()
         if not payment_hash_hex:
             await storage.apply_invoice_event_update(
@@ -201,14 +346,15 @@ async def refresh_invoice_statuses(
         details = event.details if isinstance(event.details, dict) else {}
         details = _merge_invoice_snapshot(details, snapshot_data, settled=settled, expired=expired_flag)
 
-        created_at_dt = _parse_iso8601(event.created_at) or now
-        age = now - created_at_dt
-        if age <= quick_window:
-            interval = quick_interval
-        elif age <= mid_window:
-            interval = mid_interval
-        else:
-            interval = slow_interval
+        interval = _interval_for_age(
+            created_at=event.created_at,
+            now=now,
+            quick_window=quick_window,
+            mid_window=mid_window,
+            quick_interval=quick_interval,
+            mid_interval=mid_interval,
+            slow_interval=slow_interval,
+        )
         next_check: Optional[datetime]
         interval_seconds = 0
         if settled or expired_flag:

@@ -61,6 +61,8 @@ class LNAddressRecord:
     id: str
     local_part: str
     domain: str
+    routing_mode: str
+    forward_to: Optional[str]
     min_sendable_sat: Optional[int]
     max_sendable_sat: Optional[int]
     metadata_description: Optional[str]
@@ -74,6 +76,8 @@ class LNAddressRecord:
             "id": self.id,
             "local_part": self.local_part,
             "domain": self.domain,
+            "routing_mode": self.routing_mode,
+            "forward_to": self.forward_to,
             "min_sendable_sat": self.min_sendable_sat,
             "max_sendable_sat": self.max_sendable_sat,
             "metadata_description": self.metadata_description,
@@ -114,6 +118,8 @@ class LNAddressStore:
                     id TEXT PRIMARY KEY,
                     local_part TEXT NOT NULL,
                     domain TEXT NOT NULL,
+                    routing_mode TEXT NOT NULL DEFAULT 'local',
+                    forward_to TEXT,
                     min_sendable_sat INTEGER,
                     max_sendable_sat INTEGER,
                     metadata_description TEXT,
@@ -133,6 +139,10 @@ class LNAddressStore:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(ln_addresses)")}
         if "webhook_url" not in columns:
             conn.execute("ALTER TABLE ln_addresses ADD COLUMN webhook_url TEXT")
+        if "routing_mode" not in columns:
+            conn.execute("ALTER TABLE ln_addresses ADD COLUMN routing_mode TEXT NOT NULL DEFAULT 'local'")
+        if "forward_to" not in columns:
+            conn.execute("ALTER TABLE ln_addresses ADD COLUMN forward_to TEXT")
 
     def _normalize(self, value: str) -> str:
         return value.strip().lower()
@@ -142,6 +152,8 @@ class LNAddressStore:
             "id": row["id"],
             "local_part": row["local_part"],
             "domain": row["domain"],
+            "routing_mode": row["routing_mode"] or "local",
+            "forward_to": row["forward_to"],
             "min_sendable_sat": row["min_sendable_sat"],
             "max_sendable_sat": row["max_sendable_sat"],
             "metadata_description": row["metadata_description"],
@@ -156,7 +168,7 @@ class LNAddressStore:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT id, local_part, domain, min_sendable_sat, max_sendable_sat,
+                    SELECT id, local_part, domain, routing_mode, forward_to, min_sendable_sat, max_sendable_sat,
                            metadata_description, success_message, webhook_url, created_at, updated_at
                     FROM ln_addresses
                     ORDER BY domain, local_part
@@ -169,7 +181,7 @@ class LNAddressStore:
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT id, local_part, domain, min_sendable_sat, max_sendable_sat,
+                    SELECT id, local_part, domain, routing_mode, forward_to, min_sendable_sat, max_sendable_sat,
                            metadata_description, success_message, webhook_url, created_at, updated_at
                     FROM ln_addresses
                     WHERE id = ?
@@ -187,7 +199,7 @@ class LNAddressStore:
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT id, local_part, domain, min_sendable_sat, max_sendable_sat,
+                    SELECT id, local_part, domain, routing_mode, forward_to, min_sendable_sat, max_sendable_sat,
                            metadata_description, success_message, webhook_url, created_at, updated_at
                     FROM ln_addresses
                     WHERE local_part = ? AND domain = ?
@@ -208,16 +220,22 @@ class LNAddressStore:
         metadata_description: Optional[str],
         success_message: Optional[str],
         webhook_urls: Optional[List[str]],
+        routing_mode: str = "local",
+        forward_to: Optional[str] = None,
     ) -> Dict[str, Any]:
         async with self._lock:
             normalized_local = self._normalize(local_part)
             normalized_domain = self._normalize(domain)
+            normalized_mode = self._normalize(routing_mode or "local")
+            normalized_forward_to = self._normalize(forward_to) if forward_to else None
             now_iso = _now_iso()
             encoded_webhooks = _encode_webhooks(webhook_urls)
             record = {
                 "id": str(uuid4()),
                 "local_part": normalized_local,
                 "domain": normalized_domain,
+                "routing_mode": normalized_mode,
+                "forward_to": normalized_forward_to,
                 "min_sendable_sat": min_sendable_sat,
                 "max_sendable_sat": max_sendable_sat,
                 "metadata_description": metadata_description,
@@ -232,15 +250,17 @@ class LNAddressStore:
                     conn.execute(
                         """
                         INSERT INTO ln_addresses (
-                            id, local_part, domain, min_sendable_sat, max_sendable_sat,
+                            id, local_part, domain, routing_mode, forward_to, min_sendable_sat, max_sendable_sat,
                             metadata_description, success_message, webhook_url, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             record["id"],
                             record["local_part"],
                             record["domain"],
+                            record["routing_mode"],
+                            record["forward_to"],
                             record["min_sendable_sat"],
                             record["max_sendable_sat"],
                             record["metadata_description"],
@@ -265,10 +285,14 @@ class LNAddressStore:
         metadata_description: Optional[str],
         success_message: Optional[str],
         webhook_urls: Optional[List[str]],
+        routing_mode: str = "local",
+        forward_to: Optional[str] = None,
     ) -> Dict[str, Any]:
         async with self._lock:
             normalized_local = self._normalize(local_part)
             normalized_domain = self._normalize(domain)
+            normalized_mode = self._normalize(routing_mode or "local")
+            normalized_forward_to = self._normalize(forward_to) if forward_to else None
             now_iso = _now_iso()
             try:
                 with self._connect() as conn:
@@ -277,6 +301,8 @@ class LNAddressStore:
                         UPDATE ln_addresses
                         SET local_part = ?,
                             domain = ?,
+                            routing_mode = ?,
+                            forward_to = ?,
                             min_sendable_sat = ?,
                             max_sendable_sat = ?,
                             metadata_description = ?,
@@ -288,6 +314,8 @@ class LNAddressStore:
                         (
                             normalized_local,
                             normalized_domain,
+                            normalized_mode,
+                            normalized_forward_to,
                             min_sendable_sat,
                             max_sendable_sat,
                             metadata_description,

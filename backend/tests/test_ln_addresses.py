@@ -2,6 +2,97 @@ from __future__ import annotations
 
 import pytest
 
+from backend.app.lnurl_forwarding import ForwardingTarget, ForwardingTargetError, validate_discovery_payload
+
+
+def _forwarding_target(address: str = "bones@walletofsatoshi.com") -> ForwardingTarget:
+    return ForwardingTarget(
+        address=address,
+        local_part=address.split("@", 1)[0],
+        domain=address.split("@", 1)[1],
+        discovery_url=f"https://{address.split('@', 1)[1]}/.well-known/lnurlp/{address.split('@', 1)[0]}",
+        payload={
+            "callback": "https://livingroomofsatoshi.com/api/v1/lnurl/payreq/tester",
+            "maxSendable": 100000000000,
+            "minSendable": 1000,
+            "metadata": '[[\"text/plain\",\"Pay forwarded target\"]]',
+            "tag": "payRequest",
+        },
+    )
+
+
+def test_forwarding_discovery_payload_validation():
+    payload = validate_discovery_payload(
+        {
+            "callback": "https://livingroomofsatoshi.com/api/v1/lnurl/payreq/forwarded",
+            "maxSendable": 100000000000,
+            "minSendable": 1000,
+            "metadata": '[[\"text/plain\",\"Pay to Wallet of Satoshi user: bones\"],[\"text/identifier\",\"bones@walletofsatoshi.com\"]]',
+            "commentAllowed": 255,
+            "tag": "payRequest",
+        }
+    )
+    assert payload["tag"] == "payRequest"
+
+    with pytest.raises(ForwardingTargetError):
+        validate_discovery_payload({"status": "ERROR", "reason": "Unable to find valid user wallet."})
+
+
+def test_forwarding_validation_and_create(monkeypatch, test_client):
+    async def fake_fetch(forward_to):
+        assert forward_to == "Bones@WalletOfSatoshi.com"
+        return _forwarding_target()
+
+    monkeypatch.setattr("backend.app.routers.ln_addresses.fetch_forwarding_discovery", fake_fetch)
+
+    validate_resp = test_client.post(
+        "/api/lnaddresses/forwarding/validate",
+        json={"forward_to": "Bones@WalletOfSatoshi.com"},
+    )
+    assert validate_resp.status_code == 200
+    assert validate_resp.json()["forward_to"] == "bones@walletofsatoshi.com"
+
+    create_resp = test_client.post(
+        "/api/lnaddresses",
+        json={
+            "local_part": "tips",
+            "domain": "testserver",
+            "routing_mode": "forward",
+            "forward_to": "Bones@WalletOfSatoshi.com",
+        },
+    )
+    assert create_resp.status_code == 201
+    created = create_resp.json()["item"]
+    assert created["identifier"] == "tips@testserver"
+    assert created["routing_mode"] == "forward"
+    assert created["forward_to"] == "bones@walletofsatoshi.com"
+    assert created["min_sats"] is None
+    assert created["webhook_urls"] == []
+
+
+def test_forwarding_validation_blocks_invalid_targets(monkeypatch, test_client):
+    async def fake_fetch(forward_to):
+        raise ForwardingTargetError("Unable to find valid user wallet.")
+
+    monkeypatch.setattr("backend.app.routers.ln_addresses.fetch_forwarding_discovery", fake_fetch)
+
+    validate_resp = test_client.post(
+        "/api/lnaddresses/forwarding/validate",
+        json={"forward_to": "missing@walletofsatoshi.com"},
+    )
+    assert validate_resp.status_code == 422
+    assert "Unable to find valid user wallet" in validate_resp.json()["detail"]
+
+    create_resp = test_client.post(
+        "/api/lnaddresses",
+        json={
+            "local_part": "tips",
+            "domain": "testserver",
+            "routing_mode": "forward",
+            "forward_to": "missing@walletofsatoshi.com",
+        },
+    )
+    assert create_resp.status_code == 422
 
 def test_address_crud_flow(test_client):
     list_resp = test_client.get("/api/lnaddresses")

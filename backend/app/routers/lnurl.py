@@ -22,6 +22,13 @@ from ..deps import (
 )
 from ..ln_address_store import LNAddressStore
 from ..ln_client import LNClient
+from ..lnurl_forwarding import (
+    ForwardingTargetError,
+    extract_payment_hash_from_verify_url,
+    fetch_forwarding_discovery,
+    fetch_forwarding_invoice,
+    is_usable_verify_url,
+)
 from ..log_storage import LogEntry, RequestLogStorage
 from ..macaroon_store import MacaroonNotConfiguredError, MacaroonStore
 from ..request_utils import build_public_url, get_client_ip, get_proxy_debug_info
@@ -236,6 +243,181 @@ async def _lookup_address_override(
     return None
 
 
+def _build_address_override_details(override: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": override.get("id"),
+        "local_part": override.get("local_part"),
+        "domain": override.get("domain"),
+        "routing_mode": override.get("routing_mode") or "local",
+        "forward_to": override.get("forward_to"),
+    }
+
+
+async def _forward_lnurl_pay(
+    *,
+    request: Request,
+    raw_username: str,
+    username: str,
+    tag: Optional[str],
+    amount: Optional[int],
+    ip: str,
+    proxy_info: Dict[str, Any],
+    callback_http_url: str,
+    callback_lnurl: str,
+    domain: str,
+    ln_address: str,
+    override: Dict[str, Any],
+    storage: RequestLogStorage,
+) -> Dict[str, Any]:
+    forward_to = override.get("forward_to")
+    forward_phase = "invoice" if amount is not None else "discovery"
+    address_override = _build_address_override_details(override)
+    try:
+        target = await fetch_forwarding_discovery(str(forward_to or ""))
+    except ForwardingTargetError as exc:
+        await storage.append(
+            LogEntry.create(
+                username=username,
+                ip=ip,
+                event="forward",
+                domain=domain,
+                amount_msat=amount,
+                status="error",
+                message=str(exc),
+                details={
+                    "forwarded": True,
+                    "forward_to": forward_to,
+                    "ln_address": ln_address,
+                    "username_raw": raw_username,
+                    "domain": domain,
+                    "callback": callback_http_url,
+                    "callback_lnurl": callback_lnurl,
+                    "callback_http": callback_http_url,
+                    "proxy": proxy_info,
+                    "address_override": address_override,
+                    "forward_phase": forward_phase,
+                    "error": str(exc),
+                },
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Forwarding target unavailable") from exc
+
+    base_details: Dict[str, Any] = {
+        "forwarded": True,
+        "forward_to": target.address,
+        "settlement_source": "remote_verify",
+        "callback": callback_http_url,
+        "callback_lnurl": callback_lnurl,
+        "callback_http": callback_http_url,
+        "proxy": proxy_info,
+        "domain": domain,
+        "ln_address": ln_address,
+        "username_raw": raw_username,
+        "address_override": address_override,
+        "forward_phase": forward_phase,
+        "forwarding_target": {
+            "ln_address": target.address,
+            "discovery_url": target.discovery_url,
+            "callback": target.payload.get("callback"),
+            "minSendable": target.payload.get("minSendable"),
+            "maxSendable": target.payload.get("maxSendable"),
+            "metadata": target.payload.get("metadata"),
+        },
+    }
+    if tag:
+        base_details["tag"] = tag
+
+    discovery_response = dict(target.payload)
+    discovery_response["callback"] = callback_http_url
+    if amount is None:
+        details = dict(base_details)
+        details["response"] = discovery_response
+        await storage.append(
+            LogEntry.create(
+                username=username,
+                ip=ip,
+                event="forward",
+                domain=domain,
+                amount_msat=None,
+                details=details,
+            )
+        )
+        return discovery_response
+
+    if amount <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount must be positive")
+    min_sendable = target.payload.get("minSendable")
+    max_sendable = target.payload.get("maxSendable")
+    if isinstance(min_sendable, int) and isinstance(max_sendable, int):
+        if amount < min_sendable or amount > max_sendable:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount outside allowed range")
+
+    try:
+        invoice_response = await fetch_forwarding_invoice(
+            str(target.payload.get("callback") or ""),
+            list(request.query_params.multi_items()),
+        )
+    except ForwardingTargetError as exc:
+        details = dict(base_details)
+        details["error"] = str(exc)
+        await storage.append(
+            LogEntry.create(
+                username=username,
+                ip=ip,
+                event="forward",
+                domain=domain,
+                amount_msat=amount,
+                status="error",
+                message=str(exc),
+                details=details,
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    verify_url = invoice_response.get("verify")
+    payment_hash = extract_payment_hash_from_verify_url(verify_url)
+    details = dict(base_details)
+    details["response"] = invoice_response
+    details["invoice"] = {
+        "payment_request": invoice_response.get("pr"),
+        "amount_msat": amount,
+        "amount_sat": amount // 1000,
+        "payment_hash": payment_hash,
+        "remote_callback": target.payload.get("callback"),
+    }
+    if payment_hash:
+        details["payment_hash"] = payment_hash
+    if is_usable_verify_url(verify_url):
+        details["verify_url"] = verify_url
+    else:
+        details["webhooks_unavailable_reason"] = "Forwarding target did not return a usable verify URL"
+
+    request_log_id = await storage.append(
+        LogEntry.create(
+            username=username,
+            ip=ip,
+            event="forward",
+            domain=domain,
+            amount_msat=amount,
+            details=details,
+        )
+    )
+    if is_usable_verify_url(verify_url):
+        await storage.log_invoice_event(
+            username=username,
+            domain=domain,
+            amount_msat=amount,
+            ip=ip,
+            payment_hash=payment_hash,
+            payment_request=invoice_response.get("pr"),
+            details=details,
+            request_log_id=request_log_id,
+            expires_at=None,
+        )
+
+    return invoice_response
+
+
 @router.get("/{username}", name="lnurlp")
 async def lnurl_pay(
     request: Request,
@@ -290,6 +472,23 @@ async def lnurl_pay(
 
     query_params = dict(request.query_params)
     callback_lnurl = _make_lnurlp(callback_http_url)
+
+    if override and (override.get("routing_mode") == "forward"):
+        return await _forward_lnurl_pay(
+            request=request,
+            raw_username=raw_username,
+            username=username,
+            tag=tag,
+            amount=amount,
+            ip=ip,
+            proxy_info=proxy_info,
+            callback_http_url=callback_http_url,
+            callback_lnurl=callback_lnurl,
+            domain=domain,
+            ln_address=ln_address,
+            override=override,
+            storage=storage,
+        )
 
     channel_max_sendable_sat = await _channel_max_sendable_sat(ln_client)
     if channel_max_sendable_sat <= 0:
@@ -354,11 +553,7 @@ async def lnurl_pay(
     if base_payer_data:
         base_details["payer_data"] = base_payer_data
     if override:
-        base_details["address_override"] = {
-            "id": override.get("id"),
-            "local_part": override.get("local_part"),
-            "domain": override.get("domain"),
-        }
+        base_details["address_override"] = _build_address_override_details(override)
     base_details["limits"] = {
         "min_sat": min_sendable_sat,
         "max_sat": max_sendable_sat,

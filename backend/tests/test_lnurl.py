@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from ..app import config, deps
 from backend.app.invoice_worker import refresh_invoice_statuses
+from backend.app.lnurl_forwarding import ForwardingTarget
 from backend.app.tls_status import TlsCertStatus
 
 
@@ -33,6 +34,24 @@ def refresh_invoices_once():
             ln_client,
             batch_size=100,
         )
+    )
+
+
+def forwarding_target(address: str = "bones@walletofsatoshi.com") -> ForwardingTarget:
+    local_part, domain = address.split("@", 1)
+    return ForwardingTarget(
+        address=address,
+        local_part=local_part,
+        domain=domain,
+        discovery_url=f"https://{domain}/.well-known/lnurlp/{local_part}",
+        payload={
+            "callback": "https://livingroomofsatoshi.com/api/v1/lnurl/payreq/forwarded",
+            "maxSendable": 100000000000,
+            "minSendable": 1000,
+            "metadata": '[[\"text/plain\",\"Pay to Wallet of Satoshi user: bones\"],[\"text/identifier\",\"bones@walletofsatoshi.com\"]]',
+            "commentAllowed": 255,
+            "tag": "payRequest",
+        },
     )
 
 
@@ -717,13 +736,10 @@ def test_env_settings_get(test_client: TestClient):
     assert "RATE_LIMIT_PER_MIN" in keys
     assert "WEBHOOK_MAX_RETRIES" in keys
     assert "WEBHOOK_RETRY_WINDOW_SECONDS" in keys
-    assert "DEP_ENV" in keys
     assert "SERVICE_PORT" not in keys
+    assert "DEP_ENV" not in keys
     assert "REQUEST_LOG_PATH" not in keys
     assert "DATA_STORE_PATH" not in keys
-    dep_env = next(item for item in payload["settings"] if item["key"] == "DEP_ENV")
-    assert dep_env["value"] == "DOCKER"
-    assert dep_env["editable"] is False
 
 
 def test_version_includes_deployment_environment(test_client: TestClient, monkeypatch):
@@ -908,6 +924,131 @@ def test_invoice_events_are_persisted(test_client: TestClient):
     assert row["amount_msat"] == 2000
     assert row["payment_request"] == invoice_payload["pr"]
     assert row["payment_hash"] == invoice_payload["verify"].split("/")[-1]
+
+
+def test_forwarded_lnurl_discovery_and_invoice(monkeypatch, test_client: TestClient):
+    target = forwarding_target()
+
+    async def fake_address_validation(forward_to):
+        assert forward_to == "bones@walletofsatoshi.com"
+        return target
+
+    async def fake_lnurl_discovery(forward_to):
+        assert forward_to == "bones@walletofsatoshi.com"
+        return target
+
+    payment_hash = "cd" * 32
+
+    async def fake_forwarding_invoice(callback_url, params):
+        assert callback_url == target.payload["callback"]
+        assert ("amount", "2200") in params
+        return {
+            "pr": "lnbc2200n1forward",
+            "routes": [],
+            "verify": f"https://livingroomofsatoshi.com/api/v1/lnurl/verify/{payment_hash}",
+        }
+
+    monkeypatch.setattr("backend.app.routers.ln_addresses.fetch_forwarding_discovery", fake_address_validation)
+    create_resp = test_client.post(
+        "/api/lnaddresses",
+        json={
+            "local_part": "tips",
+            "domain": "testserver",
+            "routing_mode": "forward",
+            "forward_to": "bones@walletofsatoshi.com",
+        },
+    )
+    assert create_resp.status_code == 201
+
+    monkeypatch.setattr("backend.app.routers.lnurl.fetch_forwarding_discovery", fake_lnurl_discovery)
+    monkeypatch.setattr("backend.app.routers.lnurl.fetch_forwarding_invoice", fake_forwarding_invoice)
+
+    invoice_calls_before = len(test_client.app.state.test_invoice_calls)
+    discovery = test_client.get("/.well-known/lnurlp/tips")
+    assert discovery.status_code == 200
+    discovery_payload = discovery.json()
+    assert discovery_payload["callback"] == "http://testserver/.well-known/lnurlp/tips"
+    assert discovery_payload["metadata"] == target.payload["metadata"]
+
+    invoice_resp = test_client.get("/.well-known/lnurlp/tips", params={"amount": 2200})
+    assert invoice_resp.status_code == 200
+    assert invoice_resp.json()["pr"] == "lnbc2200n1forward"
+    assert len(test_client.app.state.test_invoice_calls) == invoice_calls_before
+
+    db_path = config.get_settings().data_store_path
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT username, domain, amount_msat, payment_hash, payment_request, details
+        FROM invoice_events
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row["username"] == "tips"
+    assert row["domain"] == "testserver"
+    assert row["amount_msat"] == 2200
+    assert row["payment_request"] == "lnbc2200n1forward"
+    assert row["payment_hash"] == payment_hash
+    details = json.loads(row["details"])
+    assert details["forwarded"] is True
+    assert details["forward_to"] == "bones@walletofsatoshi.com"
+    assert details["settlement_source"] == "remote_verify"
+
+    logs_resp = test_client.get("/api/logs/recent", params={"q": "forward"})
+    assert logs_resp.status_code == 200
+    logs = logs_resp.json()["items"]
+    assert logs
+    assert logs[0]["event"] == "forward"
+
+    invoices_resp = test_client.get("/api/invoices", params={"q": "forwarded"})
+    assert invoices_resp.status_code == 200
+    invoices = invoices_resp.json()["items"]
+    assert invoices
+    assert invoices[0]["status"] == "forwarded"
+
+
+def test_forwarded_invoice_without_verify_does_not_create_paid_webhook_event(monkeypatch, test_client: TestClient):
+    target = forwarding_target("ivegotbones@shakepay.me")
+
+    async def fake_address_validation(forward_to):
+        return target
+
+    async def fake_lnurl_discovery(forward_to):
+        return target
+
+    async def fake_forwarding_invoice(callback_url, params):
+        return {
+            "pr": "lnbc3000n1forward",
+            "routes": [],
+        }
+
+    monkeypatch.setattr("backend.app.routers.ln_addresses.fetch_forwarding_discovery", fake_address_validation)
+    create_resp = test_client.post(
+        "/api/lnaddresses",
+        json={
+            "local_part": "shake",
+            "domain": "testserver",
+            "routing_mode": "forward",
+            "forward_to": "ivegotbones@shakepay.me",
+        },
+    )
+    assert create_resp.status_code == 201
+
+    monkeypatch.setattr("backend.app.routers.lnurl.fetch_forwarding_discovery", fake_lnurl_discovery)
+    monkeypatch.setattr("backend.app.routers.lnurl.fetch_forwarding_invoice", fake_forwarding_invoice)
+
+    invoice_resp = test_client.get("/.well-known/lnurlp/shake", params={"amount": 3000})
+    assert invoice_resp.status_code == 200
+
+    db_path = config.get_settings().data_store_path
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM invoice_events").fetchone()[0]
+    conn.close()
+    assert count == 0
 
 
 def test_invoice_list_endpoint(test_client: TestClient):

@@ -319,3 +319,86 @@ async def _exercise_webhook_dispatch(tmp_path):
     assert headers["X-LnSwitchboard-Event"] == "payment.settled"
     assert headers["X-LnSwitchboard-Version"] == get_version()
     assert headers["X-LnSwitchboard-Address-Id"] == address["id"]
+
+
+def test_forwarded_webhook_dispatch_on_remote_verify(monkeypatch, tmp_path):
+    async def fake_verify(verify_url):
+        assert verify_url == "https://wallet.example/verify"
+        return {
+            "status": "OK",
+            "settled": True,
+            "preimage": "aa" * 32,
+            "pr": "lnbc1forward",
+        }
+
+    monkeypatch.setattr("backend.app.invoice_worker.fetch_forwarding_verify", fake_verify)
+    asyncio.run(_exercise_forwarded_webhook_dispatch(tmp_path))
+
+
+async def _exercise_forwarded_webhook_dispatch(tmp_path):
+    db_path = tmp_path / "forwarded-webhooks.db"
+    storage = RequestLogStorage(db_path)
+    address_store = LNAddressStore(db_path)
+    address = await address_store.add_address(
+        local_part="pay",
+        domain="testserver",
+        routing_mode="forward",
+        forward_to="bones@walletofsatoshi.com",
+        min_sendable_sat=None,
+        max_sendable_sat=None,
+        metadata_description=None,
+        success_message=None,
+        webhook_urls=["https://hooks.example.com/forwarded"],
+    )
+    details = {
+        "forwarded": True,
+        "forward_to": "bones@walletofsatoshi.com",
+        "settlement_source": "remote_verify",
+        "verify_url": "https://wallet.example/verify",
+        "ln_address": "pay@testserver",
+        "username_raw": "pay",
+        "domain": "testserver",
+        "address_override": {
+            "id": address["id"],
+            "local_part": address["local_part"],
+            "domain": address["domain"],
+            "routing_mode": "forward",
+            "forward_to": "bones@walletofsatoshi.com",
+        },
+        "invoice": {"payment_request": "lnbc1forward", "settled": False},
+    }
+    await storage.log_invoice_event(
+        username="pay",
+        domain="testserver",
+        amount_msat=2000,
+        ip="127.0.0.1",
+        payment_hash=None,
+        payment_request="lnbc1forward",
+        details=details,
+        request_log_id=None,
+        expires_at=None,
+    )
+    events = await storage.get_due_invoice_events(limit=5)
+
+    captured = []
+
+    async def fake_sender(url, payload, headers):
+        captured.append({"url": url, "payload": payload, "headers": headers})
+
+    dispatcher = WebhookDispatcher(address_store=address_store, sender=fake_sender)
+    await refresh_invoice_statuses(
+        storage,
+        DummyLookupClient({}),
+        events=events,
+        webhook_dispatcher=dispatcher,
+    )
+
+    assert len(captured) == 1
+    delivery = captured[0]
+    assert delivery["url"] == "https://hooks.example.com/forwarded"
+    payload = delivery["payload"]
+    assert payload["event"] == "payment.settled"
+    assert payload["forwarded"] is True
+    assert payload["forward_to"] == "bones@walletofsatoshi.com"
+    assert payload["settlement_source"] == "remote_verify"
+    assert payload["ln_address"] == "pay@testserver"

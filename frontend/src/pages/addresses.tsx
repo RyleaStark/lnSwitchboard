@@ -1,6 +1,6 @@
-import { useMemo, useState, type FormEvent } from "react"
+import { useMemo, useRef, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { PencilIcon, PlusIcon, SearchIcon, Trash2Icon } from "lucide-react"
+import { ForwardIcon, PencilIcon, PlusIcon, SearchIcon, Trash2Icon } from "lucide-react"
 import { toast } from "sonner"
 
 import { EmptyPanel, LoadingRows, PageError, PageHeader } from "@/components/common"
@@ -35,6 +35,18 @@ type AddressFormState = {
   webhook_urls: string
 }
 
+type ForwardingFormState = {
+  local_part: string
+  domain: string
+  forward_to: string
+}
+
+export type ForwardingValidationState = {
+  status: "idle" | "valid" | "invalid"
+  target: string
+  message: string
+}
+
 const emptyForm: AddressFormState = {
   local_part: "",
   domain: "",
@@ -45,14 +57,31 @@ const emptyForm: AddressFormState = {
   webhook_urls: "",
 }
 
+const emptyForwardingForm: ForwardingFormState = {
+  local_part: "",
+  domain: "",
+  forward_to: "",
+}
+
+const emptyForwardingValidation: ForwardingValidationState = {
+  status: "idle",
+  target: "",
+  message: "",
+}
+
 export function AddressesPage() {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState("")
   const [editing, setEditing] = useState<LNAddress | null>(null)
   const [deleting, setDeleting] = useState<LNAddress | null>(null)
   const [formOpen, setFormOpen] = useState(false)
+  const [forwardFormOpen, setForwardFormOpen] = useState(false)
   const [form, setForm] = useState<AddressFormState>(emptyForm)
+  const [forwardForm, setForwardForm] = useState<ForwardingFormState>(emptyForwardingForm)
   const [formError, setFormError] = useState("")
+  const [forwardFormError, setForwardFormError] = useState("")
+  const [forwardValidation, setForwardValidation] = useState<ForwardingValidationState>(emptyForwardingValidation)
+  const forwardToRef = useRef("")
   const addresses = useQuery({ queryKey: ["addresses"], queryFn: api.addresses })
   const identities = useQuery({ queryKey: ["identities"], queryFn: api.identities })
   const save = useMutation({
@@ -60,10 +89,17 @@ export function AddressesPage() {
     onSuccess: async () => {
       toast.success(editing ? "LN address updated" : "LN address created")
       setFormOpen(false)
+      setForwardFormOpen(false)
       setEditing(null)
       await queryClient.invalidateQueries({ queryKey: ["addresses"] })
     },
-    onError: (error: Error) => setFormError(error.message),
+    onError: (error: Error) => {
+      if (forwardFormOpen) {
+        setForwardFormError(error.message)
+        return
+      }
+      setFormError(error.message)
+    },
   })
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteAddress(id),
@@ -71,6 +107,21 @@ export function AddressesPage() {
       toast.success("LN address deleted")
       setDeleting(null)
       await queryClient.invalidateQueries({ queryKey: ["addresses"] })
+    },
+  })
+  const validateForwarding = useMutation({
+    mutationFn: (forwardTo: string) => api.validateForwardingAddress({ forward_to: forwardTo }),
+    onSuccess: (result, forwardTo) => {
+      if (normalizeForwardingInput(forwardToRef.current) !== normalizeForwardingInput(forwardTo)) return
+      setForwardForm((current) => ({ ...current, forward_to: result.forward_to }))
+      forwardToRef.current = result.forward_to
+      setForwardValidation({ status: "valid", target: result.forward_to, message: `Validated ${result.forward_to}` })
+      setForwardFormError("")
+    },
+    onError: (error: Error, forwardTo) => {
+      if (normalizeForwardingInput(forwardToRef.current) !== normalizeForwardingInput(forwardTo)) return
+      setForwardValidation({ status: "invalid", target: forwardTo, message: error.message })
+      setForwardFormError(error.message)
     },
   })
   const identitySet = useMemo(() => new Set((identities.data?.items ?? []).map((item) => `${item.local_part}@${item.domain}`)), [identities.data?.items])
@@ -84,6 +135,7 @@ export function AddressesPage() {
       item.metadata_description,
       item.success_message,
       ...(item.webhook_urls || []),
+      item.forward_to,
       item.min_sats,
       item.max_sats,
     ].join(" ").toLowerCase().includes(query))
@@ -96,7 +148,20 @@ export function AddressesPage() {
     setFormOpen(true)
   }
 
+  function openForwardCreate() {
+    setEditing(null)
+    setForwardForm(emptyForwardingForm)
+    forwardToRef.current = ""
+    setForwardValidation(emptyForwardingValidation)
+    setForwardFormError("")
+    setForwardFormOpen(true)
+  }
+
   function openEdit(item: LNAddress) {
+    if (item.routing_mode === "forward") {
+      openForwardEdit(item)
+      return
+    }
     setEditing(item)
     setForm({
       local_part: item.local_part || "",
@@ -111,6 +176,24 @@ export function AddressesPage() {
     setFormOpen(true)
   }
 
+  function openForwardEdit(item: LNAddress) {
+    const forwardTo = item.forward_to || ""
+    setEditing(item)
+    setForwardForm({
+      local_part: item.local_part || "",
+      domain: item.domain || "",
+      forward_to: forwardTo,
+    })
+    forwardToRef.current = forwardTo
+    setForwardValidation(
+      forwardTo
+        ? { status: "valid", target: forwardTo, message: `Validated ${forwardTo}` }
+        : emptyForwardingValidation,
+    )
+    setForwardFormError("")
+    setForwardFormOpen(true)
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault()
     const payload = collectAddressPayload(form)
@@ -122,13 +205,51 @@ export function AddressesPage() {
     save.mutate(payload)
   }
 
+  function submitForwarding(event: FormEvent) {
+    event.preventDefault()
+    const payload = collectForwardingAddressPayload(forwardForm, forwardValidation)
+    if (typeof payload === "string") {
+      setForwardFormError(payload)
+      return
+    }
+    if (editing?.routing_mode === "forward" && editing.webhook_urls?.length) {
+      payload.webhook_urls = [...editing.webhook_urls]
+    }
+    setForwardFormError("")
+    save.mutate(payload)
+  }
+
+  function updateForwardTo(value: string) {
+    forwardToRef.current = value
+    setForwardForm({ ...forwardForm, forward_to: value })
+    setForwardValidation(emptyForwardingValidation)
+    setForwardFormError("")
+  }
+
+  function validateForwardTarget() {
+    const target = forwardForm.forward_to.trim()
+    if (!target) {
+      setForwardFormError("Forwarding LN Address is required.")
+      return
+    }
+    setForwardFormError("")
+    validateForwarding.mutate(target)
+  }
+
+  const forwardTargetValidated = isForwardingValidationCurrent(forwardForm, forwardValidation)
+
   return (
     <>
       <PageHeader
         eyebrow="LNURL handles"
         title="LN Addresses"
         description="Create handle-specific min/max amounts, invoice templates, success messages, and webhook automation."
-        action={<Button onClick={openCreate}><PlusIcon data-icon="inline-start" /> Add address</Button>}
+        action={(
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="outline" onClick={openForwardCreate}><ForwardIcon data-icon="inline-start" /> Add forwarding address</Button>
+            <Button onClick={openCreate}><PlusIcon data-icon="inline-start" /> Add address</Button>
+          </div>
+        )}
       />
       <Card>
         <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -238,6 +359,44 @@ export function AddressesPage() {
           </form>
         </DialogContent>
       </Dialog>
+      <Dialog open={forwardFormOpen} onOpenChange={setForwardFormOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{editing ? `Edit ${editing.identifier}` : "Add forwarding address"}</DialogTitle>
+            <DialogDescription>Map a local handle to a validated external Lightning Address.</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={submitForwarding}>
+            <FieldGroup>
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field data-invalid={Boolean(forwardFormError)}>
+                  <FieldLabel htmlFor="forward-local">Local-part</FieldLabel>
+                  <Input id="forward-local" value={forwardForm.local_part} onChange={(event) => setForwardForm({ ...forwardForm, local_part: event.target.value.toLowerCase() })} aria-invalid={Boolean(forwardFormError)} />
+                  <FieldDescription>Do not include @ or +tags.</FieldDescription>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="forward-domain">Domain</FieldLabel>
+                  <Input id="forward-domain" value={forwardForm.domain} onChange={(event) => setForwardForm({ ...forwardForm, domain: event.target.value })} />
+                </Field>
+              </div>
+              <Field data-invalid={forwardValidation.status === "invalid"}>
+                <FieldLabel htmlFor="forward-target">Forward to LN Address</FieldLabel>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Input id="forward-target" value={forwardForm.forward_to} onChange={(event) => updateForwardTo(event.target.value)} placeholder="username@domain.com" aria-invalid={forwardValidation.status === "invalid"} />
+                  <Button type="button" variant="outline" onClick={validateForwardTarget} disabled={validateForwarding.isPending || !forwardForm.forward_to.trim()}>
+                    {validateForwarding.isPending ? "Validating..." : "Validate"}
+                  </Button>
+                </div>
+                <FieldDescription>{forwardValidation.status === "valid" ? forwardValidation.message : "The target must return a valid LNURL-pay payload before this address can be created."}</FieldDescription>
+              </Field>
+              <FieldError>{forwardFormError}</FieldError>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => setForwardFormOpen(false)}>Cancel</Button>
+                <Button type="submit" disabled={save.isPending || !forwardTargetValidated}>{save.isPending ? "Saving..." : editing ? "Save changes" : "Create forwarding address"}</Button>
+              </div>
+            </FieldGroup>
+          </form>
+        </DialogContent>
+      </Dialog>
       <AlertDialog open={Boolean(deleting)} onOpenChange={(open) => !open && setDeleting(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -285,6 +444,33 @@ export function collectAddressPayload(form: AddressFormState): LNAddressPayload 
   }
 }
 
+export function collectForwardingAddressPayload(form: ForwardingFormState, validation: ForwardingValidationState): LNAddressPayload | string {
+  const localPart = form.local_part.trim().toLowerCase()
+  const domain = normalizeDomainInput(form.domain)
+  if (!localPart || !domain) return "Local-part and domain are required."
+  if (!form.forward_to.trim()) return "Forwarding LN Address is required."
+  if (!isForwardingValidationCurrent(form, validation)) return "Validate the forwarding LN Address before creating this entry."
+  return {
+    local_part: localPart,
+    domain,
+    routing_mode: "forward",
+    forward_to: validation.target,
+    min_sats: null,
+    max_sats: null,
+    metadata_description: null,
+    success_message: null,
+    webhook_urls: [],
+  }
+}
+
+export function isForwardingValidationCurrent(form: ForwardingFormState, validation: ForwardingValidationState): boolean {
+  return validation.status === "valid" && normalizeForwardingInput(form.forward_to) === normalizeForwardingInput(validation.target)
+}
+
+function normalizeForwardingInput(value: string): string {
+  return value.trim().toLowerCase()
+}
+
 function parseOptionalPositiveInt(value: string, label: string): number | null | string {
   if (!value.trim()) return null
   const parsed = Number(value)
@@ -301,6 +487,7 @@ function AddressHandle({ item, hasIdentity }: { item: LNAddress; hasIdentity: bo
     <div className="flex flex-col gap-2">
       <span className="font-medium">{item.identifier}</span>
       <div className="flex flex-wrap gap-1.5">
+        {item.routing_mode === "forward" ? <Badge variant="outline">Forwarding</Badge> : null}
         {hasIdentity ? <Badge variant="secondary">Nostr identity linked</Badge> : null}
         {item.webhook_urls?.length ? <Badge variant="secondary">{item.webhook_urls.length === 1 ? "Webhook configured" : "Webhooks configured"}</Badge> : null}
       </div>
@@ -309,6 +496,14 @@ function AddressHandle({ item, hasIdentity }: { item: LNAddress; hasIdentity: bo
 }
 
 function Limits({ item }: { item: LNAddress }) {
+  if (item.routing_mode === "forward") {
+    return (
+      <div className="flex flex-col gap-1 text-sm">
+        <span><span className="text-muted-foreground">Min:</span> Target controlled</span>
+        <span><span className="text-muted-foreground">Max:</span> Target controlled</span>
+      </div>
+    )
+  }
   return (
     <div className="flex flex-col gap-1 text-sm">
       <span><span className="text-muted-foreground">Min:</span> {typeof item.min_sats === "number" ? `${formatNumber(item.min_sats)} sats` : "Global minimum"}</span>
@@ -318,6 +513,14 @@ function Limits({ item }: { item: LNAddress }) {
 }
 
 function Templates({ item }: { item: LNAddress }) {
+  if (item.routing_mode === "forward") {
+    return (
+      <div className="flex flex-col gap-1 text-sm">
+        <span><span className="text-muted-foreground">Forwards to:</span> <span className="font-mono">{item.forward_to}</span></span>
+        <span><span className="text-muted-foreground">Webhook settlement:</span> Remote verify when available</span>
+      </div>
+    )
+  }
   return (
     <div className="flex flex-col gap-1 text-sm">
       <span><span className="text-muted-foreground">Metadata:</span> {item.metadata_description || "Inherits global default"}</span>

@@ -202,7 +202,7 @@ function Detail({ label, children }: { label: string; children: React.ReactNode 
 }
 
 function StatusBadge({ status }: { status?: string }) {
-  const normalized = status === "settled" || status === "expired" || status === "pending" ? status : "unknown"
+  const normalized = status === "settled" || status === "expired" || status === "pending" || status === "forwarded" ? status : "unknown"
   const variant = normalized === "settled" ? "default" : normalized === "expired" ? "destructive" : "secondary"
   return <Badge variant={variant}>{normalized.charAt(0).toUpperCase() + normalized.slice(1)}</Badge>
 }
