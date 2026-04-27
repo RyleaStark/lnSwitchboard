@@ -11,6 +11,7 @@ services:
       LND_GRPC_PORT: 10009
       LND_TLS_PATH: /lnd/tls.cert
       LND_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/invoice.macaroon
+      LND_READONLY_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/readonly.macaroon
     volumes:
       - ./secrets:/app/secrets:rw
       - ${APP_LIGHTNING_NODE_DATA_DIR:-/app-data/lightning/data/lnd}:/lnd:ro

@@ -58,6 +58,7 @@ volumes:
 environment:
   LND_TLS_PATH: /lnd/tls.cert
   LND_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/invoice.macaroon
+  LND_READONLY_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/readonly.macaroon
 ```
 
 Then run:
@@ -77,7 +78,7 @@ cd frontend && npm ci && npm run build && cd ..
 .venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 22121
 ```
 
-Set `LND_TLS_PATH` and `LND_MACAROON_PATH` to existing LND files before launching. By default, lnSwitchboard verifies LND's certificate against `LND_HOST` using the trust roots from `LND_TLS_PATH`; set `LND_TLS_SERVER_NAME` only when you intentionally need to verify against a different certificate SAN. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`.
+Set `LND_TLS_PATH`, `LND_MACAROON_PATH`, and `LND_READONLY_MACAROON_PATH` to existing LND files before launching. lnSwitchboard uses `invoice.macaroon` for invoice creation/lookup/subscription and `readonly.macaroon` for liquidity reads such as `ListChannels`. By default, lnSwitchboard verifies LND's certificate against `LND_HOST` using the trust roots from `LND_TLS_PATH`; set `LND_TLS_SERVER_NAME` only when you intentionally need to verify against a different certificate SAN. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`.
 
 ### 🛠️ LND Diagnostics
 

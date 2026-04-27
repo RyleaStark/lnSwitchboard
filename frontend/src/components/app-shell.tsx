@@ -86,6 +86,8 @@ export function AppShell() {
   const versionLabel = `v${version.data?.version ?? "-"}`
   const lndValue = lndStatus.data ? (lndConnected ? "Connected" : "Offline") : "Checking"
   const lndTone = lndStatus.data ? (lndConnected ? "ok" : "error") : "pending"
+  const tlsValue = tlsStatusLabel(lndStatus.data?.tls_status)
+  const tlsTone = lndStatus.data ? tlsStatusTone(lndStatus.data.tls_status) : "pending"
   const macaroonValue = auth.data ? macaroonStatusLabel(auth.data) : "Checking"
   const macaroonTone = auth.data ? (configured ? "ok" : "error") : "pending"
 
@@ -152,6 +154,20 @@ export function AppShell() {
                   <span>{lndStatus.data?.message ?? "Checking LND connection"}</span>
                 </TooltipContent>
               </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div>
+                    <StatusRow
+                      label="TLS"
+                      tone={tlsTone}
+                      value={tlsValue}
+                    />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  <span>{tlsStatusMessage(lndStatus.data)}</span>
+                </TooltipContent>
+              </Tooltip>
               <StatusRow
                 label="Macaroon"
                 tone={macaroonTone}
@@ -215,6 +231,32 @@ function statusToneClass(tone: "ok" | "pending" | "error") {
 function macaroonStatusLabel(status?: { configured: boolean; source?: string }) {
   if (!status?.configured) return "Needed"
   return status.source === "file" ? "Mounted" : "Manual"
+}
+
+function tlsStatusLabel(status?: string | null) {
+  if (status === "valid") return "Valid"
+  if (status === "expired") return "Expired"
+  if (status === "not_yet_valid") return "Not active"
+  if (status === "missing") return "Missing"
+  if (status === "invalid") return "Invalid"
+  if (status === "unknown") return "Unknown"
+  return "Checking"
+}
+
+function tlsStatusTone(status?: string | null): "ok" | "pending" | "error" {
+  if (status === "valid") return "ok"
+  if (!status || status === "unknown") return "pending"
+  return "error"
+}
+
+function tlsStatusMessage(status?: {
+  tls_message?: string | null
+  tls_expires_at?: string | null
+}) {
+  if (!status) return "Checking LND TLS certificate"
+  if (status.tls_message) return status.tls_message
+  if (status.tls_expires_at) return `TLS certificate expires at ${status.tls_expires_at}`
+  return status.tls_message ?? "TLS certificate status unavailable"
 }
 
 function ProductFooter({

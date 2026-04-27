@@ -22,6 +22,7 @@ from ..ln_client import LNClient
 from ..log_storage import RequestLogStorage
 from ..macaroon_store import MacaroonNotConfiguredError, MacaroonStore
 from ..env_settings import list_env_settings, update_env_settings
+from ..tls_status import inspect_tls_cert
 from ..version import get_version
 
 
@@ -53,6 +54,9 @@ class LndStatusPayload(BaseModel):
     message: str
     info_permission: Optional[bool] = None
     invoice_permissions: Optional[bool] = None
+    tls_status: str
+    tls_message: str
+    tls_expires_at: Optional[str] = None
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -269,7 +273,9 @@ async def healthcheck() -> Dict[str, str]:
 @router.get("/lnd/status")
 async def lnd_status(
     ln_client: LNClient = Depends(get_ln_client_dep),
+    settings: Settings = Depends(get_settings_dep),
 ) -> LndStatusPayload:
+    tls = inspect_tls_cert(settings.lnd_tls_path)
     try:
         connection_info = await ln_client.check_connection()
     except MacaroonNotConfiguredError:
@@ -277,6 +283,9 @@ async def lnd_status(
             connected=False,
             status="not_configured",
             message="Invoice macaroon not configured",
+            tls_status=tls.status,
+            tls_message=tls.message,
+            tls_expires_at=tls.expires_at,
         )
     except grpc.RpcError as exc:
         details = exc.details() if hasattr(exc, "details") else None
@@ -284,12 +293,18 @@ async def lnd_status(
             connected=False,
             status="error",
             message=details or str(exc) or "Unable to connect to LND",
+            tls_status=tls.status,
+            tls_message=tls.message,
+            tls_expires_at=tls.expires_at,
         )
     except Exception as exc:
         return LndStatusPayload(
             connected=False,
             status="error",
             message=str(exc) or "Unable to connect to LND",
+            tls_status=tls.status,
+            tls_message=tls.message,
+            tls_expires_at=tls.expires_at,
         )
 
     return LndStatusPayload(
@@ -298,6 +313,9 @@ async def lnd_status(
         message="Connected to LND",
         info_permission=connection_info.get("info_permission", True),
         invoice_permissions=connection_info.get("invoice_permissions", True),
+        tls_status=tls.status,
+        tls_message=tls.message,
+        tls_expires_at=tls.expires_at,
     )
 
 

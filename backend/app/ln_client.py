@@ -30,11 +30,13 @@ class LNClient:
         host: str,
         port: int,
         macaroon_store: MacaroonStore,
+        readonly_macaroon_store: MacaroonStore | None = None,
         tls_path: Path,
         tls_server_name: str | None = None,
     ) -> None:
         self._target = f"{host}:{port}"
         self._macaroon_store = macaroon_store
+        self._readonly_macaroon_store = readonly_macaroon_store or macaroon_store
         self._tls_path = tls_path
         self._tls_server_name = tls_server_name
         self._stub: LightningStub | None = None
@@ -57,8 +59,8 @@ class LNClient:
                     self._stub = LightningStub(self._channel)
         return self._stub
 
-    async def _metadata(self) -> Tuple[Tuple[str, str], ...]:
-        macaroon = await self._macaroon_store.get()
+    async def _metadata(self, store: MacaroonStore | None = None) -> Tuple[Tuple[str, str], ...]:
+        macaroon = await (store or self._macaroon_store).get()
         return (("macaroon", macaroon),)
 
     async def close(self) -> None:
@@ -75,7 +77,7 @@ class LNClient:
         try:
             response = await stub.GetInfo(GetInfoRequest(), metadata=metadata)
         except grpc.RpcError as exc:
-            if exc.code() != grpc.StatusCode.PERMISSION_DENIED:
+            if not self._is_permission_denied(exc):
                 raise
 
             fallback_request = PaymentHash()
@@ -111,6 +113,16 @@ class LNClient:
             }
         )
         return result
+
+    @staticmethod
+    def _is_permission_denied(exc: grpc.RpcError) -> bool:
+        if exc.code() == grpc.StatusCode.PERMISSION_DENIED:
+            return True
+        try:
+            details = exc.details() or ""
+        except Exception:  # pragma: no cover - defensive around grpc internals
+            details = ""
+        return "permission denied" in details.lower()
 
     async def create_invoice(
         self,
@@ -183,7 +195,7 @@ class LNClient:
 
     async def list_channels(self, public_only: bool = False) -> List[Dict[str, Any]]:
         stub = await self._load_stub()
-        metadata = await self._metadata()
+        metadata = await self._metadata(self._readonly_macaroon_store)
         request = ListChannelsRequest()
         if public_only:
             request.public_only = True

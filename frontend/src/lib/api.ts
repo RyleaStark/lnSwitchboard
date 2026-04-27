@@ -148,6 +148,9 @@ export type LndStatus = {
   message: string
   info_permission?: boolean | null
   invoice_permissions?: boolean | null
+  tls_status: "valid" | "expired" | "not_yet_valid" | "missing" | "invalid" | "unknown"
+  tls_message: string
+  tls_expires_at?: string | null
 }
 
 export class ApiError extends Error {

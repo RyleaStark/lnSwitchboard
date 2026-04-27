@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from ..app import config, deps
 from backend.app.invoice_worker import refresh_invoice_statuses
+from backend.app.tls_status import TlsCertStatus
 
 
 def https_to_http(url: str) -> str:
@@ -406,6 +407,26 @@ def test_lnd_status_endpoint_reports_connection(test_client: TestClient):
     assert response.status_code == 200
     assert response.json()["connected"] is True
     assert response.json()["status"] == "connected"
+    assert response.json()["tls_status"] == "invalid"
+
+
+def test_lnd_status_endpoint_reports_tls_expiry(test_client: TestClient, monkeypatch):
+    monkeypatch.setattr(
+        "backend.app.routers.ui.inspect_tls_cert",
+        lambda _: TlsCertStatus(
+            status="expired",
+            message="TLS certificate expired at 2026-03-23T02:47:34+00:00",
+            expires_at="2026-03-23T02:47:34+00:00",
+        ),
+    )
+
+    response = test_client.get("/api/lnd/status")
+    data = response.json()
+
+    assert response.status_code == 200
+    assert data["connected"] is True
+    assert data["tls_status"] == "expired"
+    assert data["tls_expires_at"] == "2026-03-23T02:47:34+00:00"
 
 
 def test_lnd_status_endpoint_reports_errors(test_client: TestClient, monkeypatch):

@@ -40,6 +40,14 @@ def _get_macaroon_store() -> MacaroonStore:
 
 
 @lru_cache()
+def _get_readonly_macaroon_store() -> MacaroonStore | None:
+    settings = get_settings()
+    if settings.lnd_readonly_macaroon_path is None:
+        return None
+    return MacaroonStore(settings.macaroon_store_path, settings.lnd_readonly_macaroon_path)
+
+
+@lru_cache()
 def _get_nip05_store() -> NostrIdentityStore:
     settings = get_settings()
     return NostrIdentityStore(settings.data_store_path)
@@ -58,6 +66,7 @@ def _get_ln_client() -> LNClient:
         host=settings.lnd_host,
         port=settings.lnd_grpc_port,
         macaroon_store=_get_macaroon_store(),
+        readonly_macaroon_store=_get_readonly_macaroon_store(),
         tls_path=settings.lnd_tls_path,
         tls_server_name=settings.lnd_tls_server_name,
     )

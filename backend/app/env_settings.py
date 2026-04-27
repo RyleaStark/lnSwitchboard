@@ -79,6 +79,16 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "visible": False,
     },
     {
+        "key": "LND_READONLY_MACAROON_PATH",
+        "attr": "lnd_readonly_macaroon_path",
+        "label": "Mounted Readonly Macaroon Path",
+        "type": "text",
+        "category": "LND Node",
+        "description": "Optional read-only macaroon used for LND liquidity calls such as ListChannels.",
+        "editable": False,
+        "visible": False,
+    },
+    {
         "key": "MIN_SENDABLE_SAT",
         "attr": "min_sendable_sat",
         "label": "Minimum Receivable (sats)",
@@ -371,6 +381,7 @@ def update_env_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
     deps._get_ln_client.cache_clear()
     deps._get_log_storage.cache_clear()
     deps._get_macaroon_store.cache_clear()
+    deps._get_readonly_macaroon_store.cache_clear()
     deps._get_nip05_store.cache_clear()
     deps._get_webhook_dispatcher.cache_clear()
 

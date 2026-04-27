@@ -35,14 +35,15 @@ class FakeLightningStub:
 
 
 class FakeRpcError(grpc.RpcError):
-    def __init__(self, status):
+    def __init__(self, status, details=None):
         self._status = status
+        self._details = details
 
     def code(self):
         return self._status
 
     def details(self):
-        return self._status.name
+        return self._details or self._status.name
 
 
 class ConnectivityStub:
@@ -71,9 +72,11 @@ class ListChannelsStub:
     def __init__(self, response):
         self.response = response
         self.requests = []
+        self.metadata = []
 
     async def ListChannels(self, request, metadata=None):
         self.requests.append(request)
+        self.metadata.append(metadata)
         return self.response
 
 
@@ -325,6 +328,35 @@ def test_check_connection_falls_back_when_info_denied(tmp_path):
     assert bytes(stub.last_lookup_request.r_hash) == b"\x00" * 32
 
 
+def test_check_connection_falls_back_when_lnd_reports_unknown_permission_denied(tmp_path):
+    tls_path = tmp_path / "tls.cert"
+    tls_path.write_text("CERT", encoding="utf-8")
+
+    macaroon_path = tmp_path / "macaroon.hex"
+
+    async def _exercise():
+        store = MacaroonStore(macaroon_path)
+        await store.set("00")
+        client = LNClient(
+            host="127.0.0.1",
+            port=10009,
+            macaroon_store=store,
+            tls_path=tls_path,
+        )
+        stub = ConnectivityStub(
+            get_info_response=FakeRpcError(grpc.StatusCode.UNKNOWN, "permission denied"),
+            lookup_error=FakeRpcError(grpc.StatusCode.NOT_FOUND),
+        )
+        client._stub = stub
+        return await client.check_connection(), stub
+
+    result, stub = asyncio.run(_exercise())
+
+    assert result["info_permission"] is False
+    assert result["invoice_permissions"] is True
+    assert stub.lookup_requests == 1
+
+
 def test_check_connection_raises_when_lookup_forbidden(tmp_path):
     tls_path = tmp_path / "tls.cert"
     tls_path.write_text("CERT", encoding="utf-8")
@@ -391,6 +423,35 @@ def test_list_channels_formats_response(tmp_path):
     assert entry["remote_pubkey"] == "deadbeef"
     assert entry["channel_point"] == "abc:0"
     assert stub.requests and stub.requests[0].public_only is False
+
+
+def test_list_channels_uses_readonly_macaroon_when_configured(tmp_path):
+    tls_path = tmp_path / "tls.cert"
+    tls_path.write_text("CERT", encoding="utf-8")
+
+    macaroon_path = tmp_path / "macaroon.hex"
+    readonly_path = tmp_path / "readonly.hex"
+
+    async def _exercise():
+        invoice_store = MacaroonStore(macaroon_path)
+        readonly_store = MacaroonStore(readonly_path)
+        await invoice_store.set("11")
+        await readonly_store.set("22")
+        client = LNClient(
+            host="127.0.0.1",
+            port=10009,
+            macaroon_store=invoice_store,
+            readonly_macaroon_store=readonly_store,
+            tls_path=tls_path,
+        )
+        response = ListChannelsResponse()
+        stub = ListChannelsStub(response)
+        client._stub = stub
+        return await client.list_channels(), stub
+
+    _, stub = asyncio.run(_exercise())
+
+    assert stub.metadata == [(("macaroon", "22"),)]
 
 
 def test_list_channels_filters_private_when_public_only(tmp_path):

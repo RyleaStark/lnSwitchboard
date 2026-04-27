@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import os
 import ssl
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,8 @@ from backend.app.macaroon_store import MacaroonStore
 
 DEFAULT_TIMEOUT_SECONDS = 6.0
 DEFAULT_TEST_NAMES = ("localhost", "lnd", "lightning", "umbrel.local")
+EXPECTED_CIPHER_SUITES = "HIGH+ECDSA"
+CERT_TIME_FORMAT = "%b %d %H:%M:%S %Y %Z"
 
 
 def stat_path(path: Path) -> str:
@@ -56,6 +59,28 @@ def cert_names(decoded: dict[str, Any]) -> tuple[list[str], list[str]]:
             if key == "commonName":
                 add_unique(dns_names, value)
     return dns_names, ip_names
+
+
+def parse_cert_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.strptime(value.strip(), CERT_TIME_FORMAT)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc)
+
+
+def cert_validity_warnings(decoded: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    now = datetime.now(timezone.utc)
+    not_before = parse_cert_time(decoded.get("notBefore"))
+    not_after = parse_cert_time(decoded.get("notAfter"))
+    if not_before and now < not_before:
+        warnings.append(f"certificate is not valid until {not_before.isoformat()}")
+    if not_after and now > not_after:
+        warnings.append(f"certificate expired at {not_after.isoformat()}")
+    return warnings
 
 
 def channel_options(server_name: str | None) -> list[tuple[str, str]] | None:
@@ -194,6 +219,7 @@ async def run_diagnostics(args: argparse.Namespace) -> int:
     print(f"LND_TLS_PATH={tls_path} ({stat_path(tls_path)})")
     print(f"LND_MACAROON_PATH={invoice_path} ({stat_path(invoice_path)})")
     print(f"LND_READONLY_MACAROON_PATH={os.environ.get('LND_READONLY_MACAROON_PATH', '')}")
+    print(f"GRPC_SSL_CIPHER_SUITES={os.environ.get('GRPC_SSL_CIPHER_SUITES', '')}")
     print(f"derived readonly path={readonly_path} ({stat_path(readonly_path)})")
     print(f"plural invoices path={invoices_path} ({stat_path(invoices_path)})")
 
@@ -207,11 +233,17 @@ async def run_diagnostics(args: argparse.Namespace) -> int:
         print(f"- no macaroon files found under {chain_dir}")
 
     decoded: dict[str, Any] = {}
+    cert_warnings: list[str] = []
     print("\nTLS certificate:")
     try:
         decoded = ssl._ssl._test_decode_cert(str(tls_path))
         print(f"subject={decoded.get('subject')}")
         print(f"subjectAltName={decoded.get('subjectAltName')}")
+        print(f"notBefore={decoded.get('notBefore')}")
+        print(f"notAfter={decoded.get('notAfter')}")
+        cert_warnings = cert_validity_warnings(decoded)
+        for warning in cert_warnings:
+            print(f"warning={warning}")
     except Exception as exc:
         print(f"decode failed: {type(exc).__name__}: {exc}")
 
@@ -293,6 +325,10 @@ async def run_diagnostics(args: argparse.Namespace) -> int:
         print("- Do not set LND_TLS_SERVER_NAME")
     else:
         print("- TLS still fails. Check that LND_TLS_PATH belongs to LND_HOST.")
+    for warning in cert_warnings:
+        print(f"- {warning}; regenerate LND's tls.cert/tls.key in LND and restart LND")
+    if os.environ.get("GRPC_SSL_CIPHER_SUITES") != EXPECTED_CIPHER_SUITES:
+        print(f"- Set GRPC_SSL_CIPHER_SUITES={EXPECTED_CIPHER_SUITES} for LND's ECDSA TLS cert")
     if readonly_path.exists():
         print(f"- Set LND_READONLY_MACAROON_PATH={readonly_path} for liquidity")
     else:
