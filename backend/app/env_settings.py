@@ -64,7 +64,7 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "label": "TLS Server Name",
         "type": "text",
         "category": "LND Node",
-        "description": "Certificate server name used for LND TLS verification. Defaults to localhost for mounted LND certs.",
+        "description": "Optional certificate server name override for LND TLS verification. Leave blank to verify against LND_HOST.",
         "editable": False,
         "visible": False,
     },

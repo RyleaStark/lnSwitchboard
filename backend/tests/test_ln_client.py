@@ -238,6 +238,34 @@ def test_secure_channel_uses_configured_tls_server_name(tmp_path, monkeypatch):
     ]
 
 
+def test_secure_channel_uses_lnd_host_when_tls_server_name_is_unset(tmp_path, monkeypatch):
+    tls_path = tmp_path / "tls.cert"
+    tls_path.write_text("CERT", encoding="utf-8")
+    macaroon_path = tmp_path / "macaroon.hex"
+    calls = []
+
+    def fake_secure_channel(target, credentials, options=None):
+        calls.append({"target": target, "options": options})
+        return FakeChannel()
+
+    monkeypatch.setattr(grpc.aio, "secure_channel", fake_secure_channel)
+
+    async def _exercise():
+        store = MacaroonStore(macaroon_path)
+        await store.set("00")
+        client = LNClient(
+            host="10.21.21.9",
+            port=10009,
+            macaroon_store=store,
+            tls_path=tls_path,
+        )
+        await client._load_stub()
+
+    asyncio.run(_exercise())
+
+    assert calls == [{"target": "10.21.21.9:10009", "options": None}]
+
+
 def test_check_connection_get_info_success(tmp_path):
     tls_path = tmp_path / "tls.cert"
     tls_path.write_text("CERT", encoding="utf-8")

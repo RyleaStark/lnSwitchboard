@@ -136,14 +136,14 @@ export function InvoicesPage() {
 function InvoiceDetails({ invoice, onOpenChange }: { invoice: InvoiceEvent | null; onOpenChange: (open: boolean) => void }) {
   return (
     <Dialog open={Boolean(invoice)} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>{invoice ? `Invoice for ${invoiceRecipient(invoice)}` : "Invoice details"}</DialogTitle>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-3xl">
+        <DialogHeader className="min-w-0 pr-10">
+          <DialogTitle className="break-words">{invoice ? `Invoice for ${invoiceRecipient(invoice)}` : "Invoice details"}</DialogTitle>
           <DialogDescription>Settlement, expiry, hash, and payment request details.</DialogDescription>
         </DialogHeader>
         {invoice ? (
-          <div className="flex flex-col gap-5">
-            <div className="grid gap-3 sm:grid-cols-2">
+          <div className="flex min-h-0 min-w-0 flex-col gap-5 overflow-x-hidden overflow-y-auto pr-1">
+            <div className="grid min-w-0 gap-3 sm:grid-cols-2">
               <Detail label="Status"><StatusBadge status={invoice.status} /></Detail>
               <Detail label="Amount">{formatSats(invoiceAmountSats(invoice) ?? undefined)}</Detail>
               <Detail label="Created"><Timestamp value={invoice.created_at} /></Detail>
@@ -151,14 +151,14 @@ function InvoiceDetails({ invoice, onOpenChange }: { invoice: InvoiceEvent | nul
               <Detail label="Next check"><Timestamp value={invoice.next_check_at} /></Detail>
               <Detail label="Settled"><Timestamp value={invoice.settled_at} fallback={invoice.settled ? "Unknown" : "-"} /></Detail>
             </div>
-            <div className="flex flex-col gap-2">
+            <div className="flex min-w-0 flex-col gap-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-medium">Payment hash</span>
                 <CopyButton value={invoice.payment_hash} />
               </div>
               <CodeBlock>{invoice.payment_hash || "-"}</CodeBlock>
             </div>
-            <div className="flex flex-col gap-2">
+            <div className="flex min-w-0 flex-col gap-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-medium">Payment request</span>
                 <CopyButton value={invoice.payment_request} />
@@ -174,7 +174,7 @@ function InvoiceDetails({ invoice, onOpenChange }: { invoice: InvoiceEvent | nul
 
 function Detail({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-md border bg-muted/20 p-3">
+    <div className="min-w-0 rounded-md border bg-muted/20 p-3">
       <dt className="text-xs font-medium uppercase tracking-normal text-muted-foreground">{label}</dt>
       <dd className="mt-1 text-sm">{children}</dd>
     </div>

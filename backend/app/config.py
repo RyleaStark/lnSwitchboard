@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     lnd_host: str = _env_field(env="LND_HOST", default=...)
     lnd_grpc_port: int = _env_field(env="LND_GRPC_PORT", default=10009)
     lnd_tls_path: Path = _env_field(env="LND_TLS_PATH", default=Path("secrets/tls.cert"))
-    lnd_tls_server_name: Optional[str] = _env_field(env="LND_TLS_SERVER_NAME", default="localhost")
+    lnd_tls_server_name: Optional[str] = _env_field(env="LND_TLS_SERVER_NAME", default=None)
     max_sendable_sat: int = _env_field(env="MAX_SENDABLE_SAT", default=1_000_000)
     min_sendable_sat: int = _env_field(env="MIN_SENDABLE_SAT", default=1)
     metadata_description: str = _env_field(env="LNURL_METADATA_DESCRIPTION", default="Pay {ln_address}")

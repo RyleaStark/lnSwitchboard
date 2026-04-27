@@ -47,14 +47,12 @@ class LNClient:
                 if self._stub is None:
                     cert = self._tls_path.read_bytes()
                     credentials = grpc.ssl_channel_credentials(root_certificates=cert)
-                    options = []
+                    options: list[tuple[str, str]] | None = None
                     if self._tls_server_name:
-                        options.extend(
-                            [
-                                ("grpc.ssl_target_name_override", self._tls_server_name),
-                                ("grpc.default_authority", self._tls_server_name),
-                            ]
-                        )
+                        options = [
+                            ("grpc.ssl_target_name_override", self._tls_server_name),
+                            ("grpc.default_authority", self._tls_server_name),
+                        ]
                     self._channel = grpc.aio.secure_channel(self._target, credentials, options=options)
                     self._stub = LightningStub(self._channel)
         return self._stub

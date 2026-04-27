@@ -50,13 +50,13 @@ Umbrel keeps lnSwitchboard updated automatically, so you always receive the late
 
 ### 🐳 Docker Compose
 
-The repo ships with a ready-to-edit [`docker-compose.yml`](./docker-compose.yml). Mount LND's data directory read-only, set `LND_HOST`, point `LND_MACAROON_PATH` at the existing LND invoice macaroon, and keep `LND_TLS_SERVER_NAME` aligned with LND's certificate name:
+The repo ships with a ready-to-edit [`docker-compose.yml`](./docker-compose.yml). Mount LND's data directory read-only, set `LND_HOST`, point `LND_MACAROON_PATH` at the existing LND invoice macaroon, and point `LND_TLS_PATH` at LND's existing `tls.cert`:
 
 ```yaml
 volumes:
   - ${APP_LIGHTNING_NODE_DATA_DIR}:/lnd:ro
 environment:
-  LND_TLS_SERVER_NAME: localhost
+  LND_TLS_PATH: /lnd/tls.cert
   LND_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/invoice.macaroon
 ```
 
@@ -77,7 +77,7 @@ cd frontend && npm ci && npm run build && cd ..
 .venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 22121
 ```
 
-Set `LND_TLS_PATH` and `LND_MACAROON_PATH` to existing LND files before launching. `LND_TLS_SERVER_NAME` defaults to `localhost`, which matches standard local LND certificates when connecting over a container IP; set it to another certificate SAN if your LND cert uses a different name. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`.
+Set `LND_TLS_PATH` and `LND_MACAROON_PATH` to existing LND files before launching. By default, lnSwitchboard verifies LND's certificate against `LND_HOST` using the trust roots from `LND_TLS_PATH`; set `LND_TLS_SERVER_NAME` only when you intentionally need to verify against a different certificate SAN. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`.
 
 ---
 
