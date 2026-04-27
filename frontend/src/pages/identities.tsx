@@ -33,6 +33,7 @@ type IdentityFormState = {
 }
 
 const emptyForm: IdentityFormState = { local_part: "", domain: "", npub: "", relays: "" }
+const RESERVED_LOCAL_PARTS = new Set(["nip-profile"])
 
 export function IdentitiesPage() {
   const queryClient = useQueryClient()
@@ -229,6 +230,7 @@ export function collectIdentityPayload(form: IdentityFormState): IdentityPayload
   const domain = normalizeDomainInput(form.domain)
   const npub = form.npub.trim()
   if (!localPart || !domain || !npub) return "Local-part, domain, and npub are required."
+  if (RESERVED_LOCAL_PARTS.has(localPart)) return "That local-part is reserved."
   return {
     local_part: localPart,
     domain,

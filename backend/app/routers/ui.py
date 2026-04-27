@@ -16,11 +16,14 @@ from ..deps import (
     get_ln_client_dep,
     get_log_storage_dep,
     get_macaroon_store_dep,
+    get_nostr_signer_store_dep,
     get_settings_dep,
 )
 from ..ln_client import LNClient
 from ..log_storage import RequestLogStorage
 from ..macaroon_store import MacaroonNotConfiguredError, MacaroonStore
+from ..nostr_crypto import NostrCryptoError
+from ..nostr_signer_store import NostrSignerStore
 from ..env_settings import list_env_settings, update_env_settings
 from ..tls_status import inspect_tls_cert
 from ..version import get_version
@@ -40,6 +43,10 @@ class MacaroonPayload(BaseModel):
     macaroon: str
 
 
+class NostrSignerImportPayload(BaseModel):
+    private_key: str
+
+
 class MacaroonStatusPayload(BaseModel):
     configured: bool
     source: str
@@ -57,6 +64,13 @@ class LndStatusPayload(BaseModel):
     tls_status: str
     tls_message: str
     tls_expires_at: Optional[str] = None
+
+
+class NostrSignerStatusPayload(BaseModel):
+    configured: bool
+    pubkey: Optional[str] = None
+    path: Optional[str] = None
+    error: Optional[str] = None
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -351,3 +365,46 @@ async def set_macaroon(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
     return {"status": "saved"}
+
+
+@router.get("/nostr/zap-signer")
+async def nostr_zap_signer_status(
+    store: NostrSignerStore = Depends(get_nostr_signer_store_dep),
+) -> NostrSignerStatusPayload:
+    current = await store.status()
+    return NostrSignerStatusPayload(
+        configured=current.configured,
+        pubkey=current.pubkey,
+        path=current.path,
+        error=current.error,
+    )
+
+
+@router.post("/nostr/zap-signer/generate")
+async def generate_nostr_zap_signer(
+    store: NostrSignerStore = Depends(get_nostr_signer_store_dep),
+) -> NostrSignerStatusPayload:
+    current = await store.generate()
+    return NostrSignerStatusPayload(
+        configured=current.configured,
+        pubkey=current.pubkey,
+        path=current.path,
+        error=current.error,
+    )
+
+
+@router.post("/nostr/zap-signer/import")
+async def import_nostr_zap_signer(
+    payload: NostrSignerImportPayload,
+    store: NostrSignerStore = Depends(get_nostr_signer_store_dep),
+) -> NostrSignerStatusPayload:
+    try:
+        current = await store.set_private_key(payload.private_key)
+    except NostrCryptoError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return NostrSignerStatusPayload(
+        configured=current.configured,
+        pubkey=current.pubkey,
+        path=current.path,
+        error=current.error,
+    )

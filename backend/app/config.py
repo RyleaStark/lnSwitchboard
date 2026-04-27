@@ -116,8 +116,12 @@ class Settings(BaseSettings):
     lnd_readonly_macaroon_path: Optional[Path] = _env_field(env="LND_READONLY_MACAROON_PATH", default=None)
     webhook_max_retries: int = _env_field(env="WEBHOOK_MAX_RETRIES", default=5)
     webhook_retry_window_seconds: int = _env_field(env="WEBHOOK_RETRY_WINDOW_SECONDS", default=600)
+    nostr_zap_secret_path: Path = _env_field(
+        env="NOSTR_ZAP_SECRET_PATH",
+        default=Path("secrets/nostr_zap_signer.hex"),
+    )
 
-    @field_validator("lnd_tls_path", "data_store_path", "macaroon_store_path", mode="before")
+    @field_validator("lnd_tls_path", "data_store_path", "macaroon_store_path", "nostr_zap_secret_path", mode="before")
     @classmethod
     def _expand_path(cls, value: Optional[str | Path]) -> Path:
         if value is None:

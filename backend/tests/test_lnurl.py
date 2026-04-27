@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from ..app import config, deps
 from backend.app.invoice_worker import refresh_invoice_statuses
 from backend.app.lnurl_forwarding import ForwardingTarget, ForwardingTargetError
+from backend.app.nostr_crypto import event_id, generate_private_key_hex, public_key_from_private_hex, sign_event
 from backend.app.tls_status import TlsCertStatus
 
 
@@ -65,6 +66,90 @@ def test_lnurl_metadata(test_client: TestClient):
     assert data["minSendable"] > 0
     assert data["maxSendable"] >= data["minSendable"]
     assert data["commentAllowed"] == config.get_settings().comment_max_length
+
+
+def _create_nostr_identity(client: TestClient, *, local_part: str = "bones", pubkey: str = "b0" * 32):
+    response = client.post(
+        "/api/nip05/identities",
+        json={
+            "local_part": local_part,
+            "domain": "testserver",
+            "npub": pubkey,
+            "relays": ["wss://relay.example.com"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["item"]
+
+
+def _sign_zap_request(*, recipient_pubkey: str, amount_msat: int = 1000, lnurl: str = "lnurlp://testserver/.well-known/lnurlp/bones"):
+    private_key = generate_private_key_hex()
+    event = {
+        "kind": 9734,
+        "created_at": 1_714_566_896,
+        "tags": [
+            ["p", recipient_pubkey],
+            ["amount", str(amount_msat)],
+            ["relays", "wss://relay.example.com"],
+            ["lnurl", lnurl],
+        ],
+        "content": "",
+    }
+    return sign_event(event, private_key)
+
+
+def _zap_raw(event: dict) -> str:
+    return json.dumps(event, separators=(",", ":"))
+
+
+def test_lnurl_advertises_nip57_when_identity_and_signer_exist(test_client: TestClient):
+    _create_nostr_identity(test_client)
+    signer_response = test_client.post("/api/nostr/zap-signer/generate")
+    assert signer_response.status_code == 200
+    signer_pubkey = signer_response.json()["pubkey"]
+
+    response = test_client.get("/.well-known/lnurlp/bones")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["allowsNostr"] is True
+    assert data["nostrPubkey"] == signer_pubkey
+
+
+def test_lnurl_nip57_invoice_hashes_raw_zap_request(test_client: TestClient):
+    identity = _create_nostr_identity(test_client)
+    test_client.post("/api/nostr/zap-signer/generate")
+    zap_event = _sign_zap_request(recipient_pubkey=identity["pubkey_hex"])
+    raw = _zap_raw(zap_event)
+
+    response = test_client.get(
+        "/.well-known/lnurlp/bones",
+        params={"amount": 1000, "nostr": raw},
+    )
+    assert response.status_code == 200
+    assert response.json()["pr"].startswith("lnbc")
+    call = test_client.app.state.test_invoice_calls[-1]
+    assert call["description_hash"] == hashlib.sha256(raw.encode("utf-8")).digest()
+
+    logs_resp = test_client.get("/api/logs/recent", params={"page_size": 50})
+    invoice_entry = next(item for item in logs_resp.json()["items"] if item["event"] == "invoice")
+    assert invoice_entry["details"]["zap_request"]["event_id"] == event_id(zap_event)
+
+
+def test_lnurl_nip57_rejects_invalid_zap_requests(test_client: TestClient):
+    identity = _create_nostr_identity(test_client)
+    test_client.post("/api/nostr/zap-signer/generate")
+
+    mismatched = _sign_zap_request(recipient_pubkey=identity["pubkey_hex"], amount_msat=2000)
+    response = test_client.get("/.well-known/lnurlp/bones", params={"amount": 1000, "nostr": _zap_raw(mismatched)})
+    assert response.status_code == 200
+    assert response.json() == {"status": "ERROR", "reason": "nostr zap request amount does not match requested invoice amount"}
+
+    duplicate_p = _sign_zap_request(recipient_pubkey=identity["pubkey_hex"])
+    duplicate_p["tags"].append(["p", public_key_from_private_hex(generate_private_key_hex())])
+    duplicate_p["id"] = event_id(duplicate_p)
+    response = test_client.get("/.well-known/lnurlp/bones", params={"amount": 1000, "nostr": _zap_raw(duplicate_p)})
+    assert response.status_code == 200
+    assert response.json() == {"status": "ERROR", "reason": "nostr zap request must include exactly one p tag"}
 
 
 def test_lnurl_lud17_lnurlp_scheme_is_recorded(test_client: TestClient):

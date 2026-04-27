@@ -18,7 +18,7 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 ## Why operators install lnSwitchboard
 
 - **One app, many handles.** Map unlimited usernames, vanity tags, and promo aliases to the same Lightning backend. Per-handle overrides let you tune min/max sats, metadata, and success messages without touching global config.
-- **Wallet compatibility out of the box.** Implements the core LNURL LUDs (06/09/12/16/17/18/20/21) plus NIP-05, so everything from Alby to Wallet of Satoshi, or Bitcoin Well... “just works.”
+- **Wallet compatibility out of the box.** Implements the core LNURL LUDs (06/09/12/16/17/18/20/21), NIP-05, and NIP-57 zap receipts for linked local identities, so everything from Alby to Wallet of Satoshi, or Bitcoin Well... “just works.”
 - **Actionable visibility.** The built-in dashboard shows 24h/7d request volume, invoices generated vs. paid, sats routed, inbound liquidity, and a searchable activity log with proxy/IP context.
 - **Security-first defaults.** Rate limiting (per-IP), macaroon validation, TLS handling, and proxy-aware callback URLs keep the public face minimal while admin routes stay private.
 - **Umbrel & Docker native.** Install with one click on Umbrel or run anywhere with Docker/Compose/k8s, mounting LND's data directory read-only for TLS and macaroons.
@@ -33,8 +33,9 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 | **Dashboard** | Live metrics, trend charts, and a status chip that pings `/api/health` every 10 seconds so you know your node is reachable. |
 | **Invoices hub** | Dedicated `/invoices/` page backed by a SQLite `invoice_events` table. Real-time updates come from a gRPC subscription worker plus a periodic full refresh loop. |
 | **Request log** | Searchable log of discovery, invoice, verify, and rate-limit events with metadata previews, payers’ comments, and proxy headers for forensic-level visibility. |
-| **LN address customization** | Pin custom min/max sats, template text, and multi-webhook automations to any `local_part@domain`. Tags automatically inherit from the base handle. |
-| **NIP-05 identities** | Manage Nostr mappings (npub/hex + relay list) from the UI, and serve `/.well-known/nostr.json` with proper CORS. |
+| **LN address customization** | Pin custom min/max sats, template text, per-handle payer data, signed webhook automation, and delivery filters to any `local_part@domain`. Tags automatically inherit from the base handle. |
+| **NIP-05 + zaps** | Manage Nostr mappings (npub/hex + relay list), serve `/.well-known/nostr.json`, advertise NIP-57 zap support when a local identity has a signer, and publish kind `9735` receipts after settlement. |
+| **Delivery center** | Persist webhook and Nostr relay delivery attempts, inspect failures, replay HTTP webhook payloads, and send test payloads from the UI. |
 | **Env + macaroon management** | Update `.env` safely via the UI, use LND's mounted `invoice.macaroon`, or manually paste/upload a macaroon when no file path is configured. |
 
 ---
@@ -112,11 +113,12 @@ docker exec <lnswitchboard-container> lnswitchboard-diagnose-lnd
 - **Invoices:** Paginated table with per-invoice modals showing hashes, sats, expiry, and settle timestamps.
 - **Liquidity:** Channel table (peer alias, Amboss links, local/remote balances) plus the largest receivable metric powered by `list_channels`.
 - **Logs:** Filterable event log with modal JSON viewer - perfect for debugging wallet interactions.
-- **LN Addresses:** Create/edit/delete overrides with validation, variable hints, Nostr identity badges, and webhook badges when automations are attached to a handle.
+- **LN Addresses:** Create/edit/delete overrides with validation, variable hints, Nostr identity badges, payer-data schemas, signed webhook filters, and webhook badges when automations are attached to a handle.
 - **Identities:** CRUD for `local_part@domain` → `npub` mappings plus relay lists.
-- **Settings:** Mounted macaroon status, manual macaroon paste/upload fallback, `.env` editor with grouped hints, and a reverse-proxy snippet you can copy into Nginx/Caddy.
+- **Settings:** Mounted macaroon status, manual macaroon paste/upload fallback, Nostr zap signer generation/import, `.env` editor with grouped hints, and a reverse-proxy snippet you can copy into Nginx/Caddy.
+- **Webhooks:** Delivery history, replay, test sends, signed receiver headers, forwarded-invoice caveats, and payload reference material.
 
-Screenshots coming soon - until then, install on Umbrel or fire up the Docker image to explore in minutes.
+Screenshots coming soon - until then, install on Umbrel or fire up the Docker image to explore the dashboard, delivery center, signer controls, and address automation tools in minutes.
 
 ---
 
@@ -131,6 +133,7 @@ Screenshots coming soon - until then, install on Umbrel or fire up the Docker im
 - [LUD-20 · Long descriptions](https://github.com/lnurl/luds/blob/luds/20.md)
 - [LUD-21 · Verify endpoint](https://github.com/lnurl/luds/blob/luds/21.md)
 - [NIP-05 · Nostr identities](https://github.com/nostr-protocol/nips/blob/master/05.md)
+- [NIP-57 · Lightning zaps](https://github.com/nostr-protocol/nips/blob/master/57.md)
 
 ---
 

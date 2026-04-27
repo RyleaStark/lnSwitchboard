@@ -9,6 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ..config import parse_payer_data_config
 from ..deps import get_ln_address_store_dep
 from ..ln_address_store import AddressConflictError, AddressNotFoundError, LNAddressStore
 from ..lnurl_forwarding import ForwardingTarget, ForwardingTargetError, fetch_forwarding_discovery
@@ -20,6 +21,7 @@ LOCAL_PART_PATTERN = re.compile(r"^[a-z0-9._-]+$")
 DOMAIN_PATTERN = re.compile(r"^[a-z0-9.-]+$")
 MAX_TEMPLATE_CHARS = 512
 WEBHOOK_SCHEMES = {"http", "https"}
+RESERVED_LOCAL_PARTS = {"nip-profile"}
 
 
 def _clean_template(value: Optional[str]) -> Optional[str]:
@@ -86,6 +88,14 @@ class LNAddressPayload(BaseModel):
         default=None,
         description="List of HTTP(S) endpoints that receive a JSON payload when invoices settle for this handle (including +tags).",
     )
+    webhook_endpoints: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Structured webhook endpoints with optional labels, secrets, and filters.",
+    )
+    payer_data: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description="Per-address LUD-18 payerData fields mapped to mandatory flags.",
+    )
     legacy_webhook_url: Optional[str] = Field(
         default=None,
         alias="webhook_url",
@@ -105,6 +115,8 @@ class LNAddressPayload(BaseModel):
             raise ValueError("Overrides cannot include tags (+) in the local part")
         if not LOCAL_PART_PATTERN.fullmatch(normalized):
             raise ValueError("local-part may include lowercase letters, numbers, dot, dash, or underscore")
+        if normalized in RESERVED_LOCAL_PARTS:
+            raise ValueError("local-part is reserved")
         return normalized
 
     @field_validator("domain")
@@ -158,6 +170,47 @@ class LNAddressPayload(BaseModel):
                     normalized.append(normalized_url)
         return normalized
 
+    @field_validator("webhook_endpoints", mode="before")
+    @classmethod
+    def _normalize_webhook_endpoints(cls, value: Optional[Any]) -> Optional[List[Dict[str, Any]]]:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise ValueError("webhook_endpoints must be a list")
+        normalized: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                raise ValueError("Each webhook endpoint must be an object")
+            url = _normalize_webhook_url(item.get("url"))
+            if not url:
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            filters = item.get("filters")
+            if not isinstance(filters, dict):
+                filters = {}
+            endpoint = {
+                "id": str(item.get("id") or "").strip() or None,
+                "url": url,
+                "label": str(item.get("label") or "").strip(),
+                "secret": str(item.get("secret") or "").strip() or None,
+                "filters": filters,
+            }
+            normalized.append(endpoint)
+        return normalized
+
+    @field_validator("payer_data", mode="before")
+    @classmethod
+    def _normalize_payer_data(cls, value: Optional[Any]) -> Optional[Dict[str, bool]]:
+        if value in (None, ""):
+            return None
+        try:
+            return parse_payer_data_config(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
     @model_validator(mode="after")
     def _validate_bounds(self) -> "LNAddressPayload":
         min_sats = self.min_sats
@@ -172,6 +225,8 @@ class LNAddressPayload(BaseModel):
             if legacy_url not in urls:
                 urls.append(legacy_url)
         self.webhook_urls = urls
+        if self.webhook_endpoints is None and urls:
+            self.webhook_endpoints = [{"url": url, "label": "", "secret": None, "filters": {}} for url in urls]
         return self
 
 
@@ -185,6 +240,14 @@ def _serialize(record: Dict[str, Any]) -> Dict[str, Any]:
     identifier = f"{local_part}@{domain}"
     base, _, tag = local_part.partition("+")
     webhook_urls = record.get("webhook_urls") or []
+    webhook_endpoints = []
+    for endpoint in record.get("webhook_endpoints") or []:
+        if not isinstance(endpoint, dict):
+            continue
+        public_endpoint = dict(endpoint)
+        public_endpoint.pop("secret", None)
+        public_endpoint["secret_configured"] = bool(endpoint.get("secret") or endpoint.get("secret_configured"))
+        webhook_endpoints.append(public_endpoint)
     return {
         "id": record["id"],
         "local_part": local_part,
@@ -199,7 +262,9 @@ def _serialize(record: Dict[str, Any]) -> Dict[str, Any]:
         "metadata_description": record.get("metadata_description"),
         "success_message": record.get("success_message"),
         "webhook_urls": webhook_urls,
+        "webhook_endpoints": webhook_endpoints,
         "webhook_url": webhook_urls[0] if webhook_urls else None,
+        "payer_data": record.get("payer_data") or {},
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
     }
@@ -266,6 +331,8 @@ async def create_address(
             metadata_description=payload.metadata_description,
             success_message=payload.success_message,
             webhook_urls=payload.webhook_urls,
+            webhook_endpoints=payload.webhook_endpoints,
+            payer_data=payload.payer_data,
         )
     except AddressConflictError as exc:
         raise HTTPException(
@@ -295,6 +362,8 @@ async def update_address(
             metadata_description=payload.metadata_description,
             success_message=payload.success_message,
             webhook_urls=payload.webhook_urls,
+            webhook_endpoints=payload.webhook_endpoints,
+            payer_data=payload.payer_data,
         )
     except AddressNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Address not found")

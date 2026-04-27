@@ -10,7 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from ..deps import get_nip05_store_dep
+from ..deps import get_ln_address_store_dep, get_nip05_store_dep, get_nostr_signer_store_dep
+from ..ln_address_store import LNAddressStore
+from ..nostr_signer_store import NostrSignerStore
 from ..nip05_store import (
     IdentityConflictError,
     IdentityNotFoundError,
@@ -26,6 +28,7 @@ LOCAL_PART_PATTERN = re.compile(r"^[a-z0-9._-]+$")
 DOMAIN_PATTERN = re.compile(r"^[a-z0-9.-]+$")
 ALLOWED_RELAY_SCHEMES = {"ws", "wss"}
 MAX_RELAYS = 16
+RESERVED_LOCAL_PARTS = {"nip-profile"}
 
 
 class IdentityPayload(BaseModel):
@@ -44,6 +47,8 @@ class IdentityPayload(BaseModel):
             raise ValueError("Do not include '@' in the local-part")
         if not LOCAL_PART_PATTERN.fullmatch(normalized):
             raise ValueError("local-part may contain [a-z0-9._-] only")
+        if normalized in RESERVED_LOCAL_PARTS:
+            raise ValueError("local-part is reserved")
         return normalized
 
     @field_validator("domain")
@@ -233,6 +238,49 @@ async def nostr_well_known(
     payload: Dict[str, Any] = {"names": names}
     if relays_map:
         payload["relays"] = relays_map
+    response = JSONResponse(payload)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@public_router.get("/.well-known/lnurlp/nip-profile/{local_part}")
+async def public_profile(
+    local_part: str,
+    request: Request,
+    identity_store: NostrIdentityStore = Depends(get_nip05_store_dep),
+    address_store: LNAddressStore = Depends(get_ln_address_store_dep),
+    signer_store: NostrSignerStore = Depends(get_nostr_signer_store_dep),
+) -> JSONResponse:
+    domain = _resolve_domain(request)
+    local = local_part.strip().lower()
+    if not LOCAL_PART_PATTERN.fullmatch(local):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    identity = None
+    for entry in await identity_store.get_by_domain(domain):
+        if entry.get("local_part") == local:
+            identity = entry
+            break
+    address = await address_store.get_by_identifier(local_part=local, domain=domain)
+    signer = await signer_store.status()
+    if identity is None and address is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    payload = {
+        "identifier": f"{local}@{domain}",
+        "domain": domain,
+        "local_part": local,
+        "ln_address": f"{local}@{domain}" if address else None,
+        "nostr": {
+            "npub": identity.get("npub") if identity else None,
+            "pubkey_hex": identity.get("pubkey_hex") if identity else None,
+            "relays": _public_relays(identity.get("relays")) if identity else [],
+        },
+        "zap": {
+            "ready": bool(identity and address and signer.configured),
+            "receipt_pubkey": signer.pubkey if signer.configured else None,
+            "forwarded": bool(address and address.get("routing_mode") == "forward"),
+        },
+    }
     response = JSONResponse(payload)
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Cache-Control"] = "no-store"

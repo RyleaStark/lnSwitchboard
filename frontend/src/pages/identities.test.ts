@@ -20,4 +20,15 @@ describe("collectIdentityPayload", () => {
   it("requires identity essentials", () => {
     expect(collectIdentityPayload({ local_part: "", domain: "", npub: "", relays: "" })).toContain("required")
   })
+
+  it("rejects reserved local-parts", () => {
+    expect(
+      collectIdentityPayload({
+        local_part: "nip-profile",
+        domain: "example.com",
+        npub: "npub123",
+        relays: "",
+      }),
+    ).toContain("reserved")
+  })
 })

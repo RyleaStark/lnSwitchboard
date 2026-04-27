@@ -169,6 +169,20 @@ def test_identity_relays_must_be_websocket_urls(test_client: TestClient):
     assert item["relays"] == ["wss://relay.nostr.net"]
 
 
+def test_identity_rejects_reserved_local_part(test_client: TestClient):
+    response = test_client.post(
+        "/api/nip05/identities",
+        json={
+            "local_part": "nip-profile",
+            "domain": "testserver",
+            "npub": SAMPLE_NPUB,
+            "relays": [],
+        },
+    )
+    assert response.status_code == 422
+    assert "reserved" in response.text
+
+
 def test_well_known_filters_invalid_stored_relay_hints(test_client: TestClient):
     item = create_identity(
         test_client,
@@ -201,3 +215,38 @@ def test_well_known_filters_invalid_stored_relay_hints(test_client: TestClient):
     data = resp.json()
     assert data["names"] == {"legacy": SAMPLE_HEX}
     assert data["relays"][SAMPLE_HEX] == ["wss://relay.example.com"]
+
+
+def test_public_profile_reports_ln_address_and_zap_readiness(test_client: TestClient):
+    create_identity(
+        test_client,
+        {
+            "local_part": "profile",
+            "domain": "testserver",
+            "npub": SAMPLE_NPUB,
+            "relays": ["wss://relay.example.com"],
+        },
+    )
+    address_response = test_client.post(
+        "/api/lnaddresses",
+        json={
+            "local_part": "profile",
+            "domain": "testserver",
+            "webhook_urls": [],
+            "min_sats": None,
+            "max_sats": None,
+            "metadata_description": None,
+            "success_message": None,
+        },
+    )
+    assert address_response.status_code == 201
+    test_client.post("/api/nostr/zap-signer/generate")
+
+    response = test_client.get("/.well-known/lnurlp/nip-profile/profile")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["identifier"] == "profile@testserver"
+    assert data["ln_address"] == "profile@testserver"
+    assert data["nostr"]["pubkey_hex"] == SAMPLE_HEX
+    assert data["zap"]["ready"] is True
+    assert data["zap"]["receipt_pubkey"]

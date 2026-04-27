@@ -1,13 +1,19 @@
-import { useMemo } from "react"
-import { useQuery } from "@tanstack/react-query"
-import { CheckCircle2Icon, ClockIcon, ForwardIcon, GlobeLockIcon, RouteIcon, ShieldCheckIcon, WebhookIcon } from "lucide-react"
+import { useMemo, useState } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { CheckCircle2Icon, ClockIcon, ForwardIcon, GlobeLockIcon, RefreshCwIcon, RouteIcon, SearchIcon, SendIcon, ShieldCheckIcon, WebhookIcon } from "lucide-react"
+import { toast } from "sonner"
 
 import { CodeBlock, CopyButton, LoadingRows, PageError, PageHeader } from "@/components/common"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { api, type EnvSetting } from "@/lib/api"
+import { api, type EnvSetting, type WebhookDelivery } from "@/lib/api"
+import { shortHash } from "@/lib/format"
+import { Pager } from "@/pages/invoices"
 
 const fieldRows = [
   ["event", "Always payment.settled so receivers can filter future webhook types."],
@@ -40,6 +46,9 @@ const headerRows = [
   ["X-LnSwitchboard-Event", "Mirrors the event field for routing traffic at a gateway."],
   ["X-LnSwitchboard-Version", "Mirrors version for edge filtering and audit logs."],
   ["X-LnSwitchboard-Address-Id", "Repeats the address UUID so receivers can route before reading the body."],
+  ["X-LnSwitchboard-Delivery-Id", "Stable delivery row ID for replay and support correlation."],
+  ["X-LnSwitchboard-Signature", "Optional HMAC-SHA256 signature when an endpoint secret is configured."],
+  ["X-LnSwitchboard-Signature-Timestamp", "Unix timestamp included in the HMAC input."],
 ] as const
 
 const tips = [
@@ -57,6 +66,12 @@ const forwardedCaveats = [
 ] as const
 
 export function WebhooksPage() {
+  const queryClient = useQueryClient()
+  const [query, setQuery] = useState("")
+  const [page, setPage] = useState(1)
+  const [testUrl, setTestUrl] = useState("")
+  const [testSecret, setTestSecret] = useState("")
+  const [testError, setTestError] = useState("")
   const version = useQuery({
     queryKey: ["version"],
     queryFn: api.version,
@@ -65,6 +80,27 @@ export function WebhooksPage() {
   const env = useQuery({
     queryKey: ["env-settings"],
     queryFn: api.envSettings,
+  })
+  const deliveries = useQuery({
+    queryKey: ["webhook-deliveries", page, query],
+    queryFn: () => api.webhookDeliveries(page, 10, query),
+    refetchInterval: 10_000,
+  })
+  const replay = useMutation({
+    mutationFn: api.replayWebhookDelivery,
+    onSuccess: async (result) => {
+      toast.success(`Replay ${result.status}`)
+      await queryClient.invalidateQueries({ queryKey: ["webhook-deliveries"] })
+    },
+  })
+  const testWebhook = useMutation({
+    mutationFn: api.testWebhook,
+    onSuccess: async (result) => {
+      toast.success(`Test ${result.status}`)
+      setTestError("")
+      await queryClient.invalidateQueries({ queryKey: ["webhook-deliveries"] })
+    },
+    onError: (error: Error) => setTestError(error.message),
   })
   const retrySummary = useMemo(() => retrySummaryFromSettings(env.data?.settings), [env.data?.settings])
 
@@ -109,6 +145,88 @@ export function WebhooksPage() {
         description="Use settled-payment webhooks to notify n8n, databases, bots, and other downstream services when a routed Lightning invoice is paid."
         action={<Badge variant="outline" className="font-mono">v{appVersion}</Badge>}
       />
+
+      <div className="grid gap-4 lg:grid-cols-[1fr_0.75fr]">
+        <Card>
+          <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <CardTitle>Delivery center</CardTitle>
+              <CardDescription>HTTP webhook and Nostr relay delivery records with attempt history.</CardDescription>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <div className="relative">
+                <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={query}
+                  onChange={(event) => {
+                    setQuery(event.target.value)
+                    setPage(1)
+                  }}
+                  className="pl-8 sm:w-64"
+                  placeholder="Search deliveries"
+                />
+              </div>
+              <Pager page={page} totalPages={deliveries.data?.total_pages ?? 0} setPage={setPage} />
+            </div>
+          </CardHeader>
+          <CardContent>
+            {deliveries.isLoading ? <LoadingRows rows={3} /> : null}
+            {deliveries.isError ? <PageError message="Unable to load delivery history." /> : null}
+            {deliveries.data?.items.length ? (
+              <div className="overflow-hidden rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Target</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Attempts</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {deliveries.data.items.map((delivery) => (
+                      <DeliveryRow
+                        key={delivery.id}
+                        delivery={delivery}
+                        replaying={replay.isPending}
+                        onReplay={() => replay.mutate(delivery.id)}
+                      />
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : null}
+            {!deliveries.isLoading && !deliveries.isError && !deliveries.data?.items.length ? (
+              <div className="rounded-md border bg-muted/20 p-4 text-sm text-muted-foreground">No delivery records yet.</div>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><SendIcon /> Test endpoint</CardTitle>
+            <CardDescription>Send a sample payment.settled payload and record the delivery attempt.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="webhook-test-url">Endpoint URL</FieldLabel>
+                <Input id="webhook-test-url" value={testUrl} onChange={(event) => setTestUrl(event.target.value)} placeholder="https://example.com/webhook" />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="webhook-test-secret">Signing secret</FieldLabel>
+                <Input id="webhook-test-secret" value={testSecret} onChange={(event) => setTestSecret(event.target.value)} placeholder="Optional" />
+                <FieldDescription>Uses the same HMAC headers as configured endpoints.</FieldDescription>
+              </Field>
+              <FieldError>{testError}</FieldError>
+              <Button type="button" disabled={!testUrl.trim() || testWebhook.isPending} onClick={() => testWebhook.mutate({ url: testUrl.trim(), secret: testSecret.trim() || null })}>
+                <SendIcon data-icon="inline-start" />
+                {testWebhook.isPending ? "Sending..." : "Send test"}
+              </Button>
+            </FieldGroup>
+          </CardContent>
+        </Card>
+      </div>
 
       <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <Card>
@@ -292,6 +410,59 @@ function StepCard({
   )
 }
 
+function DeliveryRow({
+  delivery,
+  replaying,
+  onReplay,
+}: {
+  delivery: WebhookDelivery
+  replaying: boolean
+  onReplay: () => void
+}) {
+  const attempts = delivery.attempts ?? []
+  const lastAttempt = delivery.last_attempt ?? attempts.at(-1)
+  return (
+    <>
+      <TableRow>
+        <TableCell className="max-w-80">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="truncate font-medium">{delivery.target}</span>
+            <span className="text-xs text-muted-foreground">{delivery.kind} · #{delivery.id}</span>
+          </div>
+        </TableCell>
+        <TableCell><DeliveryStatus status={delivery.status} /></TableCell>
+        <TableCell>
+          <div className="flex flex-col gap-1 text-sm">
+            <span>{attempts.length || 0} attempt{attempts.length === 1 ? "" : "s"}</span>
+            {lastAttempt?.error ? <span className="max-w-72 truncate text-xs text-muted-foreground">{lastAttempt.error}</span> : null}
+            {lastAttempt?.status_code ? <span className="text-xs text-muted-foreground">HTTP {lastAttempt.status_code}</span> : null}
+          </div>
+        </TableCell>
+        <TableCell className="text-right">
+          <Button type="button" variant="outline" size="sm" disabled={delivery.kind !== "http.webhook" || replaying} onClick={onReplay}>
+            <RefreshCwIcon data-icon="inline-start" />
+            Replay
+          </Button>
+        </TableCell>
+      </TableRow>
+      {delivery.payload ? (
+        <TableRow>
+          <TableCell colSpan={4} className="bg-muted/20">
+            <code className="text-xs text-muted-foreground">
+              {shortHash(JSON.stringify(delivery.payload), 80, 24)}
+            </code>
+          </TableCell>
+        </TableRow>
+      ) : null}
+    </>
+  )
+}
+
+function DeliveryStatus({ status }: { status: string }) {
+  const variant = status === "delivered" ? "default" : status === "failed" ? "destructive" : "secondary"
+  return <Badge variant={variant}>{status}</Badge>
+}
+
 function DocCode({ title, value }: { title: string; value: string }) {
   return (
     <section className="flex min-w-0 flex-col gap-2">
@@ -332,7 +503,10 @@ User-Agent: lnSwitchboard/${version}
 Content-Type: application/json
 X-LnSwitchboard-Event: payment.settled
 X-LnSwitchboard-Version: ${version}
-X-LnSwitchboard-Address-Id: 6b28d3c6-2cf5-4c87-97d6-0a9d38b2df2c`
+X-LnSwitchboard-Address-Id: 6b28d3c6-2cf5-4c87-97d6-0a9d38b2df2c
+X-LnSwitchboard-Delivery-Id: 42
+X-LnSwitchboard-Signature-Timestamp: 1714566896
+X-LnSwitchboard-Signature: sha256=0f2a...b91c`
 }
 
 function buildPayloadExample(version: string): string {

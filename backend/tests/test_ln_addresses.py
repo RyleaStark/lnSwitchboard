@@ -162,6 +162,7 @@ def test_address_crud_flow(test_client):
     [
         {"local_part": "bad value", "domain": "testserver"},
         {"local_part": "bones+vip", "domain": "testserver"},
+        {"local_part": "nip-profile", "domain": "testserver"},
         {"local_part": "bones", "domain": "https://example.com"},
         {"local_part": "bones", "domain": "example.com", "max_sats": 10, "min_sats": 50},
         {"local_part": "bones", "domain": "example.com", "webhook_urls": ["ftp://example.com/hook"]},

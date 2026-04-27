@@ -19,6 +19,8 @@ from ..deps import (
     get_ln_client_dep,
     get_log_storage_dep,
     get_macaroon_store_dep,
+    get_nip05_store_dep,
+    get_nostr_signer_store_dep,
     get_settings_dep,
 )
 from ..ln_address_store import LNAddressStore
@@ -32,6 +34,9 @@ from ..lnurl_forwarding import (
 )
 from ..log_storage import LogEntry, RequestLogStorage
 from ..macaroon_store import MacaroonNotConfiguredError, MacaroonStore
+from ..nip05_store import NostrIdentityStore
+from ..nostr_signer_store import NostrSignerStore
+from ..nostr_zaps import ZapRequestError, validate_zap_request
 from ..request_utils import build_public_url, get_client_ip, get_proxy_debug_info
 
 
@@ -287,6 +292,22 @@ def _build_address_override_details(override: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+async def _linked_nostr_pubkey(
+    identity_store: NostrIdentityStore,
+    *,
+    username: str,
+    domain: str,
+) -> Optional[str]:
+    base, _tag = _split_username_tag(username)
+    entries = await identity_store.get_by_domain(domain)
+    for entry in entries:
+        if entry.get("local_part") == base:
+            pubkey = entry.get("pubkey_hex")
+            if isinstance(pubkey, str) and pubkey:
+                return pubkey.lower()
+    return None
+
+
 async def _forward_lnurl_pay(
     *,
     request: Request,
@@ -468,12 +489,18 @@ async def lnurl_pay(
         None,
         description="Optional payer identity payload as defined in LUD-18.",
     ),
+    nostr: Optional[str] = Query(
+        None,
+        description="Optional NIP-57 zap request event JSON.",
+    ),
     _rate_limit: None = Depends(enforce_rate_limit),
     settings: Settings = Depends(get_settings_dep),
     ln_client: LNClient = Depends(get_ln_client_dep),
     storage: RequestLogStorage = Depends(get_log_storage_dep),
     address_store: LNAddressStore = Depends(get_ln_address_store_dep),
     macaroon_store: MacaroonStore = Depends(get_macaroon_store_dep),
+    identity_store: NostrIdentityStore = Depends(get_nip05_store_dep),
+    nostr_signer_store: NostrSignerStore = Depends(get_nostr_signer_store_dep),
 ) -> Dict[str, Any]:
     raw_username = username.strip()
     parsed_username = _parse_lnurl_local_part(username)
@@ -499,11 +526,15 @@ async def lnurl_pay(
     override_max_sat = override.get("max_sendable_sat") if override else None
     override_metadata = override.get("metadata_description") if override else None
     override_success = override.get("success_message") if override else None
+    override_payer_data = override.get("payer_data") if override else None
     long_description = _resolve_long_description(settings)
-    try:
-        payer_data_request = _resolve_payer_data_request(settings)
-    except ValueError as exc:
-        return _lnurl_error(str(exc))
+    if isinstance(override_payer_data, dict) and override_payer_data:
+        payer_data_request = {str(field): {"mandatory": bool(mandatory)} for field, mandatory in override_payer_data.items()}
+    else:
+        try:
+            payer_data_request = _resolve_payer_data_request(settings)
+        except ValueError as exc:
+            return _lnurl_error(str(exc))
     if payer_data_request:
         base_payer_data = payer_data_request
     else:
@@ -592,6 +623,15 @@ async def lnurl_pay(
         "max_sat": max_sendable_sat,
         "channel_max_sat": channel_max_sendable_sat,
     }
+    linked_nostr_pubkey: Optional[str] = None
+    zap_signer_pubkey: Optional[str] = None
+    if not (override and override.get("routing_mode") == "forward"):
+        linked_nostr_pubkey = await _linked_nostr_pubkey(
+            identity_store,
+            username=raw_username,
+            domain=domain,
+        )
+        zap_signer_pubkey = await nostr_signer_store.get_public_key()
 
     max_sendable_msat = max_sendable_sat * 1000
     min_sendable_msat = min_sendable_sat * 1000
@@ -609,6 +649,13 @@ async def lnurl_pay(
         if base_payer_data:
             resp["payerData"] = base_payer_data
         details = dict(base_details)
+        if linked_nostr_pubkey and zap_signer_pubkey:
+            resp["allowsNostr"] = True
+            resp["nostrPubkey"] = zap_signer_pubkey
+            details["zap"] = {
+                "recipient_pubkey": linked_nostr_pubkey,
+                "signer_pubkey": zap_signer_pubkey,
+            }
         details["response"] = resp
         await storage.append(
             LogEntry.create(
@@ -657,9 +704,26 @@ async def lnurl_pay(
             missing_list = ", ".join(sorted(missing))
             return _lnurl_error(f"Missing mandatory payerdata fields: {missing_list}")
 
+    zap_request: Optional[Dict[str, Any]] = None
+    nostr_raw = nostr.strip() if isinstance(nostr, str) else None
+    if nostr_raw:
+        if not linked_nostr_pubkey or not zap_signer_pubkey:
+            return _lnurl_error("Nostr zaps are not configured for this address")
+        try:
+            zap_request = validate_zap_request(
+                raw=nostr_raw,
+                amount_msat=amount_msat,
+                recipient_pubkey=linked_nostr_pubkey,
+                callback_lnurl=callback_lnurl,
+            )
+        except ZapRequestError as exc:
+            return _lnurl_error(str(exc))
+
     metadata_payload = metadata
     if payer_data_request and payerdata_raw:
         metadata_payload = f"{metadata}{payerdata_raw}"
+    if zap_request is not None:
+        metadata_payload = nostr_raw or ""
     metadata_hash = hashlib.sha256(metadata_payload.encode("utf-8")).digest()
 
     if not await macaroon_store.is_configured():
@@ -682,6 +746,8 @@ async def lnurl_pay(
             details["payerdata_raw"] = payerdata_raw
         if payerdata_obj is not None:
             details["payerdata"] = payerdata_obj
+        if zap_request is not None:
+            details["zap_request"] = zap_request
         details["invoice"] = _build_invoice_details(
             payment_request=payment_request,
             memo=invoice_memo,
@@ -707,7 +773,7 @@ async def lnurl_pay(
             memo=invoice_memo,
             description_hash=metadata_hash,
         )
-    except MacaroonNotConfiguredError as exc:
+    except MacaroonNotConfiguredError:
         await storage.append(
             LogEntry.create(
                 username=username,

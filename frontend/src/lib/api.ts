@@ -80,6 +80,24 @@ export type Channel = {
   sendable_capacity_sat?: number | null
 }
 
+export type WebhookEndpointFilters = {
+  tags?: string[]
+  min_msat?: number | null
+  max_msat?: number | null
+  route?: "any" | "local" | "forwarded"
+  require_comment?: boolean
+  payer_data_field?: string | null
+}
+
+export type WebhookEndpoint = {
+  id?: string | null
+  url: string
+  label?: string | null
+  secret?: string | null
+  secret_configured?: boolean
+  filters?: WebhookEndpointFilters
+}
+
 export type LNAddress = {
   id: string
   local_part: string
@@ -94,7 +112,9 @@ export type LNAddress = {
   metadata_description?: string | null
   success_message?: string | null
   webhook_urls?: string[]
+  webhook_endpoints?: WebhookEndpoint[]
   webhook_url?: string | null
+  payer_data?: Record<string, boolean>
   created_at?: string | null
   updated_at?: string | null
 }
@@ -109,6 +129,8 @@ export type LNAddressPayload = {
   metadata_description: string | null
   success_message: string | null
   webhook_urls: string[]
+  webhook_endpoints?: WebhookEndpoint[]
+  payer_data?: Record<string, boolean> | null
 }
 
 export type ForwardingValidation = {
@@ -176,6 +198,42 @@ export type LndStatus = {
   tls_expires_at?: string | null
 }
 
+export type NostrZapSignerStatus = {
+  configured: boolean
+  pubkey?: string | null
+  path?: string | null
+  error?: string | null
+}
+
+export type WebhookAttempt = {
+  id: number
+  delivery_id: number
+  attempted_at: string
+  attempt_number: number
+  success: boolean
+  status_code?: number | null
+  latency_ms?: number | null
+  error?: string | null
+  response_body?: string | null
+}
+
+export type WebhookDelivery = {
+  id: number
+  created_at: string
+  updated_at: string
+  kind: string
+  event: string
+  target: string
+  status: string
+  payload?: JsonValue
+  headers?: JsonValue
+  address_id?: string | null
+  invoice_event_id?: number | null
+  request_log_id?: number | null
+  attempts?: WebhookAttempt[]
+  last_attempt?: WebhookAttempt | null
+}
+
 export class ApiError extends Error {
   status: number
   detail: unknown
@@ -239,6 +297,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ macaroon }),
     }),
+  zapSignerStatus: () => request<NostrZapSignerStatus>("api/nostr/zap-signer"),
+  generateZapSigner: () =>
+    request<NostrZapSignerStatus>("api/nostr/zap-signer/generate", {
+      method: "POST",
+    }),
+  importZapSigner: (privateKey: string) =>
+    request<NostrZapSignerStatus>("api/nostr/zap-signer/import", {
+      method: "POST",
+      body: JSON.stringify({ private_key: privateKey }),
+    }),
   summary: (tzOffsetMinutes: number) =>
     request<SummaryStats>(`api/stats/summary?tz_offset_minutes=${tzOffsetMinutes}`),
   logs: (page: number, pageSize: number, query: string) => {
@@ -283,6 +351,18 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   deleteIdentity: (id: string) => request<{ status: string }>(`api/nip05/identities/${id}`, { method: "DELETE" }),
+  webhookDeliveries: (page: number, pageSize: number, query: string) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+    if (query.trim()) params.set("q", query.trim())
+    return request<PageResponse<WebhookDelivery>>(`api/webhooks/deliveries?${params}`)
+  },
+  replayWebhookDelivery: (id: number) =>
+    request<{ status: string }>(`api/webhooks/deliveries/${id}/replay`, { method: "POST" }),
+  testWebhook: (payload: { url: string; secret?: string | null }) =>
+    request<{ status: string }>("api/webhooks/test", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   envSettings: () => request<{ settings: EnvSetting[] }>("api/settings/env"),
   updateEnvSettings: (values: Record<string, string>) =>
     request<{ updated: string[] }>("api/settings/env", {

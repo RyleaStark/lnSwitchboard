@@ -81,6 +81,8 @@ def configure_env(tmp_path):
     deps._get_macaroon_store.cache_clear()
     deps._get_readonly_macaroon_store.cache_clear()
     deps._get_webhook_dispatcher.cache_clear()
+    deps._get_nostr_signer_store.cache_clear()
+    deps._get_zap_publisher.cache_clear()
     yield
     os.environ.pop("LND_MACAROON_PATH", None)
     os.environ.pop("LND_READONLY_MACAROON_PATH", None)
@@ -94,6 +96,8 @@ def configure_env(tmp_path):
     deps._get_macaroon_store.cache_clear()
     deps._get_readonly_macaroon_store.cache_clear()
     deps._get_webhook_dispatcher.cache_clear()
+    deps._get_nostr_signer_store.cache_clear()
+    deps._get_zap_publisher.cache_clear()
 
 
 @pytest.fixture

@@ -19,6 +19,7 @@ from .routers import ln_addresses as ln_addresses_router
 from .routers import lnurl as lnurl_router
 from .routers import nip05 as nip05_router
 from .routers import ui as ui_router
+from .routers import webhooks as webhooks_router
 from .macaroon_store import MacaroonNotConfiguredError
 from .invoice_worker import InvoiceSubscriptionWorker, InvoiceFullRefreshWorker
 
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
         ln_client=ln_client,
         webhook_dispatcher=webhook_dispatcher,
     )
+    await webhook_dispatcher.resume_pending_retries()
     await invoice_subscription_worker.start()
     await invoice_full_refresh_worker.start()
     app.state.invoice_subscription_worker = invoice_subscription_worker
@@ -80,7 +82,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="lnSwitchboard",
-    version="0.2.0",
+    version="0.2.1",
     lifespan=lifespan,
 )
 
@@ -93,6 +95,7 @@ app.add_middleware(
 )
 
 app.include_router(ui_router.router)
+app.include_router(webhooks_router.router)
 app.include_router(ln_addresses_router.api_router)
 app.include_router(nip05_router.api_router)
 app.include_router(nip05_router.public_router)

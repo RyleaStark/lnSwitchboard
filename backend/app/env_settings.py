@@ -242,6 +242,16 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "editable": False,
         "visible": False,
     },
+    {
+        "key": "NOSTR_ZAP_SECRET_PATH",
+        "attr": "nostr_zap_secret_path",
+        "label": "Zap Signer Path",
+        "type": "text",
+        "category": "Nostr",
+        "description": "Local private key path used to sign NIP-57 zap receipts.",
+        "editable": False,
+        "visible": False,
+    },
 ]
 
 FIELD_MAP: Dict[str, Dict[str, Any]] = {field["key"]: field for field in ENV_FIELDS}
@@ -394,5 +404,7 @@ def update_env_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
     deps._get_readonly_macaroon_store.cache_clear()
     deps._get_nip05_store.cache_clear()
     deps._get_webhook_dispatcher.cache_clear()
+    deps._get_nostr_signer_store.cache_clear()
+    deps._get_zap_publisher.cache_clear()
 
     return changed

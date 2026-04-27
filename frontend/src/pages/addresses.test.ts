@@ -37,6 +37,20 @@ describe("collectAddressPayload", () => {
     expect(result).toContain("Maximum sats")
   })
 
+  it("rejects reserved local-parts", () => {
+    const result = collectAddressPayload({
+      local_part: "nip-profile",
+      domain: "example.com",
+      min_sats: "",
+      max_sats: "",
+      metadata_description: "",
+      success_message: "",
+      webhook_urls: "",
+    })
+
+    expect(result).toContain("reserved")
+  })
+
   it("requires current validation for forwarding addresses", () => {
     const form = {
       local_part: "Tips",

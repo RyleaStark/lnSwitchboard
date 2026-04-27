@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 from datetime import datetime, timezone
 
 from backend.app.ln_address_store import LNAddressStore
-from backend.app.log_storage import InvoiceEvent
+from backend.app.log_storage import InvoiceEvent, RequestLogStorage
 from backend.app.webhook_dispatcher import WebhookDispatcher
 
 
@@ -116,3 +119,171 @@ async def _exercise_retry_stops_after_max_attempts(tmp_path):
     assert delivered is False
     await asyncio.sleep(0.35)
     assert len(attempts) == 3
+
+
+def test_webhook_delivery_history_and_hmac_headers(tmp_path):
+    asyncio.run(_exercise_delivery_history_and_hmac_headers(tmp_path))
+
+
+async def _exercise_delivery_history_and_hmac_headers(tmp_path):
+    db_path = tmp_path / "deliveries.db"
+    storage = RequestLogStorage(db_path)
+    address_store = LNAddressStore(db_path)
+    address = await address_store.add_address(
+        local_part="pay",
+        domain="testserver",
+        min_sendable_sat=None,
+        max_sendable_sat=None,
+        metadata_description=None,
+        success_message=None,
+        webhook_urls=[],
+        webhook_endpoints=[
+            {
+                "url": "https://hooks.example.com/payments",
+                "secret": "receiver-secret",
+                "filters": {"tags": ["vip"]},
+            }
+        ],
+    )
+    event, details = _make_event(address)
+    details["username_raw"] = "pay+vip"
+    details["ln_address"] = "pay+vip@testserver"
+    captured = []
+
+    async def sender(url, payload, headers):
+        captured.append({"url": url, "payload": payload, "headers": headers})
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+    )
+    delivered = await dispatcher.dispatch_payment_settled(
+        event=event,
+        details=details,
+        settled_at=datetime.now(tz=timezone.utc),
+    )
+
+    assert delivered is True
+    assert len(captured) == 1
+    headers = captured[0]["headers"]
+    delivery_id = headers["X-LnSwitchboard-Delivery-Id"]
+    assert headers["X-LnSwitchboard-Signature"].startswith("sha256=")
+    body = json.dumps(captured[0]["payload"], separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    expected = hmac.new(
+        b"receiver-secret",
+        f"{headers['X-LnSwitchboard-Signature-Timestamp']}.{delivery_id}.{body}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    assert headers["X-LnSwitchboard-Signature"] == f"sha256={expected}"
+
+    deliveries = await storage.list_deliveries(page=1, page_size=5)
+    assert deliveries["total_items"] == 1
+    delivery = deliveries["items"][0]
+    assert delivery["status"] == "delivered"
+    assert delivery["target"] == "https://hooks.example.com/payments"
+    assert delivery["last_attempt"]["success"] is True
+
+
+def test_webhook_filters_skip_non_matching_endpoint(tmp_path):
+    asyncio.run(_exercise_webhook_filters_skip_non_matching_endpoint(tmp_path))
+
+
+async def _exercise_webhook_filters_skip_non_matching_endpoint(tmp_path):
+    db_path = tmp_path / "filters.db"
+    storage = RequestLogStorage(db_path)
+    address_store = LNAddressStore(db_path)
+    address = await address_store.add_address(
+        local_part="pay",
+        domain="testserver",
+        min_sendable_sat=None,
+        max_sendable_sat=None,
+        metadata_description=None,
+        success_message=None,
+        webhook_urls=[],
+        webhook_endpoints=[
+            {
+                "url": "https://hooks.example.com/payments",
+                "filters": {"tags": ["vip"]},
+            }
+        ],
+    )
+    event, details = _make_event(address)
+    captured = []
+
+    async def sender(url, payload, headers):
+        captured.append(url)
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+    )
+    delivered = await dispatcher.dispatch_payment_settled(
+        event=event,
+        details=details,
+        settled_at=datetime.now(tz=timezone.utc),
+    )
+    assert delivered is False
+    assert captured == []
+    deliveries = await storage.list_deliveries(page=1, page_size=5)
+    assert deliveries["items"][0]["status"] == "skipped"
+
+
+def test_webhook_retry_resumes_after_restart(tmp_path):
+    asyncio.run(_exercise_webhook_retry_resumes_after_restart(tmp_path))
+
+
+async def _exercise_webhook_retry_resumes_after_restart(tmp_path):
+    db_path = tmp_path / "restart-deliveries.db"
+    storage = RequestLogStorage(db_path)
+    address_store, address = await _create_address(tmp_path)
+    event, details = _make_event(address)
+
+    async def failing_sender(url, payload, headers):
+        raise RuntimeError("receiver offline")
+
+    first_dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=failing_sender,
+        max_retries=2,
+        retry_window_seconds=60,
+    )
+    delivered = await first_dispatcher.dispatch_payment_settled(
+        event=event,
+        details=details,
+        settled_at=datetime.now(tz=timezone.utc),
+    )
+    assert delivered is False
+
+    deliveries = await storage.list_deliveries(page=1, page_size=5)
+    delivery = deliveries["items"][0]
+    assert delivery["status"] == "retrying"
+    assert delivery["last_attempt"]["success"] is False
+
+    resumed_event = asyncio.Event()
+    captured = []
+
+    async def recovering_sender(url, payload, headers):
+        captured.append({"url": url, "payload": payload, "headers": headers})
+        resumed_event.set()
+
+    restarted_dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=recovering_sender,
+        max_retries=2,
+        retry_window_seconds=60,
+    )
+    resumed = await restarted_dispatcher.resume_pending_retries()
+    assert resumed == 1
+    await asyncio.wait_for(resumed_event.wait(), timeout=1.0)
+    assert len(captured) == 1
+
+    attempts = await storage.list_delivery_attempts(int(delivery["id"]))
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert [attempt["success"] for attempt in attempts] == [False, True]
+    delivery_after = await storage.get_delivery(int(delivery["id"]))
+    assert delivery_after is not None
+    assert delivery_after["status"] == "delivered"

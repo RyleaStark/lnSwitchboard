@@ -28,5 +28,6 @@ describe("proxy deployment snippets", () => {
     expect(snippets.find((item) => item.label === "Cloudflare Tunnel")?.snippet).toContain(
       "service: http://extended-umbrella-lnswitchboard_app_1:22121",
     )
+    expect(snippets.map((item) => item.snippet).join("\n")).not.toContain("lnprofile")
   })
 })

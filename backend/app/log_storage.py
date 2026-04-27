@@ -164,6 +164,40 @@ class RequestLogStorage:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload TEXT,
+                    headers TEXT,
+                    address_id TEXT,
+                    invoice_event_id INTEGER,
+                    request_log_id INTEGER,
+                    delivery_key TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS webhook_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    delivery_id INTEGER NOT NULL,
+                    attempted_at TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    success INTEGER NOT NULL,
+                    status_code INTEGER,
+                    latency_ms INTEGER,
+                    error TEXT,
+                    response_body TEXT
+                )
+                """
+            )
             self._ensure_invoice_event_columns(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp)")
             conn.execute(
@@ -171,6 +205,15 @@ class RequestLogStorage:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_invoice_events_next_check ON invoice_events(next_check_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created ON webhook_deliveries(created_at)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_deliveries_key ON webhook_deliveries(delivery_key)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_webhook_attempts_delivery ON webhook_attempts(delivery_id)"
             )
 
     def _ensure_invoice_event_columns(self, conn: sqlite3.Connection) -> None:
@@ -269,6 +312,44 @@ class RequestLogStorage:
                 return {"_raw": payload}
         return payload
 
+    def _redact_response_body(self, body: Optional[str], limit: int = 1000) -> Optional[str]:
+        if body is None:
+            return None
+        text = str(body)
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}..."
+
+    def _row_to_delivery(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "kind": row["kind"],
+            "event": row["event"],
+            "target": row["target"],
+            "status": row["status"],
+            "payload": self._deserialize_details(row["payload"]),
+            "headers": self._deserialize_details(row["headers"]),
+            "address_id": row["address_id"],
+            "invoice_event_id": row["invoice_event_id"],
+            "request_log_id": row["request_log_id"],
+            "delivery_key": row["delivery_key"],
+        }
+
+    def _row_to_attempt(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": row["id"],
+            "delivery_id": row["delivery_id"],
+            "attempted_at": row["attempted_at"],
+            "attempt_number": row["attempt_number"],
+            "success": bool(row["success"]),
+            "status_code": row["status_code"],
+            "latency_ms": row["latency_ms"],
+            "error": row["error"],
+            "response_body": row["response_body"],
+        }
+
     def _parse_timestamp(self, value: Any) -> Optional[datetime]:
         if not isinstance(value, str):
             return None
@@ -331,6 +412,281 @@ class RequestLogStorage:
                     conn.execute("DELETE FROM request_logs")
             except sqlite3.Error:
                 return
+
+    async def create_delivery(
+        self,
+        *,
+        kind: str,
+        target: str,
+        event: str,
+        payload: Dict[str, Any],
+        headers: Optional[Dict[str, Any]] = None,
+        address_id: Optional[str] = None,
+        invoice_event_id: Optional[int] = None,
+        request_log_id: Optional[int] = None,
+        status: str = "pending",
+        delivery_key: Optional[str] = None,
+    ) -> int:
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    if delivery_key:
+                        existing = conn.execute(
+                            "SELECT id FROM webhook_deliveries WHERE delivery_key = ?",
+                            (delivery_key,),
+                        ).fetchone()
+                        if existing:
+                            return int(existing["id"])
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO webhook_deliveries (
+                            created_at,
+                            updated_at,
+                            kind,
+                            event,
+                            target,
+                            status,
+                            payload,
+                            headers,
+                            address_id,
+                            invoice_event_id,
+                            request_log_id,
+                            delivery_key
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            now_iso,
+                            now_iso,
+                            kind,
+                            event,
+                            target,
+                            status,
+                            self._serialize_details(payload),
+                            self._serialize_details(headers or {}),
+                            address_id,
+                            invoice_event_id,
+                            request_log_id,
+                            delivery_key,
+                        ),
+                    )
+                    return int(cursor.lastrowid)
+            except sqlite3.Error:
+                return 0
+
+    async def update_delivery_status(
+        self,
+        *,
+        delivery_id: int,
+        status: str,
+        headers: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if delivery_id <= 0:
+            return
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    if headers is None:
+                        conn.execute(
+                            "UPDATE webhook_deliveries SET status = ?, updated_at = ? WHERE id = ?",
+                            (status, now_iso, delivery_id),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE webhook_deliveries SET status = ?, headers = ?, updated_at = ? WHERE id = ?",
+                            (status, self._serialize_details(headers), now_iso, delivery_id),
+                        )
+            except sqlite3.Error:
+                return
+
+    async def record_delivery_attempt(
+        self,
+        *,
+        delivery_id: int,
+        success: bool,
+        error: Optional[str],
+        status_code: Optional[int],
+        latency_ms: Optional[int],
+        response_body: Optional[str],
+    ) -> None:
+        if delivery_id <= 0:
+            return
+        attempted_at = datetime.now(tz=timezone.utc).isoformat()
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        "SELECT COALESCE(MAX(attempt_number), 0) AS last_attempt FROM webhook_attempts WHERE delivery_id = ?",
+                        (delivery_id,),
+                    ).fetchone()
+                    attempt_number = int(row["last_attempt"] or 0) + 1
+                    conn.execute(
+                        """
+                        INSERT INTO webhook_attempts (
+                            delivery_id,
+                            attempted_at,
+                            attempt_number,
+                            success,
+                            status_code,
+                            latency_ms,
+                            error,
+                            response_body
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            delivery_id,
+                            attempted_at,
+                            attempt_number,
+                            1 if success else 0,
+                            status_code,
+                            latency_ms,
+                            error,
+                            self._redact_response_body(response_body),
+                        ),
+                    )
+                    conn.execute(
+                        "UPDATE webhook_deliveries SET status = ?, updated_at = ? WHERE id = ?",
+                        ("delivered" if success else "failed", attempted_at, delivery_id),
+                    )
+            except sqlite3.Error:
+                return
+
+    async def get_delivery(self, delivery_id: int) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT id, created_at, updated_at, kind, event, target, status, payload, headers,
+                               address_id, invoice_event_id, request_log_id, delivery_key
+                        FROM webhook_deliveries
+                        WHERE id = ?
+                        """,
+                        (delivery_id,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return None
+        return self._row_to_delivery(row) if row else None
+
+    async def list_delivery_attempts(self, delivery_id: int) -> List[Dict[str, Any]]:
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    rows = conn.execute(
+                        """
+                        SELECT id, delivery_id, attempted_at, attempt_number, success, status_code,
+                               latency_ms, error, response_body
+                        FROM webhook_attempts
+                        WHERE delivery_id = ?
+                        ORDER BY attempt_number
+                        """,
+                        (delivery_id,),
+                    ).fetchall()
+            except sqlite3.Error:
+                return []
+        return [self._row_to_attempt(row) for row in rows]
+
+    async def list_deliveries(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        query: str = "",
+    ) -> Dict[str, Any]:
+        page = max(1, page)
+        normalized_size = max(1, min(100, page_size))
+        offset = (page - 1) * normalized_size
+        search = query.strip().lower()
+        where_clause = ""
+        params: List[Any] = []
+        if search:
+            like = f"%{search}%"
+            where_clause = """
+                WHERE LOWER(kind) LIKE ?
+                   OR LOWER(event) LIKE ?
+                   OR LOWER(target) LIKE ?
+                   OR LOWER(status) LIKE ?
+                   OR LOWER(COALESCE(payload, '')) LIKE ?
+            """
+            params.extend([like, like, like, like, like])
+
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    total_row = conn.execute(
+                        f"SELECT COUNT(*) FROM webhook_deliveries {where_clause}",
+                        tuple(params),
+                    ).fetchone()
+                    total_items = int(total_row[0]) if total_row else 0
+                    query_params = list(params)
+                    query_params.extend([normalized_size, offset])
+                    rows = conn.execute(
+                        f"""
+                        SELECT id, created_at, updated_at, kind, event, target, status, payload, headers,
+                               address_id, invoice_event_id, request_log_id, delivery_key
+                        FROM webhook_deliveries
+                        {where_clause}
+                        ORDER BY datetime(created_at) DESC, id DESC
+                        LIMIT ? OFFSET ?
+                        """,
+                        tuple(query_params),
+                    ).fetchall()
+            except sqlite3.Error:
+                total_items = 0
+                rows = []
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            delivery = self._row_to_delivery(row)
+            attempts = await self.list_delivery_attempts(int(delivery["id"]))
+            delivery["attempts"] = attempts
+            delivery["last_attempt"] = attempts[-1] if attempts else None
+            items.append(delivery)
+
+        total_pages = math.ceil(total_items / normalized_size) if total_items else 0
+        current_page = page if total_pages else 1
+        return {
+            "items": items,
+            "page": current_page,
+            "page_size": normalized_size,
+            "total_items": total_items,
+            "total_pages": total_pages,
+            "has_next": current_page < total_pages,
+            "has_prev": total_pages > 0 and current_page > 1,
+            "query": query,
+        }
+
+    async def list_retryable_http_deliveries(self, *, limit: int = 100) -> List[Dict[str, Any]]:
+        normalized_limit = max(1, min(500, int(limit)))
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    rows = conn.execute(
+                        """
+                        SELECT id, created_at, updated_at, kind, event, target, status, payload, headers,
+                               address_id, invoice_event_id, request_log_id, delivery_key
+                        FROM webhook_deliveries
+                        WHERE kind = 'http.webhook'
+                          AND status IN ('pending', 'retrying')
+                        ORDER BY datetime(updated_at) ASC, id ASC
+                        LIMIT ?
+                        """,
+                        (normalized_limit,),
+                    ).fetchall()
+            except sqlite3.Error:
+                rows = []
+
+        deliveries: List[Dict[str, Any]] = []
+        for row in rows:
+            delivery = self._row_to_delivery(row)
+            attempts = await self.list_delivery_attempts(int(delivery["id"]))
+            delivery["attempts"] = attempts
+            delivery["last_attempt"] = attempts[-1] if attempts else None
+            deliveries.append(delivery)
+        return deliveries
 
     async def cleanup(self) -> None:
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=self._retention_days)

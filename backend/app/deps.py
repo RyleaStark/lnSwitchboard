@@ -11,6 +11,8 @@ from .ln_address_store import LNAddressStore
 from .ln_client import LNClient
 from .log_storage import LogEntry, RequestLogStorage
 from .macaroon_store import MacaroonStore
+from .nostr_signer_store import NostrSignerStore
+from .nostr_zaps import NostrZapPublisher
 from .nip05_store import NostrIdentityStore
 from .rate_limiter import RateLimiter
 from .request_utils import get_client_ip, get_proxy_debug_info
@@ -77,8 +79,24 @@ def _get_webhook_dispatcher() -> WebhookDispatcher:
     settings = get_settings()
     return WebhookDispatcher(
         address_store=_get_ln_address_store(),
+        delivery_storage=_get_log_storage(),
         max_retries=settings.webhook_max_retries,
         retry_window_seconds=settings.webhook_retry_window_seconds,
+        zap_publisher=_get_zap_publisher(),
+    )
+
+
+@lru_cache()
+def _get_nostr_signer_store() -> NostrSignerStore:
+    settings = get_settings()
+    return NostrSignerStore(settings.nostr_zap_secret_path)
+
+
+@lru_cache()
+def _get_zap_publisher() -> NostrZapPublisher:
+    return NostrZapPublisher(
+        signer_store=_get_nostr_signer_store(),
+        storage=_get_log_storage(),
     )
 
 
@@ -112,6 +130,10 @@ async def get_ln_address_store_dep() -> LNAddressStore:
 
 async def get_webhook_dispatcher_dep() -> WebhookDispatcher:
     return _get_webhook_dispatcher()
+
+
+async def get_nostr_signer_store_dep() -> NostrSignerStore:
+    return _get_nostr_signer_store()
 
 
 async def enforce_rate_limit(

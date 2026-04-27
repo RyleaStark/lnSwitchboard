@@ -33,6 +33,14 @@ type AddressFormState = {
   metadata_description: string
   success_message: string
   webhook_urls: string
+  webhook_secret?: string
+  webhook_tags?: string
+  webhook_min_sats?: string
+  webhook_max_sats?: string
+  webhook_route?: "any" | "local" | "forwarded"
+  webhook_require_comment?: boolean
+  webhook_payer_data_field?: string
+  payer_data?: string
 }
 
 type ForwardingFormState = {
@@ -40,6 +48,13 @@ type ForwardingFormState = {
   domain: string
   forward_to: string
   webhook_urls: string
+  webhook_secret?: string
+  webhook_tags?: string
+  webhook_min_sats?: string
+  webhook_max_sats?: string
+  webhook_route?: "any" | "local" | "forwarded"
+  webhook_require_comment?: boolean
+  webhook_payer_data_field?: string
 }
 
 export type ForwardingValidationState = {
@@ -56,6 +71,14 @@ const emptyForm: AddressFormState = {
   metadata_description: "",
   success_message: "",
   webhook_urls: "",
+  webhook_secret: "",
+  webhook_tags: "",
+  webhook_min_sats: "",
+  webhook_max_sats: "",
+  webhook_route: "any",
+  webhook_require_comment: false,
+  webhook_payer_data_field: "",
+  payer_data: "",
 }
 
 const emptyForwardingForm: ForwardingFormState = {
@@ -63,6 +86,13 @@ const emptyForwardingForm: ForwardingFormState = {
   domain: "",
   forward_to: "",
   webhook_urls: "",
+  webhook_secret: "",
+  webhook_tags: "",
+  webhook_min_sats: "",
+  webhook_max_sats: "",
+  webhook_route: "any",
+  webhook_require_comment: false,
+  webhook_payer_data_field: "",
 }
 
 const emptyForwardingValidation: ForwardingValidationState = {
@@ -70,6 +100,7 @@ const emptyForwardingValidation: ForwardingValidationState = {
   target: "",
   message: "",
 }
+const RESERVED_LOCAL_PARTS = new Set(["nip-profile"])
 
 export function AddressesPage() {
   const queryClient = useQueryClient()
@@ -137,6 +168,7 @@ export function AddressesPage() {
       item.metadata_description,
       item.success_message,
       ...(item.webhook_urls || []),
+      item.payer_data ? Object.keys(item.payer_data).join(" ") : "",
       item.forward_to,
       item.min_sats,
       item.max_sats,
@@ -173,6 +205,8 @@ export function AddressesPage() {
       metadata_description: item.metadata_description || "",
       success_message: item.success_message || "",
       webhook_urls: (item.webhook_urls || []).join("\n"),
+      ...endpointFormFields(item),
+      payer_data: formatPayerData(item.payer_data),
     })
     setFormError("")
     setFormOpen(true)
@@ -186,6 +220,7 @@ export function AddressesPage() {
       domain: item.domain || "",
       forward_to: forwardTo,
       webhook_urls: (item.webhook_urls || []).join("\n"),
+      ...endpointFormFields(item),
     })
     forwardToRef.current = forwardTo
     setForwardValidation(
@@ -350,6 +385,22 @@ export function AddressesPage() {
                 <Textarea id="address-webhooks" rows={4} value={form.webhook_urls} onChange={(event) => setForm({ ...form, webhook_urls: event.target.value })} placeholder="https://example.com/webhook" />
                 <FieldDescription>One HTTP(S) endpoint per line. Duplicate URLs are ignored.</FieldDescription>
               </Field>
+              <WebhookAutomationFields
+                prefix="address"
+                secret={form.webhook_secret || ""}
+                tags={form.webhook_tags || ""}
+                minSats={form.webhook_min_sats || ""}
+                maxSats={form.webhook_max_sats || ""}
+                route={form.webhook_route || "any"}
+                requireComment={Boolean(form.webhook_require_comment)}
+                payerDataField={form.webhook_payer_data_field || ""}
+                onChange={(updates) => setForm({ ...form, ...updates })}
+              />
+              <Field>
+                <FieldLabel htmlFor="address-payer-data">Payer data fields</FieldLabel>
+                <Textarea id="address-payer-data" rows={3} value={form.payer_data} onChange={(event) => setForm({ ...form, payer_data: event.target.value })} placeholder='{"name": false, "identifier": true}' />
+                <FieldDescription>Optional LUD-18 schema for this handle. Use JSON or shorthand such as name,!identifier. The auth field is intentionally disabled.</FieldDescription>
+              </Field>
               <FieldError>{formError}</FieldError>
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={() => setFormOpen(false)}>Cancel</Button>
@@ -393,6 +444,17 @@ export function AddressesPage() {
                 <Textarea id="forward-webhooks" rows={4} value={forwardForm.webhook_urls} onChange={(event) => setForwardForm({ ...forwardForm, webhook_urls: event.target.value })} placeholder="https://example.com/webhook" />
                 <FieldDescription>One HTTP(S) endpoint per line. Forwarded paid webhooks only fire when the target returns a usable verify URL.</FieldDescription>
               </Field>
+              <WebhookAutomationFields
+                prefix="forward"
+                secret={forwardForm.webhook_secret || ""}
+                tags={forwardForm.webhook_tags || ""}
+                minSats={forwardForm.webhook_min_sats || ""}
+                maxSats={forwardForm.webhook_max_sats || ""}
+                route={forwardForm.webhook_route || "any"}
+                requireComment={Boolean(forwardForm.webhook_require_comment)}
+                payerDataField={forwardForm.webhook_payer_data_field || ""}
+                onChange={(updates) => setForwardForm({ ...forwardForm, ...updates })}
+              />
               <FieldError>{forwardFormError}</FieldError>
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={() => setForwardFormOpen(false)}>Cancel</Button>
@@ -422,6 +484,7 @@ export function collectAddressPayload(form: AddressFormState): LNAddressPayload 
   const localPart = form.local_part.trim().toLowerCase()
   const domain = normalizeDomainInput(form.domain)
   if (!localPart || !domain) return "Local-part and domain are required."
+  if (RESERVED_LOCAL_PARTS.has(localPart)) return "That local-part is reserved."
   const min = parseOptionalPositiveInt(form.min_sats, "Minimum sats")
   if (typeof min === "string") return min
   const max = parseOptionalPositiveInt(form.max_sats, "Maximum sats")
@@ -429,7 +492,11 @@ export function collectAddressPayload(form: AddressFormState): LNAddressPayload 
   if (min !== null && max !== null && max < min) return "Maximum sats must be greater than or equal to minimum sats."
   const webhooks = collectWebhookUrls(form.webhook_urls)
   if (typeof webhooks === "string") return webhooks
-  return {
+  const webhookEndpoints = collectWebhookEndpoints(webhooks, form)
+  if (typeof webhookEndpoints === "string") return webhookEndpoints
+  const payerData = collectPayerData(form.payer_data || "")
+  if (typeof payerData === "string") return payerData
+  const payload: LNAddressPayload = {
     local_part: localPart,
     domain,
     min_sats: min,
@@ -438,17 +505,23 @@ export function collectAddressPayload(form: AddressFormState): LNAddressPayload 
     success_message: form.success_message.trim() || null,
     webhook_urls: webhooks,
   }
+  if (webhookEndpoints?.length) payload.webhook_endpoints = webhookEndpoints
+  if (payerData !== null) payload.payer_data = payerData
+  return payload
 }
 
 export function collectForwardingAddressPayload(form: ForwardingFormState, validation: ForwardingValidationState): LNAddressPayload | string {
   const localPart = form.local_part.trim().toLowerCase()
   const domain = normalizeDomainInput(form.domain)
   if (!localPart || !domain) return "Local-part and domain are required."
+  if (RESERVED_LOCAL_PARTS.has(localPart)) return "That local-part is reserved."
   if (!form.forward_to.trim()) return "Forwarding LN Address is required."
   if (!isForwardingValidationCurrent(form, validation)) return "Validate the forwarding LN Address before creating this entry."
   const webhooks = collectWebhookUrls(form.webhook_urls)
   if (typeof webhooks === "string") return webhooks
-  return {
+  const webhookEndpoints = collectWebhookEndpoints(webhooks, form)
+  if (typeof webhookEndpoints === "string") return webhookEndpoints
+  const payload: LNAddressPayload = {
     local_part: localPart,
     domain,
     routing_mode: "forward",
@@ -459,6 +532,8 @@ export function collectForwardingAddressPayload(form: ForwardingFormState, valid
     success_message: null,
     webhook_urls: webhooks,
   }
+  if (webhookEndpoints?.length) payload.webhook_endpoints = webhookEndpoints
+  return payload
 }
 
 function collectWebhookUrls(value: string): string[] | string {
@@ -474,6 +549,78 @@ function collectWebhookUrls(value: string): string[] | string {
     }
   }
   return webhooks
+}
+
+type WebhookAutomationState = Pick<
+  AddressFormState,
+  | "webhook_secret"
+  | "webhook_tags"
+  | "webhook_min_sats"
+  | "webhook_max_sats"
+  | "webhook_route"
+  | "webhook_require_comment"
+  | "webhook_payer_data_field"
+>
+
+function collectWebhookEndpoints(urls: string[], form: WebhookAutomationState): LNAddressPayload["webhook_endpoints"] | string {
+  const min = parseOptionalPositiveInt(form.webhook_min_sats || "", "Webhook minimum sats")
+  if (typeof min === "string") return min
+  const max = parseOptionalPositiveInt(form.webhook_max_sats || "", "Webhook maximum sats")
+  if (typeof max === "string") return max
+  if (min !== null && max !== null && max < min) return "Webhook maximum sats must be greater than or equal to minimum sats."
+  const tags = (form.webhook_tags || "").split(/[\r\n,]+/).map((tag) => tag.trim()).filter(Boolean)
+  const hasAutomation =
+    Boolean((form.webhook_secret || "").trim()) ||
+    tags.length > 0 ||
+    min !== null ||
+    max !== null ||
+    (form.webhook_route || "any") !== "any" ||
+    Boolean(form.webhook_require_comment) ||
+    Boolean((form.webhook_payer_data_field || "").trim())
+  if (!hasAutomation) return undefined
+  const filters = {
+    tags,
+    min_msat: min === null ? null : min * 1000,
+    max_msat: max === null ? null : max * 1000,
+    route: form.webhook_route || "any",
+    require_comment: Boolean(form.webhook_require_comment),
+    payer_data_field: (form.webhook_payer_data_field || "").trim() || null,
+  }
+  return urls.map((url) => ({
+    url,
+    label: "",
+    secret: (form.webhook_secret || "").trim() || null,
+    filters,
+  }))
+}
+
+function collectPayerData(value: string): Record<string, boolean> | null | string {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  try {
+    const parsed = JSON.parse(trimmed) as unknown
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "Payer data must be a JSON object."
+    const result: Record<string, boolean> = {}
+    for (const [key, mandatory] of Object.entries(parsed)) {
+      const field = key.trim()
+      if (!field) continue
+      if (field.toLowerCase() === "auth") return "Payer data auth is not supported yet."
+      result[field] = Boolean(mandatory)
+    }
+    return result
+  } catch {
+    const result: Record<string, boolean> = {}
+    for (const part of trimmed.split(",")) {
+      const raw = part.trim()
+      if (!raw) continue
+      const mandatory = raw.startsWith("!")
+      const field = (mandatory ? raw.slice(1) : raw).trim()
+      if (!field) continue
+      if (field.toLowerCase() === "auth") return "Payer data auth is not supported yet."
+      result[field] = mandatory
+    }
+    return Object.keys(result).length ? result : "Payer data must be JSON or comma-separated fields."
+  }
 }
 
 export function isForwardingValidationCurrent(form: ForwardingFormState, validation: ForwardingValidationState): boolean {
@@ -493,6 +640,98 @@ function parseOptionalPositiveInt(value: string, label: string): number | null |
 
 function sortAddress(a: LNAddress, b: LNAddress) {
   return a.domain.localeCompare(b.domain) || a.local_part.localeCompare(b.local_part)
+}
+
+function endpointFormFields(item: LNAddress): WebhookAutomationState {
+  const endpoint = item.webhook_endpoints?.[0]
+  const filters = endpoint?.filters ?? {}
+  return {
+    webhook_secret: "",
+    webhook_tags: (filters.tags || []).join(","),
+    webhook_min_sats: typeof filters.min_msat === "number" ? String(Math.floor(filters.min_msat / 1000)) : "",
+    webhook_max_sats: typeof filters.max_msat === "number" ? String(Math.floor(filters.max_msat / 1000)) : "",
+    webhook_route: filters.route || "any",
+    webhook_require_comment: Boolean(filters.require_comment),
+    webhook_payer_data_field: filters.payer_data_field || "",
+  }
+}
+
+function formatPayerData(value?: Record<string, boolean>): string {
+  if (!value || Object.keys(value).length === 0) return ""
+  return JSON.stringify(value, null, 2)
+}
+
+function WebhookAutomationFields({
+  prefix,
+  secret,
+  tags,
+  minSats,
+  maxSats,
+  route,
+  requireComment,
+  payerDataField,
+  onChange,
+}: {
+  prefix: string
+  secret: string
+  tags: string
+  minSats: string
+  maxSats: string
+  route: "any" | "local" | "forwarded"
+  requireComment: boolean
+  payerDataField: string
+  onChange: (updates: Partial<WebhookAutomationState>) => void
+}) {
+  return (
+    <div className="grid gap-4 rounded-md border bg-muted/20 p-4 md:grid-cols-2">
+      <Field>
+        <FieldLabel htmlFor={`${prefix}-webhook-secret`}>Webhook signing secret</FieldLabel>
+        <Input id={`${prefix}-webhook-secret`} value={secret} onChange={(event) => onChange({ webhook_secret: event.target.value })} placeholder="Leave blank for unsigned" />
+        <FieldDescription>When set, deliveries include HMAC signature headers.</FieldDescription>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor={`${prefix}-webhook-tags`}>Only +tags</FieldLabel>
+        <Input id={`${prefix}-webhook-tags`} value={tags} onChange={(event) => onChange({ webhook_tags: event.target.value })} placeholder="vip,promo" />
+      </Field>
+      <Field>
+        <FieldLabel htmlFor={`${prefix}-webhook-min`}>Filter minimum sats</FieldLabel>
+        <Input id={`${prefix}-webhook-min`} type="number" min={1} value={minSats} onChange={(event) => onChange({ webhook_min_sats: event.target.value })} />
+      </Field>
+      <Field>
+        <FieldLabel htmlFor={`${prefix}-webhook-max`}>Filter maximum sats</FieldLabel>
+        <Input id={`${prefix}-webhook-max`} type="number" min={1} value={maxSats} onChange={(event) => onChange({ webhook_max_sats: event.target.value })} />
+      </Field>
+      <Field>
+        <FieldLabel htmlFor={`${prefix}-webhook-route`}>Route filter</FieldLabel>
+        <select
+          id={`${prefix}-webhook-route`}
+          value={route}
+          onChange={(event) => onChange({ webhook_route: event.target.value as "any" | "local" | "forwarded" })}
+          className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        >
+          <option value="any">Any payment</option>
+          <option value="local">Local invoices</option>
+          <option value="forwarded">Forwarded invoices</option>
+        </select>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor={`${prefix}-webhook-payer-field`}>Required payer data field</FieldLabel>
+        <Input id={`${prefix}-webhook-payer-field`} value={payerDataField} onChange={(event) => onChange({ webhook_payer_data_field: event.target.value })} placeholder="identifier" />
+      </Field>
+      <Field className="md:col-span-2">
+        <label className="flex items-center gap-2 text-sm font-medium" htmlFor={`${prefix}-webhook-comment`}>
+          <input
+            id={`${prefix}-webhook-comment`}
+            type="checkbox"
+            checked={requireComment}
+            onChange={(event) => onChange({ webhook_require_comment: event.target.checked })}
+            className="size-4 rounded border-input"
+          />
+          Require payer comment before sending
+        </label>
+      </Field>
+    </div>
+  )
 }
 
 function AddressHandle({ item, hasIdentity }: { item: LNAddress; hasIdentity: boolean }) {

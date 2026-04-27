@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRoundIcon, SaveIcon, ServerCogIcon } from "lucide-react"
+import { KeyRoundIcon, RadioTowerIcon, SaveIcon, ServerCogIcon } from "lucide-react"
 import { toast } from "sonner"
 
 import { LoadingRows, PageError, PageHeader } from "@/components/common"
@@ -13,9 +13,11 @@ import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { api, type AuthStatus, type EnvSetting } from "@/lib/api"
+import { shortHash } from "@/lib/format"
 
 const settingsTabs = [
   { value: "auth", label: "Macaroon", icon: KeyRoundIcon },
+  { value: "nostr", label: "Zap signer", icon: RadioTowerIcon },
   { value: "env", label: "Environment", icon: ServerCogIcon },
 ] as const
 
@@ -29,9 +31,12 @@ export function SettingsPage() {
   const [macaroon, setMacaroon] = useState("")
   const [macaroonOpen, setMacaroonOpen] = useState(false)
   const [macaroonError, setMacaroonError] = useState("")
+  const [zapPrivateKey, setZapPrivateKey] = useState("")
+  const [zapSignerError, setZapSignerError] = useState("")
   const [draftValues, setDraftValues] = useState<Record<string, string>>({})
   const auth = useQuery({ queryKey: ["auth-status"], queryFn: api.authStatus, refetchInterval: 10_000 })
   const env = useQuery({ queryKey: ["env-settings"], queryFn: api.envSettings })
+  const zapSigner = useQuery({ queryKey: ["zap-signer"], queryFn: api.zapSignerStatus, refetchInterval: 10_000 })
   const saveMacaroon = useMutation({
     mutationFn: api.saveMacaroon,
     onSuccess: async () => {
@@ -52,6 +57,25 @@ export function SettingsPage() {
       await queryClient.invalidateQueries({ queryKey: ["env-settings"] })
       await queryClient.invalidateQueries({ queryKey: ["summary"] })
     },
+  })
+  const generateZapSigner = useMutation({
+    mutationFn: api.generateZapSigner,
+    onSuccess: async () => {
+      toast.success("Zap signer generated")
+      setZapSignerError("")
+      await queryClient.invalidateQueries({ queryKey: ["zap-signer"] })
+    },
+    onError: (error: Error) => setZapSignerError(error.message),
+  })
+  const importZapSigner = useMutation({
+    mutationFn: api.importZapSigner,
+    onSuccess: async () => {
+      toast.success("Zap signer imported")
+      setZapPrivateKey("")
+      setZapSignerError("")
+      await queryClient.invalidateQueries({ queryKey: ["zap-signer"] })
+    },
+    onError: (error: Error) => setZapSignerError(error.message),
   })
   const envSettings = useMemo(() => visibleEnvSettings(env.data?.settings ?? []), [env.data?.settings])
   const grouped = useMemo(() => groupSettings(envSettings), [envSettings])
@@ -163,6 +187,50 @@ export function SettingsPage() {
               ) : (
                 <Button type="button" variant="outline" onClick={() => setMacaroonOpen(true)}>Replace macaroon</Button>
               )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="nostr">
+          <Card>
+            <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <CardTitle className="flex items-center gap-2"><RadioTowerIcon /> Nostr zap signer</CardTitle>
+                <CardDescription>Signs NIP-57 zap receipts after linked Lightning invoices settle.</CardDescription>
+              </div>
+              <Badge variant={zapSigner.data?.configured ? "default" : "secondary"}>
+                {zapSigner.data?.configured ? "Configured" : "Not configured"}
+              </Badge>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-5">
+              {zapSigner.isLoading ? <LoadingRows rows={1} /> : null}
+              {zapSigner.isError ? <PageError message="Unable to load zap signer status." /> : null}
+              {zapSigner.data ? (
+                <div className="rounded-md border bg-muted/20 p-4 text-sm">
+                  <div className="font-medium">Receipt public key</div>
+                  <code className="mt-2 block break-all rounded-md bg-background px-3 py-2 font-mono text-xs text-foreground">
+                    {zapSigner.data.pubkey || "No signer key generated"}
+                  </code>
+                  {zapSigner.data.path ? <p className="mt-2 text-xs text-muted-foreground">Stored at {zapSigner.data.path}</p> : null}
+                  {zapSigner.data.pubkey ? <p className="mt-2 text-xs text-muted-foreground">Short key: {shortHash(zapSigner.data.pubkey, 12, 8)}</p> : null}
+                  {zapSigner.data.error ? <FieldError>{zapSigner.data.error}</FieldError> : null}
+                </div>
+              ) : null}
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="zap-private-key">Import private key</FieldLabel>
+                  <Textarea id="zap-private-key" rows={3} value={zapPrivateKey} onChange={(event) => setZapPrivateKey(event.target.value)} />
+                  <FieldDescription>Paste a 32-byte hex Nostr private key. It is written locally and never returned by the API.</FieldDescription>
+                </Field>
+                <FieldError>{zapSignerError}</FieldError>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button type="button" variant="outline" disabled={generateZapSigner.isPending} onClick={() => generateZapSigner.mutate()}>
+                    {generateZapSigner.isPending ? "Generating..." : zapSigner.data?.configured ? "Rotate signer" : "Generate signer"}
+                  </Button>
+                  <Button type="button" disabled={!zapPrivateKey.trim() || importZapSigner.isPending} onClick={() => importZapSigner.mutate(zapPrivateKey.trim())}>
+                    {importZapSigner.isPending ? "Importing..." : "Import key"}
+                  </Button>
+                </div>
+              </FieldGroup>
             </CardContent>
           </Card>
         </TabsContent>

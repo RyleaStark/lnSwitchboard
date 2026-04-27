@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 
 from backend.app.invoice_worker import (
@@ -11,6 +12,9 @@ from backend.app.invoice_worker import (
 )
 from backend.app.log_storage import RequestLogStorage
 from backend.app.ln_address_store import LNAddressStore
+from backend.app.nostr_crypto import generate_private_key_hex, public_key_from_private_hex, sign_event
+from backend.app.nostr_signer_store import NostrSignerStore
+from backend.app.nostr_zaps import NostrZapPublisher
 from backend.app.version import get_version
 from backend.app.webhook_dispatcher import WebhookDispatcher
 
@@ -402,3 +406,114 @@ async def _exercise_forwarded_webhook_dispatch(tmp_path):
     assert payload["forward_to"] == "bones@walletofsatoshi.com"
     assert payload["settlement_source"] == "remote_verify"
     assert payload["ln_address"] == "pay@testserver"
+
+
+def test_zap_receipt_delivery_on_settlement(tmp_path):
+    asyncio.run(_exercise_zap_receipt_delivery_on_settlement(tmp_path))
+
+
+async def _exercise_zap_receipt_delivery_on_settlement(tmp_path):
+    db_path = tmp_path / "zap-receipts.db"
+    storage = RequestLogStorage(db_path)
+    address_store = LNAddressStore(db_path)
+    address = await address_store.add_address(
+        local_part="pay",
+        domain="testserver",
+        min_sendable_sat=None,
+        max_sendable_sat=None,
+        metadata_description=None,
+        success_message=None,
+        webhook_urls=[],
+    )
+    signer_store = NostrSignerStore(tmp_path / "zap-signer.hex")
+    signer = await signer_store.generate()
+    assert signer.pubkey
+    zapper_secret = generate_private_key_hex()
+    recipient_pubkey = public_key_from_private_hex(generate_private_key_hex())
+    zap_request_event = sign_event(
+        {
+            "kind": 9734,
+            "created_at": 1_714_566_896,
+            "tags": [
+                ["p", recipient_pubkey],
+                ["amount", "2000"],
+                ["relays", "wss://relay.example.com"],
+            ],
+            "content": "",
+        },
+        zapper_secret,
+    )
+    payment_hash = "cd" * 32
+    details = {
+        "ln_address": "pay@testserver",
+        "username_raw": "pay",
+        "domain": "testserver",
+        "payment_hash": payment_hash,
+        "address_override": {
+            "id": address["id"],
+            "local_part": address["local_part"],
+            "domain": address["domain"],
+        },
+        "zap_request": {
+            "event": zap_request_event,
+            "event_id": zap_request_event["id"],
+            "pubkey": zap_request_event["pubkey"],
+            "recipient_pubkey": recipient_pubkey,
+            "relays": ["wss://relay.example.com"],
+            "raw": json.dumps(zap_request_event, separators=(",", ":")),
+        },
+        "invoice": {"payment_hash": payment_hash, "settled": False},
+    }
+    await storage.log_invoice_event(
+        username="pay",
+        domain="testserver",
+        amount_msat=2000,
+        ip="127.0.0.1",
+        payment_hash=payment_hash,
+        payment_request="lnbc1zap",
+        details=details,
+        request_log_id=None,
+        expires_at=None,
+    )
+    events = await storage.get_due_invoice_events(limit=5)
+    published = []
+
+    async def relay_sender(url, receipt):
+        published.append({"url": url, "receipt": receipt})
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        zap_publisher=NostrZapPublisher(
+            signer_store=signer_store,
+            storage=storage,
+            sender=relay_sender,
+        ),
+    )
+
+    class SettledLookupClient:
+        async def lookup_invoice(self, payment_hash_bytes):
+            return {
+                "settled": True,
+                "r_hash": payment_hash_bytes,
+                "r_preimage": bytes.fromhex("44" * 32),
+                "payment_request": "lnbc1zap",
+            }
+
+    await refresh_invoice_statuses(
+        storage,
+        SettledLookupClient(),
+        events=events,
+        webhook_dispatcher=dispatcher,
+    )
+
+    assert len(published) == 1
+    receipt = published[0]["receipt"]
+    assert published[0]["url"] == "wss://relay.example.com"
+    assert receipt["kind"] == 9735
+    assert receipt["pubkey"] == signer.pubkey
+    assert ["bolt11", "lnbc1zap"] in receipt["tags"]
+    assert ["preimage", "44" * 32] in receipt["tags"]
+    deliveries = await storage.list_deliveries(page=1, page_size=5)
+    assert deliveries["items"][0]["kind"] == "nostr.relay"
+    assert deliveries["items"][0]["status"] == "delivered"
