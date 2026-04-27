@@ -28,6 +28,8 @@ WORKDIR /app
 
 COPY --from=builder /install /usr/local
 COPY backend/app ./backend/app
+COPY scripts/lnswitchboard-diagnose-lnd /usr/local/bin/lnswitchboard-diagnose-lnd
+RUN chmod +x /usr/local/bin/lnswitchboard-diagnose-lnd
 COPY --from=frontend-builder /build/frontend/static ./frontend/static
 COPY VERSION ./VERSION
 

@@ -79,6 +79,14 @@ cd frontend && npm ci && npm run build && cd ..
 
 Set `LND_TLS_PATH` and `LND_MACAROON_PATH` to existing LND files before launching. By default, lnSwitchboard verifies LND's certificate against `LND_HOST` using the trust roots from `LND_TLS_PATH`; set `LND_TLS_SERVER_NAME` only when you intentionally need to verify against a different certificate SAN. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`.
 
+### 🛠️ LND Diagnostics
+
+The Docker image includes a read-only support script that checks LND env wiring, mounted macaroon files, TLS certificate names, gRPC TLS readiness, and basic RPC permissions without printing macaroon contents:
+
+```bash
+docker exec <lnswitchboard-container> lnswitchboard-diagnose-lnd
+```
+
 ---
 
 ## How it Works (Under the Hood)
