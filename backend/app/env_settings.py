@@ -144,7 +144,7 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "label": "Metadata Long Description",
         "type": "textarea",
         "category": "LNURL",
-        "description": "Optional long description returned in LNURL metadata (LUD-12).",
+        "description": "Optional long description returned in LNURL metadata (LUD-20).",
         "editable": False,
         "visible": False,
     },

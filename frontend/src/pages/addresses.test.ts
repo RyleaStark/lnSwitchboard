@@ -42,6 +42,7 @@ describe("collectAddressPayload", () => {
       local_part: "Tips",
       domain: "https://Example.COM/path",
       forward_to: "Bones@WalletOfSatoshi.com",
+      webhook_urls: "https://hooks.example/forward\nhttps://hooks.example/forward",
     }
 
     expect(
@@ -67,8 +68,26 @@ describe("collectAddressPayload", () => {
       max_sats: null,
       metadata_description: null,
       success_message: null,
-      webhook_urls: [],
+      webhook_urls: ["https://hooks.example/forward"],
     })
+  })
+
+  it("rejects invalid forwarding webhook URLs", () => {
+    const result = collectForwardingAddressPayload(
+      {
+        local_part: "tips",
+        domain: "example.com",
+        forward_to: "bones@walletofsatoshi.com",
+        webhook_urls: "ftp://hooks.example/forward",
+      },
+      {
+        status: "valid",
+        target: "bones@walletofsatoshi.com",
+        message: "Validated bones@walletofsatoshi.com",
+      },
+    )
+
+    expect(result).toContain("Webhook URLs")
   })
 
   it("invalidates forwarding validation when the target changes", () => {
@@ -78,6 +97,7 @@ describe("collectAddressPayload", () => {
           local_part: "tips",
           domain: "example.com",
           forward_to: "alice@example.com",
+          webhook_urls: "",
         },
         {
           status: "valid",

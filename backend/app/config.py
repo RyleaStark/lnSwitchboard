@@ -14,10 +14,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def parse_payer_data_config(value: Any) -> Dict[str, bool]:
+    def _validated_config(data: Dict[str, bool]) -> Dict[str, bool]:
+        normalized: Dict[str, bool] = {}
+        for key, mandatory in data.items():
+            field = str(key).strip()
+            if not field:
+                continue
+            if field.lower() == "auth":
+                raise ValueError("LNURL_PAYER_DATA auth is not supported until auth.k1 verification is implemented")
+            normalized[field] = bool(mandatory)
+        return normalized
+
     if not value:
         return {}
     if isinstance(value, dict):
-        return {str(key): bool(val) for key, val in value.items()}
+        return _validated_config({str(key): bool(val) for key, val in value.items()})
     if isinstance(value, str):
         value = value.strip()
         if not value:
@@ -35,10 +46,10 @@ def parse_payer_data_config(value: Any) -> Dict[str, bool]:
                 if not field:
                     continue
                 result[field] = mandatory
-            return result
+            return _validated_config(result)
         if not isinstance(data, dict):
             raise ValueError("LNURL_PAYER_DATA must be a JSON object or shorthand list")
-        return {str(key): bool(val) for key, val in data.items()}
+        return _validated_config({str(key): bool(val) for key, val in data.items()})
     raise ValueError("Unsupported value for LNURL_PAYER_DATA")
 
 

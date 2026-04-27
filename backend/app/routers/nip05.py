@@ -24,7 +24,7 @@ public_router = APIRouter(include_in_schema=False)
 
 LOCAL_PART_PATTERN = re.compile(r"^[a-z0-9._-]+$")
 DOMAIN_PATTERN = re.compile(r"^[a-z0-9.-]+$")
-ALLOWED_RELAY_SCHEMES = {"ws", "wss", "http", "https"}
+ALLOWED_RELAY_SCHEMES = {"ws", "wss"}
 MAX_RELAYS = 16
 
 
@@ -78,7 +78,7 @@ def _normalize_relays(relays: Sequence[str]) -> List[str]:
             continue
         parsed = urlsplit(cleaned if "://" in cleaned else f"wss://{cleaned}")
         if parsed.scheme.lower() not in ALLOWED_RELAY_SCHEMES:
-            raise ValueError("Relay URLs must include ws(s):// or http(s)://")
+            raise ValueError("Relay URLs must use ws:// or wss://")
         if not parsed.netloc:
             raise ValueError("Relay URLs must include a host")
         path = parsed.path or ""
@@ -93,6 +93,25 @@ def _normalize_relays(relays: Sequence[str]) -> List[str]:
             normalized.append(normalized_url)
     if len(normalized) > MAX_RELAYS:
         raise ValueError(f"Provide at most {MAX_RELAYS} relay URLs")
+    return normalized
+
+
+def _public_relays(relays: Any) -> List[str]:
+    if not isinstance(relays, list):
+        return []
+    normalized: List[str] = []
+    seen = set()
+    for relay in relays:
+        if not isinstance(relay, str):
+            continue
+        try:
+            candidates = _normalize_relays([relay])
+        except ValueError:
+            continue
+        for candidate in candidates:
+            if candidate not in seen:
+                seen.add(candidate)
+                normalized.append(candidate)
     return normalized
 
 
@@ -206,11 +225,11 @@ async def nostr_well_known(
         target = name.strip().lower()
         entries = [entry for entry in entries if entry["local_part"] == target]
     names = {entry["local_part"]: entry["pubkey_hex"] for entry in entries}
-    relays_map = {
-        entry["pubkey_hex"]: entry["relays"]
-        for entry in entries
-        if entry.get("relays")
-    }
+    relays_map: Dict[str, List[str]] = {}
+    for entry in entries:
+        relays = _public_relays(entry.get("relays"))
+        if relays:
+            relays_map[entry["pubkey_hex"]] = relays
     payload: Dict[str, Any] = {"names": names}
     if relays_map:
         payload["relays"] = relays_map

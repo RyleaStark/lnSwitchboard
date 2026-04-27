@@ -6,10 +6,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request
 
 from ..config import Settings, parse_payer_data_config
 from ..deps import (
@@ -36,6 +37,42 @@ from ..request_utils import build_public_url, get_client_ip, get_proxy_debug_inf
 
 router = APIRouter(prefix="/.well-known/lnurlp", tags=["lnurl"])
 logger = logging.getLogger(__name__)
+LOCAL_PART_PATTERN = re.compile(r"^[a-z0-9._-]+$")
+
+
+def _lnurl_error(reason: str) -> Dict[str, str]:
+    return {"status": "ERROR", "reason": reason}
+
+
+def _parse_lnurl_local_part(value: str) -> Optional[tuple[str, Optional[str]]]:
+    raw = value.strip()
+    if raw != value or not raw or raw.count("+") > 1:
+        return None
+    if "+" not in raw:
+        if not LOCAL_PART_PATTERN.fullmatch(raw):
+            return None
+        return raw, None
+    base, tag = raw.split("+", 1)
+    if not base or not tag:
+        return None
+    if not LOCAL_PART_PATTERN.fullmatch(base) or not LOCAL_PART_PATTERN.fullmatch(tag):
+        return None
+    return base, tag
+
+
+def _parse_amount_param(value: Optional[str]) -> tuple[Optional[int], Optional[str]]:
+    if value is None:
+        return None, None
+    raw = value.strip()
+    if not raw:
+        return None, "Amount must be an integer"
+    try:
+        amount = int(raw, 10)
+    except ValueError:
+        return None, "Amount must be an integer"
+    if amount <= 0:
+        return None, "Amount must be positive"
+    return amount, None
 
 
 def _build_metadata(
@@ -148,10 +185,7 @@ def _resolve_payer_data_request(settings: Settings) -> Dict[str, Dict[str, bool]
     if not config_data:
         raw = os.environ.get("LNURL_PAYER_DATA")
         if raw:
-            try:
-                config_data = parse_payer_data_config(raw)
-            except ValueError:
-                config_data = {}
+            config_data = parse_payer_data_config(raw)
     if not config_data:
         return {}
     return {field: {"mandatory": mandatory} for field, mandatory in config_data.items()}
@@ -300,7 +334,7 @@ async def _forward_lnurl_pay(
                 },
             )
         )
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Forwarding target unavailable") from exc
+        return _lnurl_error(str(exc) or "Forwarding target unavailable")
 
     base_details: Dict[str, Any] = {
         "forwarded": True,
@@ -345,12 +379,12 @@ async def _forward_lnurl_pay(
         return discovery_response
 
     if amount <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount must be positive")
+        return _lnurl_error("Amount must be positive")
     min_sendable = target.payload.get("minSendable")
     max_sendable = target.payload.get("maxSendable")
     if isinstance(min_sendable, int) and isinstance(max_sendable, int):
         if amount < min_sendable or amount > max_sendable:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount outside allowed range")
+            return _lnurl_error("Amount outside allowed range")
 
     try:
         invoice_response = await fetch_forwarding_invoice(
@@ -372,7 +406,7 @@ async def _forward_lnurl_pay(
                 details=details,
             )
         )
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        return _lnurl_error(str(exc))
 
     verify_url = invoice_response.get("verify")
     payment_hash = extract_payment_hash_from_verify_url(verify_url)
@@ -422,7 +456,7 @@ async def _forward_lnurl_pay(
 async def lnurl_pay(
     request: Request,
     username: str,
-    amount: Optional[int] = Query(
+    amount: Optional[str] = Query(
         None,
         description="Amount in millisatoshis requested by the wallet.",
     ),
@@ -442,12 +476,14 @@ async def lnurl_pay(
     macaroon_store: MacaroonStore = Depends(get_macaroon_store_dep),
 ) -> Dict[str, Any]:
     raw_username = username.strip()
-    if not raw_username or " " in raw_username:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid username")
+    parsed_username = _parse_lnurl_local_part(username)
+    if parsed_username is None:
+        return _lnurl_error("Invalid username")
 
-    username, tag = _split_username_tag(raw_username)
-    if not username:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid username")
+    username, tag = parsed_username
+    amount_msat, amount_error = _parse_amount_param(amount)
+    if amount_error:
+        return _lnurl_error(amount_error)
 
     ip = get_client_ip(request)
     proxy_info = get_proxy_debug_info(request)
@@ -464,7 +500,10 @@ async def lnurl_pay(
     override_metadata = override.get("metadata_description") if override else None
     override_success = override.get("success_message") if override else None
     long_description = _resolve_long_description(settings)
-    payer_data_request = _resolve_payer_data_request(settings)
+    try:
+        payer_data_request = _resolve_payer_data_request(settings)
+    except ValueError as exc:
+        return _lnurl_error(str(exc))
     if payer_data_request:
         base_payer_data = payer_data_request
     else:
@@ -479,7 +518,7 @@ async def lnurl_pay(
             raw_username=raw_username,
             username=username,
             tag=tag,
-            amount=amount,
+            amount=amount_msat,
             ip=ip,
             proxy_info=proxy_info,
             callback_http_url=callback_http_url,
@@ -492,17 +531,11 @@ async def lnurl_pay(
 
     channel_max_sendable_sat = await _channel_max_sendable_sat(ln_client)
     if channel_max_sendable_sat <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No inbound liquidity available",
-        )
+        return _lnurl_error("No inbound liquidity available")
     min_sendable_sat = override_min_sat if override_min_sat is not None else settings.min_sendable_sat
     min_sendable_sat = max(1, min_sendable_sat)
     if channel_max_sendable_sat < min_sendable_sat:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Inbound liquidity below configured minimum send amount",
-        )
+        return _lnurl_error("Inbound liquidity below configured minimum send amount")
 
     max_sendable_sat = channel_max_sendable_sat
     if override_max_sat is not None:
@@ -564,7 +597,7 @@ async def lnurl_pay(
     min_sendable_msat = min_sendable_sat * 1000
     base_details["channel_max_sendable_sat"] = channel_max_sendable_sat
 
-    if amount is None:
+    if amount_msat is None:
         resp = {
             "tag": "payRequest",
             "callback": callback_http_url,
@@ -589,66 +622,40 @@ async def lnurl_pay(
         )
         return resp
 
-    if amount <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount must be positive")
-
-    if amount < min_sendable_msat or amount > max_sendable_msat:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Amount outside allowed range",
-        )
+    if amount_msat < min_sendable_msat or amount_msat > max_sendable_msat:
+        return _lnurl_error("Amount outside allowed range")
 
     if comment is not None:
         if settings.comment_max_length <= 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Comments not accepted",
-            )
+            return _lnurl_error("Comments not accepted")
         if len(comment) > settings.comment_max_length:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Comment exceeds maximum length",
-            )
+            return _lnurl_error("Comment exceeds maximum length")
 
     payerdata_raw = payerdata.strip() if isinstance(payerdata, str) else None
     payerdata_obj: Optional[Dict[str, Any]] = None
     if payerdata_raw:
         if len(payerdata_raw) > 4096:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="payerdata payload too large",
-            )
+            return _lnurl_error("payerdata payload too large")
         try:
             parsed = json.loads(payerdata_raw)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid payerdata payload",
-            ) from exc
+        except json.JSONDecodeError:
+            return _lnurl_error("Invalid payerdata payload")
         if not isinstance(parsed, dict):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="payerdata must be a JSON object",
-            )
+            return _lnurl_error("payerdata must be a JSON object")
         payerdata_obj = parsed
 
     if payer_data_request:
-        if not payerdata_raw:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing payerdata payload",
-            )
         missing = [
             field
             for field, config in payer_data_request.items()
             if config.get("mandatory") and (payerdata_obj is None or field not in payerdata_obj)
         ]
+        mandatory_fields = [field for field, config in payer_data_request.items() if config.get("mandatory")]
+        if mandatory_fields and not payerdata_raw:
+            return _lnurl_error("Missing payerdata payload")
         if missing:
             missing_list = ", ".join(sorted(missing))
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Missing mandatory payerdata fields: {missing_list}",
-            )
+            return _lnurl_error(f"Missing mandatory payerdata fields: {missing_list}")
 
     metadata_payload = metadata
     if payer_data_request and payerdata_raw:
@@ -656,10 +663,7 @@ async def lnurl_pay(
     metadata_hash = hashlib.sha256(metadata_payload.encode("utf-8")).digest()
 
     if not await macaroon_store.is_configured():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Invoice macaroon not configured",
-        )
+        return _lnurl_error("Invoice macaroon not configured")
 
     payment_hash_hex: Optional[str] = None
     invoice_memo = memo
@@ -681,7 +685,7 @@ async def lnurl_pay(
         details["invoice"] = _build_invoice_details(
             payment_request=payment_request,
             memo=invoice_memo,
-            amount_msat=amount,
+            amount_msat=amount_msat,
             description_hash_hex=metadata_hash.hex(),
         )
         if response is not None:
@@ -699,7 +703,7 @@ async def lnurl_pay(
         return details
     try:
         invoice_data = await ln_client.create_invoice(
-            amount_msat=amount,
+            amount_msat=amount_msat,
             memo=invoice_memo,
             description_hash=metadata_hash,
         )
@@ -710,16 +714,13 @@ async def lnurl_pay(
                 ip=ip,
                 event="invoice",
                 domain=domain,
-                amount_msat=amount,
+                amount_msat=amount_msat,
                 status="error",
                 message="macaroon not configured",
                 details=_details_with_invoice(),
             )
         )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Invoice macaroon not configured",
-        ) from exc
+        return _lnurl_error("Invoice macaroon not configured")
     except Exception as exc:  # pragma: no cover - network errors are runtime
         await storage.append(
             LogEntry.create(
@@ -727,7 +728,7 @@ async def lnurl_pay(
                 ip=ip,
                 event="invoice",
                 domain=domain,
-                amount_msat=amount,
+                amount_msat=amount_msat,
                 status="error",
                 message=str(exc),
                 details=_details_with_invoice(
@@ -740,10 +741,7 @@ async def lnurl_pay(
                 ),
             )
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to generate invoice",
-        ) from exc
+        return _lnurl_error("Failed to generate invoice")
 
     payment_request = invoice_data.get("payment_request")
     payment_hash_data = invoice_data.get("r_hash") or invoice_data.get("payment_hash")
@@ -760,20 +758,17 @@ async def lnurl_pay(
                 ip=ip,
                 event="invoice",
                 domain=domain,
-                amount_msat=amount,
+                amount_msat=amount_msat,
                 status="error",
                 message="missing payment request",
                 details=_details_with_invoice(extra={"ln_client_response": invoice_data}),
             )
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Invoice missing payment request",
-        )
+        return _lnurl_error("Invoice missing payment request")
 
     invoice_context = dict(memo_context)
-    invoice_context["amount_msat"] = amount
-    invoice_context["amount_sat"] = amount // 1000
+    invoice_context["amount_msat"] = amount_msat
+    invoice_context["amount_sat"] = amount_msat // 1000
     resolved_message = _resolve_success_message(
         settings=settings,
         override_template=override_success,
@@ -806,7 +801,7 @@ async def lnurl_pay(
         ip=ip,
         event="invoice",
         domain=domain,
-        amount_msat=amount,
+        amount_msat=amount_msat,
         status="ok",
         details=invoice_details,
     )
@@ -818,7 +813,7 @@ async def lnurl_pay(
     await storage.log_invoice_event(
         username=username,
         domain=domain,
-        amount_msat=amount,
+        amount_msat=amount_msat,
         ip=ip,
         payment_hash=payment_hash_hex,
         payment_request=payment_request,
@@ -840,12 +835,11 @@ async def lnurl_verify(
     storage: RequestLogStorage = Depends(get_log_storage_dep),
 ) -> Dict[str, Any]:
     raw_username = username.strip()
-    if not raw_username or " " in raw_username:
+    parsed_username = _parse_lnurl_local_part(username)
+    if parsed_username is None:
         return {"status": "ERROR", "reason": "Invalid username"}
 
-    username_clean, tag = _split_username_tag(raw_username)
-    if not username_clean:
-        return {"status": "ERROR", "reason": "Invalid username"}
+    username_clean, tag = parsed_username
 
     try:
         hash_bytes = bytes.fromhex(payment_hash)

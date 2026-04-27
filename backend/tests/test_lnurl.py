@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from ..app import config, deps
 from backend.app.invoice_worker import refresh_invoice_statuses
-from backend.app.lnurl_forwarding import ForwardingTarget
+from backend.app.lnurl_forwarding import ForwardingTarget, ForwardingTargetError
 from backend.app.tls_status import TlsCertStatus
 
 
@@ -65,6 +65,26 @@ def test_lnurl_metadata(test_client: TestClient):
     assert data["minSendable"] > 0
     assert data["maxSendable"] >= data["minSendable"]
     assert data["commentAllowed"] == config.get_settings().comment_max_length
+
+
+def test_lnurl_lud17_lnurlp_scheme_is_recorded(test_client: TestClient):
+    response = test_client.get("/.well-known/lnurlp/bones")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["callback"] == "http://testserver/.well-known/lnurlp/bones"
+
+    logs_resp = test_client.get("/api/logs/recent", params={"page_size": 10})
+    assert logs_resp.status_code == 200
+    entry = next(
+        (
+            item
+            for item in logs_resp.json()["items"]
+            if item["event"] == "discovery" and item["username"] == "bones"
+        ),
+        None,
+    )
+    assert entry is not None
+    assert entry["details"]["callback_lnurl"] == "lnurlp://testserver/.well-known/lnurlp/bones"
 
 
 def test_lnurl_invoice(test_client: TestClient):
@@ -383,6 +403,39 @@ def test_lnurl_invoice_with_tag(test_client: TestClient):
     assert call["memo"] == "Pay bones+promo@testserver"
 
 
+def test_lnurl_lud16_local_part_validation(test_client: TestClient):
+    valid = test_client.get("/.well-known/lnurlp/alice.bob-01_tag+promo_2")
+    assert valid.status_code == 200
+    valid_payload = valid.json()
+    metadata_entries = json.loads(valid_payload["metadata"])
+    assert ["text/identifier", "alice.bob-01_tag+promo_2@testserver"] in metadata_entries
+    assert ["text/tag", "promo_2"] in metadata_entries
+
+    for local_part in [
+        "Alice",
+        "bones++vip",
+        "bones+",
+        "+vip",
+        "bad$value",
+        "bad%20value",
+        "bones+VIP",
+    ]:
+        response = test_client.get(f"/.well-known/lnurlp/{local_part}")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ERROR", "reason": "Invalid username"}
+
+
+def test_lnurl_amount_errors_use_lnurl_shape(test_client: TestClient):
+    for amount, reason in [
+        (0, "Amount must be positive"),
+        ("not-int", "Amount must be an integer"),
+        (2_000_000, "Amount outside allowed range"),
+    ]:
+        response = test_client.get("/.well-known/lnurlp/bones", params={"amount": amount})
+        assert response.status_code == 200
+        assert response.json() == {"status": "ERROR", "reason": reason}
+
+
 def test_lnurl_comment_too_long(test_client: TestClient):
     limit = config.get_settings().comment_max_length
     long_comment = "a" * (limit + 1)
@@ -390,8 +443,22 @@ def test_lnurl_comment_too_long(test_client: TestClient):
         "/.well-known/lnurlp/bones",
         params={"amount": 1000, "comment": long_comment},
     )
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Comment exceeds maximum length"
+    assert response.status_code == 200
+    assert response.json() == {"status": "ERROR", "reason": "Comment exceeds maximum length"}
+
+
+def test_lnurl_missing_macaroon_uses_lnurl_shape(monkeypatch, test_client: TestClient):
+    async def fake_is_configured(self):
+        return False
+
+    monkeypatch.setattr(
+        "backend.app.macaroon_store.MacaroonStore.is_configured",
+        fake_is_configured,
+    )
+
+    response = test_client.get("/.well-known/lnurlp/bones", params={"amount": 1000})
+    assert response.status_code == 200
+    assert response.json() == {"status": "ERROR", "reason": "Invoice macaroon not configured"}
 
 
 def test_macaroon_status_endpoint(test_client: TestClient):
@@ -685,22 +752,98 @@ def test_lnurl_payerdata_happy_path(monkeypatch, test_client: TestClient):
     config.get_settings.cache_clear()
 
 
+def test_lnurl_optional_payerdata_can_be_omitted(monkeypatch, test_client: TestClient):
+    monkeypatch.setenv("LNURL_PAYER_DATA", '{"identifier": false, "name": false}')
+    config.get_settings.cache_clear()
+
+    discovery = test_client.get("/.well-known/lnurlp/optional_payer")
+    assert discovery.status_code == 200
+    discovery_payload = discovery.json()
+    assert discovery_payload["payerData"]["identifier"]["mandatory"] is False
+    base_metadata = discovery_payload["metadata"]
+
+    invoice_resp = test_client.get("/.well-known/lnurlp/optional_payer", params={"amount": 1000})
+    assert invoice_resp.status_code == 200
+    assert invoice_resp.json()["pr"].startswith("lnbc")
+
+    logs_resp = test_client.get("/api/logs/recent", params={"page_size": 100})
+    entry = next(
+        (
+            item
+            for item in logs_resp.json()["items"]
+            if item["event"] == "invoice" and item["username"] == "optional_payer"
+        ),
+        None,
+    )
+    assert entry is not None
+    details = entry["details"]
+    assert details["metadata_for_hash"] == base_metadata
+    assert "payerdata" not in details
+    config.get_settings.cache_clear()
+
+
+def test_lnurl_payerdata_appends_extra_wallet_fields(monkeypatch, test_client: TestClient):
+    monkeypatch.setenv("LNURL_PAYER_DATA", '{"identifier": true}')
+    config.get_settings.cache_clear()
+
+    discovery = test_client.get("/.well-known/lnurlp/extra_payer")
+    base_metadata = discovery.json()["metadata"]
+    payer_payload = json.dumps(
+        {"identifier": "payer@example.com", "name": "Alice", "custom": {"tier": "gold"}},
+        separators=(",", ":"),
+    )
+    response = test_client.get(
+        "/.well-known/lnurlp/extra_payer",
+        params={"amount": 1000, "payerdata": payer_payload},
+    )
+    assert response.status_code == 200
+
+    logs_resp = test_client.get("/api/logs/recent", params={"page_size": 100})
+    entry = next(
+        (
+            item
+            for item in logs_resp.json()["items"]
+            if item["event"] == "invoice" and item["username"] == "extra_payer"
+        ),
+        None,
+    )
+    assert entry is not None
+    expected_payload = f"{base_metadata}{payer_payload}"
+    assert entry["details"]["payerdata"]["custom"] == {"tier": "gold"}
+    assert entry["details"]["metadata_for_hash"] == expected_payload
+    assert entry["details"]["metadata_hash"] == hashlib.sha256(expected_payload.encode("utf-8")).hexdigest()
+    config.get_settings.cache_clear()
+
+
 def test_lnurl_payerdata_missing_required(monkeypatch, test_client: TestClient):
     monkeypatch.setenv("LNURL_PAYER_DATA", '{"identifier": true}')
     config.get_settings.cache_clear()
 
     response = test_client.get("/.well-known/lnurlp/needs_payer", params={"amount": 1000})
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Missing payerdata payload"
+    assert response.status_code == 200
+    assert response.json() == {"status": "ERROR", "reason": "Missing payerdata payload"}
 
     incomplete_payload = json.dumps({"name": "bob"}, separators=(",", ":"))
     response = test_client.get(
         "/.well-known/lnurlp/needs_payer",
         params={"amount": 1000, "payerdata": incomplete_payload},
     )
-    assert response.status_code == 400
-    assert "Missing mandatory payerdata fields" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ERROR",
+        "reason": "Missing mandatory payerdata fields: identifier",
+    }
     config.get_settings.cache_clear()
+
+
+def test_lnurl_rejects_auth_payerdata_config():
+    for value in ['{"auth": true}', "!auth", {"auth": True}]:
+        try:
+            config.parse_payer_data_config(value)
+        except ValueError as exc:
+            assert "auth is not supported" in str(exc)
+        else:  # pragma: no cover - assertion branch
+            raise AssertionError("auth payerData config should be rejected")
 
 
 def test_recent_logs_refreshes_invoice_status(test_client: TestClient):
@@ -1009,6 +1152,33 @@ def test_forwarded_lnurl_discovery_and_invoice(monkeypatch, test_client: TestCli
     invoices = invoices_resp.json()["items"]
     assert invoices
     assert invoices[0]["status"] == "forwarded"
+
+
+def test_forwarded_lnurl_unavailable_target_uses_lnurl_shape(monkeypatch, test_client: TestClient):
+    target = forwarding_target("offline@example.com")
+
+    async def fake_address_validation(forward_to):
+        return target
+
+    async def fake_lnurl_discovery(forward_to):
+        raise ForwardingTargetError("Forwarding target unavailable")
+
+    monkeypatch.setattr("backend.app.routers.ln_addresses.fetch_forwarding_discovery", fake_address_validation)
+    create_resp = test_client.post(
+        "/api/lnaddresses",
+        json={
+            "local_part": "offline",
+            "domain": "testserver",
+            "routing_mode": "forward",
+            "forward_to": "offline@example.com",
+        },
+    )
+    assert create_resp.status_code == 201
+
+    monkeypatch.setattr("backend.app.routers.lnurl.fetch_forwarding_discovery", fake_lnurl_discovery)
+    response = test_client.get("/.well-known/lnurlp/offline")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ERROR", "reason": "Forwarding target unavailable"}
 
 
 def test_forwarded_invoice_without_verify_does_not_create_paid_webhook_event(monkeypatch, test_client: TestClient):

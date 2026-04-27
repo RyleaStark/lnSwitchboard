@@ -39,6 +39,7 @@ type ForwardingFormState = {
   local_part: string
   domain: string
   forward_to: string
+  webhook_urls: string
 }
 
 export type ForwardingValidationState = {
@@ -61,6 +62,7 @@ const emptyForwardingForm: ForwardingFormState = {
   local_part: "",
   domain: "",
   forward_to: "",
+  webhook_urls: "",
 }
 
 const emptyForwardingValidation: ForwardingValidationState = {
@@ -183,6 +185,7 @@ export function AddressesPage() {
       local_part: item.local_part || "",
       domain: item.domain || "",
       forward_to: forwardTo,
+      webhook_urls: (item.webhook_urls || []).join("\n"),
     })
     forwardToRef.current = forwardTo
     setForwardValidation(
@@ -211,9 +214,6 @@ export function AddressesPage() {
     if (typeof payload === "string") {
       setForwardFormError(payload)
       return
-    }
-    if (editing?.routing_mode === "forward" && editing.webhook_urls?.length) {
-      payload.webhook_urls = [...editing.webhook_urls]
     }
     setForwardFormError("")
     save.mutate(payload)
@@ -388,6 +388,11 @@ export function AddressesPage() {
                 </div>
                 <FieldDescription>{forwardValidation.status === "valid" ? forwardValidation.message : "The target must return a valid LNURL-pay payload before this address can be created."}</FieldDescription>
               </Field>
+              <Field>
+                <FieldLabel htmlFor="forward-webhooks">Webhook URLs</FieldLabel>
+                <Textarea id="forward-webhooks" rows={4} value={forwardForm.webhook_urls} onChange={(event) => setForwardForm({ ...forwardForm, webhook_urls: event.target.value })} placeholder="https://example.com/webhook" />
+                <FieldDescription>One HTTP(S) endpoint per line. Forwarded paid webhooks only fire when the target returns a usable verify URL.</FieldDescription>
+              </Field>
               <FieldError>{forwardFormError}</FieldError>
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={() => setForwardFormOpen(false)}>Cancel</Button>
@@ -422,17 +427,8 @@ export function collectAddressPayload(form: AddressFormState): LNAddressPayload 
   const max = parseOptionalPositiveInt(form.max_sats, "Maximum sats")
   if (typeof max === "string") return max
   if (min !== null && max !== null && max < min) return "Maximum sats must be greater than or equal to minimum sats."
-  const webhooks: string[] = []
-  for (const raw of form.webhook_urls.split(/[\r\n,]+/).map((value) => value.trim()).filter(Boolean)) {
-    try {
-      const parsed = new URL(raw)
-      if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) return "Webhook URLs must start with http(s):// and include a host."
-      const normalized = parsed.toString()
-      if (!webhooks.includes(normalized)) webhooks.push(normalized)
-    } catch {
-      return "Each webhook URL must be a valid HTTP(S) address."
-    }
-  }
+  const webhooks = collectWebhookUrls(form.webhook_urls)
+  if (typeof webhooks === "string") return webhooks
   return {
     local_part: localPart,
     domain,
@@ -450,6 +446,8 @@ export function collectForwardingAddressPayload(form: ForwardingFormState, valid
   if (!localPart || !domain) return "Local-part and domain are required."
   if (!form.forward_to.trim()) return "Forwarding LN Address is required."
   if (!isForwardingValidationCurrent(form, validation)) return "Validate the forwarding LN Address before creating this entry."
+  const webhooks = collectWebhookUrls(form.webhook_urls)
+  if (typeof webhooks === "string") return webhooks
   return {
     local_part: localPart,
     domain,
@@ -459,8 +457,23 @@ export function collectForwardingAddressPayload(form: ForwardingFormState, valid
     max_sats: null,
     metadata_description: null,
     success_message: null,
-    webhook_urls: [],
+    webhook_urls: webhooks,
   }
+}
+
+function collectWebhookUrls(value: string): string[] | string {
+  const webhooks: string[] = []
+  for (const raw of value.split(/[\r\n,]+/).map((entry) => entry.trim()).filter(Boolean)) {
+    try {
+      const parsed = new URL(raw)
+      if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) return "Webhook URLs must start with http(s):// and include a host."
+      const normalized = parsed.toString()
+      if (!webhooks.includes(normalized)) webhooks.push(normalized)
+    } catch {
+      return "Each webhook URL must be a valid HTTP(S) address."
+    }
+  }
+  return webhooks
 }
 
 export function isForwardingValidationCurrent(form: ForwardingFormState, validation: ForwardingValidationState): boolean {
