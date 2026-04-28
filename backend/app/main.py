@@ -22,6 +22,7 @@ from .routers import ui as ui_router
 from .routers import webhooks as webhooks_router
 from .macaroon_store import MacaroonNotConfiguredError
 from .invoice_worker import InvoiceSubscriptionWorker, InvoiceFullRefreshWorker
+from .version import get_version
 
 LOGGER = logging.getLogger("lnswitchboard")
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -82,7 +83,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="lnSwitchboard",
-    version="0.2.2",
+    version=get_version(),
     lifespan=lifespan,
 )
 
