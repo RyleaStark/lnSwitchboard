@@ -1,0 +1,45 @@
+name: Clean GHCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview deletions without changing the registry
+        required: true
+        default: true
+        type: boolean
+      keep_tagged:
+        description: Number of recent tagged image versions to keep
+        required: true
+        default: "12"
+        type: string
+      older_than:
+        description: Only delete image versions older than this age
+        required: true
+        default: 0 days
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    name: Clean lnswitchboard package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Clean package versions
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          owner: RyleaStark
+          package: lnswitchboard
+          delete-tags: buildcache
+          exclude-tags: latest
+          keep-n-tagged: ${{ inputs.keep_tagged }}
+          delete-untagged: true
+          older-than: ${{ inputs.older_than }}
+          validate: true
+          dry-run: ${{ inputs.dry_run }}
