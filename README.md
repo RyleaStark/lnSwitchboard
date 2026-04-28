@@ -2,7 +2,7 @@
 
 **Turns any Lightning node into a sovereign Lightning Address switchboard that speaks LNURL, watches your liquidity, and lets you manage identities without touching the command line.**
 
-Published on the [Umbrel App Store](https://umbrel.com/), shipped as a public [Docker package](https://github.com/RyleaStark/lnSwitchboard/pkgs/container/lnswitchboard).
+Published on the [Umbrel App Store](https://umbrel.com/), shipped on [Docker Hub](https://hub.docker.com/r/ryleastark/lnswitchboard) and as a public [GHCR package](https://github.com/RyleaStark/lnSwitchboard/pkgs/container/lnswitchboard).
 
 ---
 
@@ -140,7 +140,7 @@ Screenshots coming soon - until then, install on Umbrel or fire up the Docker im
 ## Docs, Support & Contributing
 
 - 📚 **Documentation:** Check the app's **References** section for quick how-to guides.
-- 📦 **Docker package:** [`ghcr.io/RyleaStark/lnswitchboard`](https://github.com/RyleaStark/lnSwitchboard/pkgs/container/lnswitchboard).
+- 📦 **Docker packages:** [`ryleastark/lnswitchboard`](https://hub.docker.com/r/ryleastark/lnswitchboard) and [`ghcr.io/ryleastark/lnswitchboard`](https://github.com/RyleaStark/lnSwitchboard/pkgs/container/lnswitchboard).
 - 🐛 **Issues & feature requests:** Open a ticket on [GitHub Issues](https://github.com/RyleaStark/lnSwitchboard/issues).
 - ⚡ **Tips:** Send sats to `tips+ln@bigbones.net` to keep the project zapping.
 

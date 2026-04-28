@@ -18,7 +18,8 @@ env:
   PYTHON_VERSION: "3.11"
   NODE_VERSION: "22"
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/ryleastark/lnswitchboard
+  GHCR_IMAGE: ghcr.io/ryleastark/lnswitchboard
+  DOCKERHUB_IMAGE: ryleastark/lnswitchboard
   CACHE_SCOPE: lnswitchboard
 
 jobs:
@@ -106,10 +107,77 @@ jobs:
           provenance: false
           sbom: false
 
+  version:
+    name: Version bump check
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      bumped: ${{ steps.bump.outputs.bumped }}
+      version: ${{ steps.bump.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check VERSION bump
+        id: bump
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          current="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::VERSION must contain a Docker-compatible semantic version such as 0.2.2" >&2
+            exit 1
+          fi
+
+          before="$BEFORE_SHA"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || -z "$before" || "$before" =~ ^0+$ ]]; then
+            before="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          fi
+
+          echo "version=$current" >> "$GITHUB_OUTPUT"
+          if [[ -z "$before" ]] || ! git cat-file -e "$before:VERSION" 2>/dev/null; then
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "No previous VERSION file was available; skipping publish."
+            exit 0
+          fi
+
+          previous="$(git show "$before:VERSION" | tr -d '[:space:]')"
+          if [[ ! "$previous" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Previous VERSION value '$previous' is not semantic." >&2
+            exit 1
+          fi
+
+          if [[ "$previous" == "$current" ]]; then
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "VERSION did not change; skipping publish."
+            exit 0
+          fi
+
+          IFS=. read -r previous_major previous_minor previous_patch <<< "$previous"
+          IFS=. read -r current_major current_minor current_patch <<< "$current"
+
+          if (( current_major > previous_major ||
+                (current_major == previous_major && current_minor > previous_minor) ||
+                (current_major == previous_major && current_minor == previous_minor && current_patch > previous_patch) )); then
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+            echo "VERSION bumped from $previous to $current; publish is enabled."
+          else
+            echo "::error::VERSION changed from $previous to $current, but it was not bumped." >&2
+            exit 1
+          fi
+
   publish:
     name: Publish container
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
-    needs: [backend, frontend]
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.version.outputs.bumped == 'true' }}
+    needs: [backend, frontend, version]
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
@@ -119,17 +187,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Read image version
-        id: version
-        shell: bash
-        run: |
-          VERSION_VALUE="$(tr -d '[:space:]' < VERSION)"
-          if [[ ! "$VERSION_VALUE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::VERSION must contain a Docker-compatible semantic version such as 0.2.2" >&2
-            exit 1
-          fi
-          echo "version=$VERSION_VALUE" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -144,14 +201,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Generate image metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=raw,value=latest
-            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ needs.version.outputs.version }}
           labels: |
             org.opencontainers.image.title=lnSwitchboard
             org.opencontainers.image.description=Lightning Network switchboard service
