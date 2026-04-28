@@ -84,7 +84,7 @@ jobs:
 
   container:
     name: Container build
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) }}
     needs: [backend, frontend]
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -177,7 +177,7 @@ jobs:
   publish:
     name: Publish container
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.version.outputs.bumped == 'true' }}
-    needs: [backend, frontend, version]
+    needs: [backend, frontend, container, version]
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
