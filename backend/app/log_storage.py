@@ -8,10 +8,13 @@ import json
 import sqlite3
 import math
 from collections import deque
+from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
+
+from .sqlite_utils import sqlite_connection
 
 
 def _json_safe(value: Any) -> Any:
@@ -118,10 +121,8 @@ class RequestLogStorage:
         self._init_db()
         self._load_recent()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return sqlite_connection(self._path)
 
     def _init_db(self) -> None:
         with self._connect() as conn:

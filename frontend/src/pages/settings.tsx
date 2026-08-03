@@ -51,8 +51,8 @@ export function SettingsPage() {
   })
   const saveEnv = useMutation({
     mutationFn: api.updateEnvSettings,
-    onSuccess: async () => {
-      toast.success("Settings saved")
+    onSuccess: async (result) => {
+      toast.success(result.restart_required ? "Settings saved — restart lnSwitchboard to apply them" : "Settings saved")
       setDraftValues({})
       await queryClient.invalidateQueries({ queryKey: ["env-settings"] })
       await queryClient.invalidateQueries({ queryKey: ["summary"] })

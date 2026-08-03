@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 from .log_storage import InvoiceEvent, RequestLogStorage
 from .nostr_crypto import event_id, first_tag_value, sign_event, verify_event
 from .nostr_signer_store import NostrSignerStore
+from .outbound_security import ensure_public_endpoint
 
 LOGGER = logging.getLogger("lnswitchboard.zaps")
 RelaySender = Callable[[str, Dict[str, Any]], Awaitable[None]]
@@ -148,10 +149,12 @@ class NostrZapPublisher:
         signer_store: NostrSignerStore,
         storage: Optional[RequestLogStorage] = None,
         sender: Optional[RelaySender] = None,
+        allow_private_relays: bool = False,
     ) -> None:
         self._signer_store = signer_store
         self._storage = storage
         self._sender = sender
+        self._allow_private_relays = allow_private_relays
 
     async def publish_for_settlement(
         self,
@@ -230,17 +233,32 @@ class NostrZapPublisher:
         if self._sender is not None:
             await self._sender(relay_url, receipt)
             return
+        connect_host = await ensure_public_endpoint(
+            relay_url,
+            allowed_schemes=("ws", "wss"),
+            allow_private=self._allow_private_relays,
+        )
         import websockets
 
-        async with websockets.connect(relay_url, open_timeout=5, close_timeout=2) as websocket:
+        async with websockets.connect(
+            relay_url,
+            host=connect_host,
+            proxy=None,
+            open_timeout=5,
+            close_timeout=2,
+        ) as websocket:
             await websocket.send(json.dumps(["EVENT", receipt], separators=(",", ":"), ensure_ascii=False))
             try:
                 response = await asyncio.wait_for(websocket.recv(), timeout=5)
-            except asyncio.TimeoutError:
-                return
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("relay did not acknowledge the event") from exc
             try:
                 payload = json.loads(response)
-            except json.JSONDecodeError:
-                return
-            if isinstance(payload, list) and len(payload) >= 4 and payload[0] == "OK" and payload[2] is False:
-                raise RuntimeError(str(payload[3]))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("relay returned an invalid acknowledgement") from exc
+            if not isinstance(payload, list) or len(payload) < 4 or payload[0] != "OK":
+                raise RuntimeError("relay did not acknowledge the event")
+            if payload[1] != receipt.get("id"):
+                raise RuntimeError("relay acknowledged a different event")
+            if payload[2] is not True:
+                raise RuntimeError(str(payload[3]) or "relay rejected the event")

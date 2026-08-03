@@ -190,6 +190,12 @@ def get_client_ip(request: Request) -> str:
     return ip
 
 
+def get_public_host(request: Request) -> str:
+    """Return the host selected by the same precedence as public URL generation."""
+
+    return str(_resolve_request_context(request)["host"])
+
+
 def build_public_url(request: Request) -> str:
     context = _resolve_request_context(request)
     url = request.url.replace(query=None)

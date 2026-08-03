@@ -6,8 +6,11 @@ import hmac
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from backend.app.ln_address_store import LNAddressStore
 from backend.app.log_storage import InvoiceEvent, RequestLogStorage
+from ..app.outbound_security import UnsafeOutboundTarget
 from backend.app.webhook_dispatcher import WebhookDispatcher
 
 
@@ -62,6 +65,17 @@ def _make_event(address, payment_hash: str = "ab" * 32) -> tuple[InvoiceEvent, d
 
 def test_webhook_retry_eventually_succeeds(tmp_path):
     asyncio.run(_exercise_retry_eventually_succeeds(tmp_path))
+
+
+def test_private_webhook_targets_are_blocked_by_default(tmp_path) -> None:
+    async def exercise() -> None:
+        address_store, _address = await _create_address(tmp_path)
+        dispatcher = WebhookDispatcher(address_store=address_store)
+
+        with pytest.raises(UnsafeOutboundTarget, match="non-public network"):
+            await dispatcher._send(url="http://127.0.0.1/admin", payload={}, headers={})
+
+    asyncio.run(exercise())
 
 
 async def _exercise_retry_eventually_succeeds(tmp_path):

@@ -6,11 +6,14 @@ import asyncio
 import json
 import sqlite3
 from copy import deepcopy
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from uuid import uuid4
+
+from .sqlite_utils import sqlite_connection
 
 
 def _now_iso() -> str:
@@ -75,10 +78,8 @@ class NostrIdentityStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return sqlite_connection(self._path)
 
     def _init_db(self) -> None:
         with self._connect() as conn:

@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import grpc
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import get_settings
+from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from .deps import get_ln_client_dep, get_log_storage_dep, get_webhook_dispatcher_dep
 from .logging_utils import configure_logging
+from .request_utils import get_public_host
 from .routers import ln_addresses as ln_addresses_router
 from .routers import lnurl as lnurl_router
 from .routers import nip05 as nip05_router
@@ -28,6 +30,28 @@ LOGGER = logging.getLogger("lnswitchboard")
 BASE_DIR = Path(__file__).resolve().parents[2]
 STATIC_DIR = BASE_DIR / "frontend" / "static"
 SPA_ROUTES = ("/logs/", "/liquidity/", "/settings/", "/identities/", "/addresses/", "/invoices/", "/webhooks/")
+FORWARDED_HEADERS = frozenset(
+    {
+        b"cf-connecting-ip",
+        b"forwarded",
+        b"true-client-ip",
+        b"x-forwarded-for",
+        b"x-forwarded-host",
+        b"x-forwarded-port",
+        b"x-forwarded-proto",
+        b"x-real-ip",
+    }
+)
+
+
+def _host_is_trusted(host_header: str, trusted_hosts: tuple[str, ...]) -> bool:
+    hostname = (urlsplit(f"//{host_header}").hostname or "").lower().rstrip(".")
+    return any(
+        pattern == "*"
+        or hostname == pattern
+        or (pattern.startswith("*.") and hostname.endswith(pattern[1:]) and hostname != pattern[2:])
+        for pattern in trusted_hosts
+    )
 
 
 @asynccontextmanager
@@ -87,13 +111,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET"],
-    allow_headers=["*"],
-)
+
+@app.middleware("http")
+async def discard_untrusted_proxy_headers(request: Request, call_next):
+    """Honor forwarding headers only when the immediate peer is trusted."""
+
+    settings = get_settings()
+    trusted_networks = parse_trusted_proxy_cidrs(settings.trusted_proxy_cidrs)
+    client_host = request.client.host if request.client else ""
+    try:
+        client_ip = ip_address(client_host)
+    except ValueError:
+        client_ip = None
+    if client_ip is None or not any(client_ip in network for network in trusted_networks):
+        request.scope["headers"] = [
+            (name, value)
+            for name, value in request.scope["headers"]
+            if name.lower() not in FORWARDED_HEADERS
+        ]
+    trusted_hosts = parse_trusted_hosts(settings.trusted_hosts)
+    if not _host_is_trusted(request.headers.get("host", ""), trusted_hosts) or not _host_is_trusted(
+        get_public_host(request), trusted_hosts
+    ):
+        return PlainTextResponse("Invalid host header", status_code=400)
+    return await call_next(request)
 
 app.include_router(ui_router.router)
 app.include_router(webhooks_router.router)
