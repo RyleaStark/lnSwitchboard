@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS builder
+FROM python:3.11.15-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -9,7 +9,7 @@ COPY backend/requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-FROM node:22-slim AS frontend-builder
+FROM node:22.23.1-slim AS frontend-builder
 
 WORKDIR /build/frontend
 
@@ -18,7 +18,7 @@ RUN npm ci
 COPY frontend ./
 RUN npm run build
 
-FROM python:3.11-slim AS runtime
+FROM python:3.11.15-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

@@ -20,8 +20,8 @@ permissions:
   contents: read
 
 env:
-  PYTHON_VERSION: "3.11"
-  NODE_VERSION: "22"
+  PYTHON_VERSION: "3.11.15"
+  NODE_VERSION: "22.23.1"
   REGISTRY: ghcr.io
   GHCR_IMAGE: ghcr.io/ryleastark/lnswitchboard
   DOCKERHUB_IMAGE: ryleastark/lnswitchboard
@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -57,6 +57,9 @@ jobs:
       - name: Test backend
         run: pytest backend/tests
 
+      - name: Audit backend dependencies
+        run: pip-audit -r backend/requirements.txt -r backend/requirements-dev.txt
+
   frontend:
     name: Frontend checks
     runs-on: ubuntu-latest
@@ -67,7 +70,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -76,6 +79,10 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
+
+      - name: Audit frontend dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=low
 
       - name: Lint frontend
         working-directory: frontend
