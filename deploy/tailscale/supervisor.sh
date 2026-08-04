@@ -73,6 +73,25 @@ publish_command() {
     fi
 }
 
+publish_node_status() {
+    destination="$STATUS_DIR/node.json"
+    temporary="$destination.tmp.$$"
+    raw_status=""
+    if raw_status=$("$TAILSCALE_BIN" --socket="$SOCKET" status --json --peers=false 2>/dev/null); then
+        printf '%s\n' "$raw_status" | sed -E \
+            -e 's/"AuthURL"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*//' \
+            -e 's/,[[:space:]]*"AuthURL"[[:space:]]*:[[:space:]]*"[^"]*"//' \
+            -e 's/"AuthURL"[[:space:]]*:[[:space:]]*"[^"]*"//' \
+            >"$temporary"
+        unset raw_status
+        chmod 0600 "$temporary"
+        mv -f "$temporary" "$destination"
+    else
+        unset raw_status
+        rm -f "$temporary" "$destination"
+    fi
+}
+
 publish_ack() {
     command_name=$1
     command_state=$2
@@ -232,9 +251,7 @@ while :; do
         begin_login
     fi
 
-    publish_command \
-        "$STATUS_DIR/node.json" \
-        "$TAILSCALE_BIN" --socket="$SOCKET" status --json --peers=false
+    publish_node_status
     publish_command \
         "$STATUS_DIR/funnel.json" \
         "$TAILSCALE_BIN" --socket="$SOCKET" funnel status --json

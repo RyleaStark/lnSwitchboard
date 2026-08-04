@@ -54,7 +54,7 @@ while :; do sleep 1; done
 printf 'tailscale %s\\n' "$*" >> "$TS_TEST_COMMAND_LOG"
 case "${1:-}" in --socket=*) shift ;; esac
 if [ "${1:-}" = "status" ]; then
-  printf '%s\\n' '{"BackendState":"NeedsLogin","Self":{"DNSName":""}}'
+  printf '%s\\n' '{"BackendState":"NeedsLogin","AuthURL":"REDACTED","Self":{"DNSName":""}}'
 elif [ "${1:-}" = "up" ]; then
   printf '%s\\n' '{"AuthURL":"REDACTED","BackendState":"NeedsLogin"}'
   if [ -f "$TS_TEST_COMPLETE_LOGIN_FILE" ]; then
