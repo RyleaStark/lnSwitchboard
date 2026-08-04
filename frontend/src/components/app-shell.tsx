@@ -18,7 +18,7 @@ import {
   WebhookIcon,
   ZapIcon,
 } from "lucide-react"
-import { useEffect, useMemo } from "react"
+import { type ComponentProps, useEffect, useMemo } from "react"
 import { toast } from "sonner"
 
 import { CloudflareIcon } from "@/components/cloudflare-icon"
@@ -45,6 +45,7 @@ import {
   SidebarMenuSubItem,
   SidebarProvider,
   SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { api } from "@/lib/api"
@@ -63,6 +64,22 @@ const navItems = [
   { to: "/identities/", label: "Nostr Identities", icon: IdCardIcon },
   { to: "/settings/", label: "Settings", icon: SettingsIcon },
 ]
+
+function SidebarNavLink({ onClick, ...props }: ComponentProps<typeof NavLink>) {
+  const { isMobile, setOpenMobile } = useSidebar()
+
+  return (
+    <NavLink
+      {...props}
+      onClick={(event) => {
+        onClick?.(event)
+        if (!event.defaultPrevented && isMobile) {
+          setOpenMobile(false)
+        }
+      }}
+    />
+  )
+}
 
 export function AppShell() {
   const location = useLocation()
@@ -111,13 +128,13 @@ export function AppShell() {
       <SidebarProvider>
         <Sidebar collapsible="offcanvas">
           <SidebarHeader className="p-4">
-            <NavLink to="/" className="flex items-center gap-3 rounded-md">
+            <SidebarNavLink to="/" className="flex items-center gap-3 rounded-md">
               <img src="/icon.svg" alt="" className="size-10 rounded-md" />
               <span className="flex min-w-0 flex-col">
                 <span className="truncate text-sm font-semibold">lnSwitchboard</span>
                 <span className="truncate text-xs text-muted-foreground">Lightning Address Router</span>
               </span>
-            </NavLink>
+            </SidebarNavLink>
           </SidebarHeader>
           <SidebarContent>
             <SidebarGroup className="pt-0">
@@ -126,10 +143,10 @@ export function AppShell() {
                   {navItems.map((item) => (
                     <SidebarMenuItem key={item.to}>
                       <SidebarMenuButton asChild isActive={isActiveRoute(location.pathname, item.to)} tooltip={item.label}>
-                        <NavLink to={item.to}>
+                        <SidebarNavLink to={item.to}>
                           <item.icon />
                           <span>{item.label}</span>
-                        </NavLink>
+                        </SidebarNavLink>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   ))}
@@ -156,10 +173,10 @@ export function AppShell() {
                               asChild
                               isActive={isActiveRoute(location.pathname, "/connections/cloudflare/")}
                             >
-                              <NavLink to="/connections/cloudflare/">
+                              <SidebarNavLink to="/connections/cloudflare/">
                                 <CloudflareIcon />
                                 <span>Cloudflare</span>
-                              </NavLink>
+                              </SidebarNavLink>
                             </SidebarMenuSubButton>
                           </SidebarMenuSubItem>
                         </SidebarMenuSub>
@@ -207,10 +224,10 @@ export function AppShell() {
                   </SidebarMenuItem>
                   <SidebarMenuItem>
                     <SidebarMenuButton asChild isActive={isActiveRoute(location.pathname, "/webhooks/")} tooltip="Webhooks">
-                      <NavLink to="/webhooks/">
+                      <SidebarNavLink to="/webhooks/">
                         <WebhookIcon />
                         <span>Webhooks</span>
-                      </NavLink>
+                      </SidebarNavLink>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 </SidebarMenu>
