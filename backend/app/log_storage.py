@@ -208,6 +208,9 @@ class RequestLogStorage:
                 "CREATE INDEX IF NOT EXISTS idx_invoice_events_next_check ON invoice_events(next_check_at)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_invoice_events_created_at ON invoice_events(created_at)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created ON webhook_deliveries(created_at)"
             )
             conn.execute(
@@ -1368,7 +1371,9 @@ class RequestLogStorage:
             "sats_7d_msat": int(sats_7d_msat or 0),
         }
 
-    async def get_invoice_activity(self, days: int = 14, tz_offset_minutes: int = 0) -> List[Dict[str, int]]:
+    async def get_invoice_activity(
+        self, days: int = 14, tz_offset_minutes: int = 0
+    ) -> List[Dict[str, int | str]]:
         if days <= 0:
             return []
         offset_minutes = int(tz_offset_minutes or 0)
@@ -1381,7 +1386,7 @@ class RequestLogStorage:
         async with self._lock:
             try:
                 with self._connect() as conn:
-                    rows = conn.execute(
+                    settled_rows = conn.execute(
                         """
                         SELECT
                             COALESCE(settled_at, last_checked_at, created_at) AS settled_ts,
@@ -1392,12 +1397,22 @@ class RequestLogStorage:
                         """,
                         (start_iso,),
                     ).fetchall()
+                    created_rows = conn.execute(
+                        """
+                        SELECT created_at
+                        FROM invoice_events
+                        WHERE created_at >= ?
+                        """,
+                        (start_iso,),
+                    ).fetchall()
             except sqlite3.Error:
-                rows = []
+                settled_rows = []
+                created_rows = []
         local_series_start_date = local_start.date()
         totals: Dict[str, int] = {}
-        counts: Dict[str, int] = {}
-        for row in rows:
+        paid_counts: Dict[str, int] = {}
+        created_counts: Dict[str, int] = {}
+        for row in settled_rows:
             ts = row["settled_ts"]
             if not isinstance(ts, str):
                 continue
@@ -1411,11 +1426,25 @@ class RequestLogStorage:
             key = local_dt.date().isoformat()
             amount_msat = row["amount_msat"] or 0
             totals[key] = totals.get(key, 0) + int(amount_msat)
-            counts[key] = counts.get(key, 0) + 1
-        series: List[Dict[str, int]] = []
+            paid_counts[key] = paid_counts.get(key, 0) + 1
+        for row in created_rows:
+            ts = row["created_at"]
+            if not isinstance(ts, str):
+                continue
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            local_dt = dt - offset_delta
+            if local_dt.date() < local_series_start_date:
+                continue
+            key = local_dt.date().isoformat()
+            created_counts[key] = created_counts.get(key, 0) + 1
+        series: List[Dict[str, int | str]] = []
         for offset in range(days):
             day = (local_start + timedelta(days=offset)).date().isoformat()
             sats = totals.get(day, 0) // 1000
-            paid = counts.get(day, 0)
-            series.append({"date": day, "sats": sats, "paid": paid})
+            paid = paid_counts.get(day, 0)
+            created = created_counts.get(day, 0)
+            series.append({"date": day, "sats": sats, "paid": paid, "created": created})
         return series

@@ -1,23 +1,27 @@
+import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts"
 import { BadgeDollarSignIcon, GlobeIcon, ListChecksIcon, ReceiptTextIcon } from "lucide-react"
 
 import { EmptyPanel, LoadingRows, PageError, PageHeader } from "@/components/common"
+import { Area } from "@/components/dither-kit/area"
+import { AreaChart } from "@/components/dither-kit/area-chart"
+import { Grid } from "@/components/dither-kit/grid"
+import { Tooltip } from "@/components/dither-kit/tooltip"
+import { XAxis } from "@/components/dither-kit/x-axis"
+import { YAxis } from "@/components/dither-kit/y-axis"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-  type ChartConfig,
-} from "@/components/ui/chart"
-import { api } from "@/lib/api"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { api, type SummaryStats } from "@/lib/api"
 import { formatNumber, formatSats } from "@/lib/format"
 
-const chartConfig = {
-  sats: { label: "Sats", color: "var(--chart-1)" },
-  paid: { label: "Paid", color: "var(--chart-2)" },
-} satisfies ChartConfig
+const chartMetrics = {
+  sats: { label: "Sats routed", seriesLabel: "Sats", color: "orange", suffix: " sats" },
+  paid: { label: "Invoices paid", seriesLabel: "Paid", color: "green", suffix: "" },
+  created: { label: "Invoices created", seriesLabel: "Created", color: "blue", suffix: "" },
+} as const
+
+type ChartMetric = keyof typeof chartMetrics
 
 export function DashboardPage() {
   const summary = useQuery({
@@ -46,30 +50,88 @@ export function DashboardPage() {
           <Card>
             <CardHeader className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
               <div>
-                <CardTitle>Sats stacked</CardTitle>
-                <CardDescription>Settled invoice activity over the last 14 days.</CardDescription>
+                <CardTitle>Invoice activity</CardTitle>
+                <CardDescription>Created and paid invoices, plus routed sats, over the last 14 days.</CardDescription>
               </div>
               <Badge variant="secondary">{formatNumber(summary.data.invoices_total)} minted total</Badge>
             </CardHeader>
             <CardContent>
-              {summary.data.invoice_activity.some((item) => item.sats > 0 || item.paid > 0) ? (
-                <ChartContainer config={chartConfig} className="h-[280px] w-full">
-                  <AreaChart data={summary.data.invoice_activity} margin={{ left: 8, right: 8, top: 12, bottom: 0 }}>
-                    <CartesianGrid vertical={false} />
-                    <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={16} />
-                    <YAxis tickLine={false} axisLine={false} tickMargin={8} width={52} />
-                    <ChartTooltip content={<ChartTooltipContent indicator="line" />} />
-                    <Area dataKey="sats" type="monotone" stroke="var(--color-sats)" fill="var(--color-sats)" fillOpacity={0.2} />
-                  </AreaChart>
-                </ChartContainer>
+              {summary.data.invoice_activity.some((item) => item.sats > 0 || item.paid > 0 || item.created > 0) ? (
+                <DashboardChart activity={summary.data.invoice_activity} />
               ) : (
-                <EmptyPanel title="No paid activity yet" description="Settled invoices will render here once wallets start paying generated invoices." />
+                <EmptyPanel title="No invoice activity yet" description="Created and paid invoices will render here as wallets use generated invoices." />
               )}
             </CardContent>
           </Card>
         </div>
       ) : null}
     </>
+  )
+}
+
+export function DashboardChart({ activity }: { activity: SummaryStats["invoice_activity"] }) {
+  const [metric, setMetric] = useState<ChartMetric>("sats")
+  const selected = chartMetrics[metric]
+  const config = { [metric]: { label: selected.seriesLabel, color: selected.color } }
+
+  return (
+    <Tabs value={metric} onValueChange={(value) => setMetric(value as ChartMetric)}>
+      <TabsList aria-label="Chart metric" className="grid h-auto w-full grid-cols-3">
+        {Object.entries(chartMetrics).map(([key, item]) => (
+          <TabsTrigger key={key} value={key} className="h-auto min-h-12 whitespace-normal py-1.5 text-xs sm:text-sm">
+            {item.label}
+          </TabsTrigger>
+        ))}
+      </TabsList>
+      {(Object.keys(chartMetrics) as ChartMetric[]).map((panelMetric) => (
+        <TabsContent
+          key={panelMetric}
+          value={panelMetric}
+          forceMount
+          className={panelMetric === metric ? "mt-0" : "hidden"}
+        >
+          {panelMetric === metric ? (
+            <>
+              <div className="h-[280px] w-full">
+                <AreaChart
+                  data={activity}
+                  config={config}
+                  margins={{ left: 48, right: 8, top: 12, bottom: 24 }}
+                  bloom="aura"
+                  ariaLabel={`${selected.label} over the last 14 days`}
+                >
+                  <Grid horizontal />
+                  <XAxis dataKey="date" maxTicks={4} />
+                  <YAxis />
+                  <Tooltip
+                    labelKey="date"
+                    valueFormatter={(value) => `${formatNumber(value)}${selected.suffix}`}
+                  />
+                  <Area key={metric} dataKey={metric} variant="gradient" />
+                </AreaChart>
+              </div>
+              <table className="sr-only">
+                <caption>{selected.label} over the last 14 days</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Date</th>
+                    <th scope="col">{selected.label}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activity.map((item) => (
+                    <tr key={item.date}>
+                      <th scope="row">{item.date}</th>
+                      <td>{`${formatNumber(item[metric])}${selected.suffix}`}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          ) : null}
+        </TabsContent>
+      ))}
+    </Tabs>
   )
 }
 

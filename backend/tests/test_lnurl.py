@@ -1071,7 +1071,11 @@ def test_stats_summary_counts_recent_activity(test_client: TestClient):
     series = payload.get("invoice_activity")
     assert isinstance(series, list)
     assert len(series) == 14
-    assert all("date" in entry and "sats" in entry and "paid" in entry for entry in series)
+    assert all(
+        "date" in entry and "sats" in entry and "paid" in entry and "created" in entry
+        for entry in series
+    )
+    assert series[-1]["created"] >= 1
 
 
 def test_stats_summary_invoice_activity_respects_timezone_offset(test_client: TestClient):
@@ -1134,19 +1138,67 @@ def test_stats_summary_invoice_activity_respects_timezone_offset(test_client: Te
     base_resp = test_client.get("/api/stats/summary")
     assert base_resp.status_code == 200
     base_series = base_resp.json()["invoice_activity"]
-    base_active = [entry for entry in base_series if entry["sats"] > 0 or entry["paid"] > 0]
+    base_active = [
+        entry
+        for entry in base_series
+        if entry["sats"] > 0 or entry["paid"] > 0 or entry["created"] > 0
+    ]
     assert len(base_active) == 1
     assert base_active[0]["date"] == candidate.date().isoformat()
+    assert base_active[0]["created"] == 1
 
     offset_minutes = 300  # UTC-5
     offset_resp = test_client.get("/api/stats/summary", params={"tz_offset_minutes": offset_minutes})
     assert offset_resp.status_code == 200
     offset_series = offset_resp.json()["invoice_activity"]
-    offset_active = [entry for entry in offset_series if entry["sats"] > 0 or entry["paid"] > 0]
+    offset_active = [
+        entry
+        for entry in offset_series
+        if entry["sats"] > 0 or entry["paid"] > 0 or entry["created"] > 0
+    ]
     assert len(offset_active) == 1
     expected_local_date = (candidate - timedelta(minutes=offset_minutes)).date().isoformat()
     assert offset_active[0]["date"] == expected_local_date
+    assert offset_active[0]["created"] == 1
     loop.close()
+
+
+def test_invoice_activity_created_window_boundary_and_invalid_rows(test_client: TestClient):
+    storage = deps._get_log_storage()
+    now = datetime.now(tz=timezone.utc)
+    first_day = now.date() - timedelta(days=13)
+    first_included = datetime.combine(first_day, datetime.min.time(), tzinfo=timezone.utc)
+
+    with storage._connect() as conn:
+        for created_at, payment_hash in (
+            (first_included.isoformat(), "created-boundary"),
+            ((first_included - timedelta(microseconds=1)).isoformat(), "created-before-boundary"),
+            ("not-a-timestamp", "created-invalid"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO invoice_events (created_at, username, amount_msat, payment_hash)
+                VALUES (?, ?, ?, ?)
+                """,
+                (created_at, "bones", 2000, payment_hash),
+            )
+
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(invoice_events)").fetchall()
+        }
+
+    loop = asyncio.new_event_loop()
+    try:
+        activity = loop.run_until_complete(storage.get_invoice_activity(days=14))
+        empty_activity = loop.run_until_complete(storage.get_invoice_activity(days=0))
+    finally:
+        loop.close()
+
+    first_bucket = next(entry for entry in activity if entry["date"] == first_day.isoformat())
+    assert first_bucket["created"] == 1
+    assert sum(int(entry["created"]) for entry in activity) == 1
+    assert empty_activity == []
+    assert "idx_invoice_events_created_at" in indexes
 
 
 def test_invoice_events_are_persisted(test_client: TestClient):
