@@ -77,6 +77,12 @@ The connector starts from the current released `cloudflare/cloudflared:2026.7.3`
 
 Before a tunnel has been authorized, the connector may restart with backoff while waiting for `./secrets/cloudflared/tunnel.token`; this is expected. The Connections page distinguishes the installed connector capability from an authenticated, connected tunnel.
 
+The Compose stack also includes a dedicated Tailscale userspace sidecar, pinned to `tailscale/tailscale:v1.98.10` by immutable multi-platform digest. It uses a private daemon-state volume and a separate named control/status volume shared only with lnSwitchboard. The container has a read-only root filesystem, drops every Linux capability, enables `no-new-privileges`, publishes no host ports, and mounts neither `/dev/net/tun` nor the Docker socket.
+
+The runtime starts in Tailscale's `NeedsLogin` state and waits for lnSwitchboard's authenticated lifecycle controller. Authorization is intentionally absent from Compose: no OAuth client, API token, or reusable auth key is accepted through environment variables. Control is restricted to fixed marker operations, and the only user-derived runtime value is a separately validated single-label device name. Normal onboarding deletes authorization output immediately; a five-minute fallback removes it if the application exits before cleanup.
+
+Funnel is hard-coded to public HTTPS port `443` with the local destination `http://127.0.0.1:21212`. Because the sidecar shares only lnSwitchboard's network namespace, this reaches the public application listener and never exposes the administration listener on `22121`. A tailnet must have MagicDNS and HTTPS certificates enabled, and its policy must grant `tag:lnswitchboard` the `funnel` node attribute. The runtime reports missing prerequisites but never modifies tailnet policy.
+
 Open **Connections → Cloudflare** to onboard a hostname. No OAuth client, callback URL, or Cloudflare application registration is required. Follow the link in the page to [create a custom API token](https://dash.cloudflare.com/profile/api-tokens) with only these permissions:
 
 - Account / Cloudflare Tunnel / Edit

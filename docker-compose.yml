@@ -18,8 +18,12 @@ services:
       CLOUDFLARED_METRICS_URL: http://cloudflared:2000
       CLOUDFLARED_ORIGIN_URL: http://lnswitchboard:21212
       CLOUDFLARED_TOKEN_GID: "${CLOUDFLARED_TOKEN_GID:-0}"
+      TAILSCALE_CONNECTOR_ENABLED: "true"
+      TAILSCALE_CONTROL_DIR: /app/secrets/tailscale/control
+      TAILSCALE_STATUS_DIR: /app/secrets/tailscale/status
     volumes:
       - ./secrets:/app/secrets:rw
+      - tailscale-control:/app/secrets/tailscale
       - ${APP_LIGHTNING_NODE_DATA_DIR:-/app-data/lightning/data/lnd}:/lnd:ro
     ports:
       - "${LNSWITCHBOARD_BIND_ADDRESS:-127.0.0.1}:22121:22121"
@@ -52,3 +56,42 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  tailscale:
+    image: tailscale/tailscale:v1.98.10@sha256:cdf5612ded5be1344f1a704b8c5e53496db97376bb533e5e15f141e48bf60cc0
+    container_name: lnswitchboard-tailscale
+    entrypoint: ["/usr/local/bin/lnswitchboard-tailscale-supervisor"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      lnswitchboard:
+        condition: service_healthy
+    network_mode: service:lnswitchboard
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_USERSPACE: "true"
+      TS_CONTROL_DIR: /run/lnswitchboard/control
+      TS_STATUS_DIR: /run/lnswitchboard/status
+      TS_LOGIN_RETENTION_SECONDS: "300"
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - tailscale-control:/run/lnswitchboard
+      - ./deploy/tailscale/supervisor.sh:/usr/local/bin/lnswitchboard-tailscale-supervisor:ro
+    tmpfs:
+      - /var/run/tailscale:mode=0750
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /var/run/tailscale/tailscaled.sock"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  tailscale-state:
+  tailscale-control:
