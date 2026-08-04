@@ -1,0 +1,6 @@
+# Ruff 0.16 expanded its implicit defaults from 59 to 413 rules. Keep the
+# repository's established lint contract explicit so tool upgrades do not silently
+# redefine policy; additional rule families can be adopted in focused changes.
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
