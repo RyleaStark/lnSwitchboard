@@ -158,6 +158,14 @@ class Settings(BaseSettings):
         env="CLOUDFLARED_CONNECTOR_ENABLED",
         default=False,
     )
+    cloudflared_token_path: Path = _env_field(
+        env="CLOUDFLARED_TOKEN_PATH",
+        default=Path("secrets/cloudflared/tunnel.token"),
+    )
+    cloudflared_metrics_url: str = _env_field(
+        env="CLOUDFLARED_METRICS_URL",
+        default="http://cloudflared:2000",
+    )
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     trusted_proxy_cidrs: str = _env_field(env="TRUSTED_PROXY_CIDRS", default="")
     trusted_hosts: str = _env_field(env="TRUSTED_HOSTS", default="localhost,127.0.0.1,[::1]")
@@ -178,6 +186,7 @@ class Settings(BaseSettings):
         "lnd_tls_path",
         "data_store_path",
         "connection_secret_key_path",
+        "cloudflared_token_path",
         "macaroon_store_path",
         "nostr_zap_secret_path",
         mode="before",

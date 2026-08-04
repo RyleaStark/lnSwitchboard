@@ -71,6 +71,12 @@ Then run:
 docker compose up -d
 ```
 
+The Compose stack includes a separate, unprivileged `cloudflared` connector. It has no host-published ports, Docker socket, privileged mode, host networking, or additional Linux capabilities. lnSwitchboard writes its tunnel token under `./secrets/cloudflared`; the connector mounts only that subdirectory read-only and can reach only the public application listener at `lnswitchboard:21212` through tunnel configuration managed by the app.
+
+The connector starts from the current released `cloudflare/cloudflared:2026.7.3` image pinned to its immutable multi-platform digest. Its image entrypoint is overridden to allow cloudflared's built-in updater to check every 24 hours. Runtime binary updates survive normal container restarts and host reboots, but recreating the container restores the pinned image and cloudflared checks for updates again. Dependabot also keeps the reviewed version and digest current in this repository.
+
+Before a tunnel has been authorized, the connector may restart with backoff while waiting for `./secrets/cloudflared/tunnel.token`; this is expected. The Connections page distinguishes the installed connector capability from an authenticated, connected tunnel.
+
 Compose binds both listeners to loopback by default. Port `22121` serves only the administration UI and API. The application allows direct loopback/RFC1918 LAN clients (plus IPv6 ULA/link-local clients) and returns `403` to WAN peers. In an Umbrel environment, a peer in `TRUSTED_PROXY_CIDRS` is treated as Umbrel's authenticated `app_proxy`; outside Umbrel, a trusted proxy may forward administration only for a LAN-origin client. Port `21212` serves only LNURL-pay and NIP-05 routes, so a self-hosted nginx or other public reverse proxy can forward directly to that listener. Override `LNSWITCHBOARD_BIND_ADDRESS` or `LNSWITCHBOARD_PUBLIC_BIND_ADDRESS` only when the corresponding listener must bind another host interface.
 
 Requests on port `21212` use the direct `Host` value, or forwarding headers from peers listed in `TRUSTED_PROXY_CIDRS`. The resolved domain must match the domain of at least one configured Lightning Address or Nostr identity; otherwise the public listener returns `404`.
