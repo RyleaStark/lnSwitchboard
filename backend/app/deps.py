@@ -7,6 +7,8 @@ from functools import lru_cache
 from fastapi import Depends, HTTPException, Request, status
 
 from .config import Settings, get_settings
+from .connection_secret_store import ConnectionSecretStore
+from .connection_store import ConnectionStore
 from .ln_address_store import LNAddressStore
 from .ln_client import LNClient
 from .log_storage import LogEntry, RequestLogStorage
@@ -59,6 +61,17 @@ def _get_nip05_store() -> NostrIdentityStore:
 def _get_ln_address_store() -> LNAddressStore:
     settings = get_settings()
     return LNAddressStore(settings.data_store_path)
+
+
+@lru_cache()
+def _get_connection_store() -> ConnectionStore:
+    return ConnectionStore(get_settings().data_store_path)
+
+
+@lru_cache()
+def _get_connection_secret_store() -> ConnectionSecretStore:
+    settings = get_settings()
+    return ConnectionSecretStore(settings.data_store_path, settings.connection_secret_key_path)
 
 
 @lru_cache()
@@ -129,6 +142,14 @@ async def get_nip05_store_dep() -> NostrIdentityStore:
 
 async def get_ln_address_store_dep() -> LNAddressStore:
     return _get_ln_address_store()
+
+
+async def get_connection_store_dep() -> ConnectionStore:
+    return _get_connection_store()
+
+
+async def get_connection_secret_store_dep() -> ConnectionSecretStore:
+    return _get_connection_secret_store()
 
 
 async def get_webhook_dispatcher_dep() -> WebhookDispatcher:

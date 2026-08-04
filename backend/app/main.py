@@ -28,6 +28,7 @@ from .logging_utils import configure_logging
 from .macaroon_store import MacaroonNotConfiguredError
 from .nip05_store import NostrIdentityStore
 from .request_utils import get_public_domain, get_public_host
+from .routers import connections as connections_router
 from .routers import ln_addresses as ln_addresses_router
 from .routers import lnurl as lnurl_router
 from .routers import nip05 as nip05_router
@@ -271,6 +272,7 @@ _add_request_security(admin_app)
 _add_request_security(public_app)
 
 admin_app.include_router(ui_router.router)
+admin_app.include_router(connections_router.router)
 admin_app.include_router(webhooks_router.router)
 admin_app.include_router(ln_addresses_router.api_router)
 admin_app.include_router(nip05_router.api_router)

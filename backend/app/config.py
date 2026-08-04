@@ -150,6 +150,14 @@ class Settings(BaseSettings):
     recent_log_limit: int = _env_field(env="RECENT_LOG_LIMIT", default=50)
     log_retention_days: int = _env_field(env="LOG_RETENTION_DAYS", default=180)
     data_store_path: Path = _env_field(env="DATA_STORE_PATH", default=Path("secrets/lnswitchboard.db"))
+    connection_secret_key_path: Path = _env_field(
+        env="CONNECTION_SECRET_KEY_PATH",
+        default=Path("secrets/connection-secrets.key"),
+    )
+    cloudflared_connector_enabled: bool = _env_field(
+        env="CLOUDFLARED_CONNECTOR_ENABLED",
+        default=False,
+    )
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     trusted_proxy_cidrs: str = _env_field(env="TRUSTED_PROXY_CIDRS", default="")
     trusted_hosts: str = _env_field(env="TRUSTED_HOSTS", default="localhost,127.0.0.1,[::1]")
@@ -166,7 +174,14 @@ class Settings(BaseSettings):
         default=Path("secrets/nostr_zap_signer.hex"),
     )
 
-    @field_validator("lnd_tls_path", "data_store_path", "macaroon_store_path", "nostr_zap_secret_path", mode="before")
+    @field_validator(
+        "lnd_tls_path",
+        "data_store_path",
+        "connection_secret_key_path",
+        "macaroon_store_path",
+        "nostr_zap_secret_path",
+        mode="before",
+    )
     @classmethod
     def _expand_path(cls, value: Optional[str | Path]) -> Path:
         if value is None:
