@@ -26,7 +26,15 @@ export type SummaryStats = {
   invoices_paid_24h: number
   total_sats_routed: number
   sats_routed_7d: number
-  invoice_activity: Array<{ date: string; sats: number; paid: number; created: number }>
+  invoice_activity: Array<{
+    date: string
+    sats: number
+    paid: number
+    created: number
+    pending: number
+    settled: number
+    expired: number
+  }>
 }
 
 export type RequestLog = {

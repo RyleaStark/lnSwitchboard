@@ -1399,7 +1399,7 @@ class RequestLogStorage:
                     ).fetchall()
                     created_rows = conn.execute(
                         """
-                        SELECT created_at
+                        SELECT created_at, settled, expired
                         FROM invoice_events
                         WHERE created_at >= ?
                         """,
@@ -1412,6 +1412,9 @@ class RequestLogStorage:
         totals: Dict[str, int] = {}
         paid_counts: Dict[str, int] = {}
         created_counts: Dict[str, int] = {}
+        pending_state_counts: Dict[str, int] = {}
+        paid_state_counts: Dict[str, int] = {}
+        expired_state_counts: Dict[str, int] = {}
         for row in settled_rows:
             ts = row["settled_ts"]
             if not isinstance(ts, str):
@@ -1440,11 +1443,30 @@ class RequestLogStorage:
                 continue
             key = local_dt.date().isoformat()
             created_counts[key] = created_counts.get(key, 0) + 1
+            if bool(row["settled"]):
+                paid_state_counts[key] = paid_state_counts.get(key, 0) + 1
+            elif bool(row["expired"]):
+                expired_state_counts[key] = expired_state_counts.get(key, 0) + 1
+            else:
+                pending_state_counts[key] = pending_state_counts.get(key, 0) + 1
         series: List[Dict[str, int | str]] = []
         for offset in range(days):
             day = (local_start + timedelta(days=offset)).date().isoformat()
             sats = totals.get(day, 0) // 1000
             paid = paid_counts.get(day, 0)
             created = created_counts.get(day, 0)
-            series.append({"date": day, "sats": sats, "paid": paid, "created": created})
+            pending = pending_state_counts.get(day, 0)
+            settled = paid_state_counts.get(day, 0)
+            expired = expired_state_counts.get(day, 0)
+            series.append(
+                {
+                    "date": day,
+                    "sats": sats,
+                    "paid": paid,
+                    "created": created,
+                    "pending": pending,
+                    "settled": settled,
+                    "expired": expired,
+                }
+            )
         return series

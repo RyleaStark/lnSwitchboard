@@ -1163,6 +1163,75 @@ def test_stats_summary_invoice_activity_respects_timezone_offset(test_client: Te
     loop.close()
 
 
+def test_stats_summary_invoice_activity_groups_current_states_by_creation_day(
+    test_client: TestClient,
+):
+    storage = deps._get_log_storage()
+    now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+    created_at = (now - timedelta(days=1)).isoformat()
+    settled_at = now.isoformat()
+
+    with storage._connect() as conn:
+        conn.execute("DELETE FROM invoice_events")
+        for index, (payment_hash, settled, expired) in enumerate(
+            (
+                ("state-pending", 0, 0),
+                ("state-paid", 1, 0),
+                ("state-expired", 0, 1),
+                ("state-paid-precedence", 1, 1),
+            ),
+            start=1,
+        ):
+            conn.execute(
+                """
+                INSERT INTO invoice_events (
+                    created_at, username, amount_msat, payment_hash,
+                    settled, expired, settled_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    created_at,
+                    "bones",
+                    index * 1000,
+                    payment_hash,
+                    settled,
+                    expired,
+                    settled_at if settled else None,
+                ),
+            )
+
+    response = test_client.get("/api/stats/summary")
+
+    assert response.status_code == 200
+    activity = response.json()["invoice_activity"]
+    creation_day = activity[-2]
+    settlement_day = activity[-1]
+
+    assert creation_day == {
+        "date": (now - timedelta(days=1)).date().isoformat(),
+        "sats": 0,
+        "paid": 0,
+        "created": 4,
+        "pending": 1,
+        "settled": 2,
+        "expired": 1,
+    }
+    assert (
+        creation_day["pending"] + creation_day["settled"] + creation_day["expired"]
+        == creation_day["created"]
+    )
+    assert settlement_day == {
+        "date": now.date().isoformat(),
+        "sats": 6,
+        "paid": 2,
+        "created": 0,
+        "pending": 0,
+        "settled": 0,
+        "expired": 0,
+    }
+
+
 def test_invoice_activity_created_window_boundary_and_invalid_rows(test_client: TestClient):
     storage = deps._get_log_storage()
     now = datetime.now(tz=timezone.utc)

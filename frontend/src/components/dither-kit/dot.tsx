@@ -36,6 +36,7 @@ export function Dot({
   const band = ctx.bands[dataKey]
   if (!ctx.ready || !band) return null
   const paint = dotPaint(variant, seed)
+  const y = ctx.yForKey(dataKey)
 
   return (
     // Fade in once the fill has drawn so dots don't float over the entrance.
@@ -51,7 +52,7 @@ export function Dot({
           // biome-ignore lint/suspicious/noArrayIndexKey: index is the stable x position
           key={i}
           cx={ctx.xCenter(i) ?? 0}
-          cy={ctx.y(b[1])}
+          cy={y(b[1])}
           r={r}
         />
       ))}
@@ -76,7 +77,7 @@ export function ActiveDot({
   if (!b) return null
   const paint = dotPaint(variant, seed)
   const cx = ctx.xCenter(ctx.hoverIndex)
-  const cy = ctx.y(b[1])
+  const cy = ctx.yForKey(dataKey)(b[1])
 
   return (
     <g>

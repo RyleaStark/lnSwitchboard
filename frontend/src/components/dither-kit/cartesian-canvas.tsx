@@ -300,7 +300,15 @@ export function CartesianCanvas() {
 
   const { width, height } = ctx.plot
   const { cols, rows } = backingSize(width, height)
-  const { ready, chartType, configKeys, bands, seriesSpecs, y, dataLength } = ctx
+  const {
+    ready,
+    chartType,
+    configKeys,
+    bands,
+    seriesSpecs,
+    yForKey,
+    dataLength,
+  } = ctx
 
   // Memoized: the pricey bit in the render path — a `resample` per series to
   // the backing column count. The canvas re-renders on every hover/cursor tick
@@ -310,20 +318,34 @@ export function CartesianCanvas() {
     const out: Record<string, Surface> = {}
     if (!ready) return out
     const h = height || 1
-    const glow = Math.max(6, Math.round(rows * 0.16))
+    const defaultGlow = Math.max(6, Math.round(rows * 0.16))
     const defaultKind = chartType === "line" ? "line" : "area"
     for (const key of configKeys) {
       const band = bands[key]
       if (!band) continue
+      const y = yForKey(key)
       const line = (seriesSpecs[key]?.kind ?? defaultKind) === "line"
+      const lineGlow = seriesSpecs[key]?.lineGlowWidth ?? defaultGlow
       const top = band.map((b) => (y(b[1]) / h) * (rows - 1))
       const floor = band.map((b, i) =>
-        line ? Math.min(rows - 1, top[i] + glow) : (y(b[0]) / h) * (rows - 1)
+        line
+          ? Math.min(rows - 1, top[i] + lineGlow)
+          : (y(b[0]) / h) * (rows - 1)
       )
       out[key] = { top: resample(top, cols), floor: resample(floor, cols) }
     }
     return out
-  }, [ready, chartType, configKeys, bands, seriesSpecs, y, height, rows, cols])
+  }, [
+    ready,
+    chartType,
+    configKeys,
+    bands,
+    seriesSpecs,
+    yForKey,
+    height,
+    rows,
+    cols,
+  ])
 
   // Memoized: the star field is deterministic — only its shape (series ×
   // column count) matters, so it need not be rebuilt on unrelated re-renders.
