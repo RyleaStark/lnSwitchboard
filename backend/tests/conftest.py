@@ -5,18 +5,23 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from urllib.parse import urlsplit
 
 import asyncio
 import httpx
 import pytest
 
 from backend.app import config
-from backend.app.main import app
+from backend.app.main import (
+    admin_app,
+    public_app,
+    require_configured_public_domain,
+)
 
 
 class SimpleTestClient:
-    def __init__(self, app):
-        self.app = app
+    def __init__(self):
+        self.app = admin_app
 
     def __enter__(self):
         return self
@@ -25,8 +30,11 @@ class SimpleTestClient:
         return False
 
     async def _request_async(self, method: str, url: str, **kwargs):
+        is_public = urlsplit(url).path.startswith("/.well-known/")
+        target_app = public_app if is_public else admin_app
+        client_address = ("127.0.0.1", 54321) if is_public else ("192.168.50.10", 54321)
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=self.app),
+            transport=httpx.ASGITransport(app=target_app, client=client_address),
             base_url="http://testserver",
             headers={"user-agent": "testclient"},
         ) as client:
@@ -206,7 +214,11 @@ def test_client(monkeypatch) -> SimpleTestClient:
         "backend.app.ln_client.LNClient.list_channels", fake_list_channels
     )
 
-    with SimpleTestClient(app) as client:
-        client.app.state.test_invoice_calls = call_log
-        client.app.state.invoice_store = invoice_store
-        yield client
+    public_app.dependency_overrides[require_configured_public_domain] = lambda: None
+    try:
+        with SimpleTestClient() as client:
+            client.app.state.test_invoice_calls = call_log
+            client.app.state.invoice_store = invoice_store
+            yield client
+    finally:
+        public_app.dependency_overrides.pop(require_configured_public_domain, None)

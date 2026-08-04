@@ -9,7 +9,7 @@ describe("proxy deployment snippets", () => {
   it("defaults to docker localhost when DEP_ENV is not supplied", () => {
     expect(normalizeDeploymentEnv(undefined)).toBe("DOCKER")
     expect(proxyHostForDeployment(undefined)).toBe("127.0.0.1")
-    expect(proxyUpstreamForDeployment(undefined)).toBe("127.0.0.1:22121")
+    expect(proxyUpstreamForDeployment(undefined)).toBe("127.0.0.1:21212")
   })
 
   it("maps Umbrel deployment names to app container hosts", () => {
@@ -20,14 +20,16 @@ describe("proxy deployment snippets", () => {
   it("renders snippets using the selected deployment upstream", () => {
     const snippets = buildProxyHelpItems("UMBREL-DEV", "pay.example.com")
     expect(snippets.find((item) => item.label === "NGINX")?.snippet).toContain(
-      "http://extended-umbrella-lnswitchboard_app_1:22121",
+      "http://extended-umbrella-lnswitchboard_app_1:21212",
     )
     expect(snippets.find((item) => item.label === "Caddy")?.snippet).toContain(
       "pay.example.com",
     )
     expect(snippets.find((item) => item.label === "Cloudflare Tunnel")?.snippet).toContain(
-      "service: http://extended-umbrella-lnswitchboard_app_1:22121",
+      "service: http://extended-umbrella-lnswitchboard_app_1:21212",
     )
-    expect(snippets.map((item) => item.snippet).join("\n")).not.toContain("lnprofile")
+    const combined = snippets.map((item) => item.snippet).join("\n")
+    expect(combined).not.toContain(":22121")
+    expect(combined).not.toContain("lnprofile")
   })
 })

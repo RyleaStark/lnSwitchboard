@@ -100,6 +100,9 @@ class NostrIdentityStore:
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_nostr_identity_lookup ON nostr_identities(local_part, domain)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nostr_identity_domain ON nostr_identities(domain)"
+            )
 
     def _norm(self, value: str) -> str:
         return value.strip().lower()
@@ -264,3 +267,16 @@ class NostrIdentityStore:
                 return []
         records = [self._row_to_dict(row) for row in rows]
         return deepcopy(records)
+
+    async def has_domain(self, domain: str) -> bool:
+        normalized_domain = self._norm(domain)
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        "SELECT 1 FROM nostr_identities WHERE domain = ? LIMIT 1",
+                        (normalized_domain,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return False
+        return row is not None

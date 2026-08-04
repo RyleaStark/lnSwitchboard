@@ -114,7 +114,16 @@ class Settings(BaseSettings):
         env_ignore_empty=True,
     )
 
+    service_host: str = _env_field(
+        env=("SERVICE_HOST", "LNSWITCHBOARD_BIND_ADDRESS"),
+        default="127.0.0.1",
+    )
     service_port: int = _env_field(env="SERVICE_PORT", default=22121)
+    public_service_host: str = _env_field(
+        env=("PUBLIC_SERVICE_HOST", "LNSWITCHBOARD_PUBLIC_BIND_ADDRESS"),
+        default="127.0.0.1",
+    )
+    public_service_port: int = _env_field(env="PUBLIC_SERVICE_PORT", default=21212)
     dep_env: str = _env_field(env="DEP_ENV", default="DOCKER")
     lnd_host: str = _env_field(env="LND_HOST", default=...)
     lnd_grpc_port: int = _env_field(env="LND_GRPC_PORT", default=10009)

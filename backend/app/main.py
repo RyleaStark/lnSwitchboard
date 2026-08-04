@@ -1,29 +1,38 @@
-"""FastAPI application entrypoint."""
+"""FastAPI applications for the administrative and public listeners."""
 
 from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from ipaddress import ip_address
+from ipaddress import IPv6Address, ip_address, ip_network
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import grpc
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
-from .deps import get_ln_client_dep, get_log_storage_dep, get_webhook_dispatcher_dep
+from .deps import (
+    get_ln_address_store_dep,
+    get_ln_client_dep,
+    get_log_storage_dep,
+    get_nip05_store_dep,
+    get_webhook_dispatcher_dep,
+)
+from .invoice_worker import InvoiceFullRefreshWorker, InvoiceSubscriptionWorker
+from .ln_address_store import LNAddressStore
 from .logging_utils import configure_logging
-from .request_utils import get_public_host
+from .macaroon_store import MacaroonNotConfiguredError
+from .nip05_store import NostrIdentityStore
+from .request_utils import get_public_domain, get_public_host
 from .routers import ln_addresses as ln_addresses_router
 from .routers import lnurl as lnurl_router
 from .routers import nip05 as nip05_router
 from .routers import ui as ui_router
 from .routers import webhooks as webhooks_router
-from .macaroon_store import MacaroonNotConfiguredError
-from .invoice_worker import InvoiceSubscriptionWorker, InvoiceFullRefreshWorker
 from .version import get_version
 
 LOGGER = logging.getLogger("lnswitchboard")
@@ -42,6 +51,18 @@ FORWARDED_HEADERS = frozenset(
         b"x-real-ip",
     }
 )
+ADMIN_LAN_NETWORKS = tuple(
+    ip_network(network)
+    for network in (
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )
+)
 
 
 def _host_is_trusted(host_header: str, trusted_hosts: tuple[str, ...]) -> bool:
@@ -52,6 +73,66 @@ def _host_is_trusted(host_header: str, trusted_hosts: tuple[str, ...]) -> bool:
         or (pattern.startswith("*.") and hostname.endswith(pattern[1:]) and hostname != pattern[2:])
         for pattern in trusted_hosts
     )
+
+
+def _normalized_address(value: str):
+    address = ip_address(value)
+    if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
+
+
+def _is_lan_address(value: str) -> bool:
+    try:
+        address = _normalized_address(value)
+    except ValueError:
+        return False
+    return any(
+        address in network
+        for network in ADMIN_LAN_NETWORKS
+        if address.version == network.version
+    )
+
+
+def _is_trusted_proxy(value: str, cidrs: str) -> bool:
+    try:
+        address = _normalized_address(value)
+    except ValueError:
+        return False
+    return any(
+        address in network
+        for network in parse_trusted_proxy_cidrs(cidrs)
+        if address.version == network.version
+    )
+
+
+def _parse_forwarded_ip(value: str):
+    cleaned = value.strip().strip('"')
+    if cleaned.startswith("[") and "]" in cleaned:
+        cleaned = cleaned[1 : cleaned.index("]")]
+    elif cleaned.count(":") == 1:
+        host, maybe_port = cleaned.rsplit(":", 1)
+        if maybe_port.isdigit():
+            cleaned = host
+    return _normalized_address(cleaned)
+
+
+def _get_admin_proxy_client(request: Request, cidrs: str) -> str | None:
+    """Resolve X-Forwarded-For from right to left across local trusted proxies."""
+
+    raw_chain = request.headers.get("x-forwarded-for")
+    peer = request.client.host if request.client else ""
+    if not raw_chain or not _is_trusted_proxy(peer, cidrs) or not _is_lan_address(peer):
+        return None
+    try:
+        current = _normalized_address(peer)
+        for raw_candidate in reversed(raw_chain.split(",")):
+            if not _is_trusted_proxy(str(current), cidrs) or not _is_lan_address(str(current)):
+                break
+            current = _parse_forwarded_ip(raw_candidate)
+    except ValueError:
+        return None
+    return str(current)
 
 
 @asynccontextmanager
@@ -105,49 +186,104 @@ async def lifespan(app: FastAPI):
     await ln_client.close()
 
 
-app = FastAPI(
+def _add_request_security(target_app: FastAPI) -> None:
+    @target_app.middleware("http")
+    async def discard_untrusted_proxy_headers(request: Request, call_next):
+        """Honor forwarding headers only when the immediate peer is trusted."""
+
+        settings = get_settings()
+        trusted_networks = parse_trusted_proxy_cidrs(settings.trusted_proxy_cidrs)
+        client_host = request.client.host if request.client else ""
+        try:
+            client_ip = ip_address(client_host)
+        except ValueError:
+            client_ip = None
+        if client_ip is None or not any(client_ip in network for network in trusted_networks):
+            request.scope["headers"] = [
+                (name, value)
+                for name, value in request.scope["headers"]
+                if name.lower() not in FORWARDED_HEADERS
+            ]
+        trusted_hosts = parse_trusted_hosts(settings.trusted_hosts)
+        if not _host_is_trusted(request.headers.get("host", ""), trusted_hosts) or not _host_is_trusted(
+            get_public_host(request), trusted_hosts
+        ):
+            return PlainTextResponse("Invalid host header", status_code=400)
+        return await call_next(request)
+
+
+def _add_admin_access_control(target_app: FastAPI) -> None:
+    @target_app.middleware("http")
+    async def restrict_admin_to_lan_or_umbrel_proxy(request: Request, call_next):
+        """Keep administration off WAN while allowing Umbrel's authenticated proxy."""
+
+        settings = get_settings()
+        peer = request.client.host if request.client else ""
+        peer_is_proxy = _is_trusted_proxy(peer, settings.trusted_proxy_cidrs)
+
+        if (
+            settings.dep_env.upper() in {"UMBREL", "UMBREL-DEV"}
+            and peer_is_proxy
+            and _is_lan_address(peer)
+        ):
+            return await call_next(request)
+        if peer_is_proxy:
+            proxy_client = _get_admin_proxy_client(request, settings.trusted_proxy_cidrs)
+            if proxy_client is not None and _is_lan_address(proxy_client):
+                return await call_next(request)
+            return PlainTextResponse("Forbidden", status_code=status.HTTP_403_FORBIDDEN)
+        if _is_lan_address(peer):
+            return await call_next(request)
+        return PlainTextResponse("Forbidden", status_code=status.HTTP_403_FORBIDDEN)
+
+
+async def require_configured_public_domain(
+    request: Request,
+    address_store: LNAddressStore = Depends(get_ln_address_store_dep),
+    identity_store: NostrIdentityStore = Depends(get_nip05_store_dep),
+) -> None:
+    """Require the resolved public domain to exist in either public registry."""
+
+    domain = get_public_domain(request)
+    if domain and (
+        await address_store.has_domain(domain)
+        or await identity_store.has_domain(domain)
+    ):
+        return
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+
+admin_app = FastAPI(
     title="lnSwitchboard",
     version=get_version(),
     lifespan=lifespan,
 )
+public_app = FastAPI(
+    title="lnSwitchboard Public",
+    version=get_version(),
+    dependencies=[Depends(require_configured_public_domain)],
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+_add_admin_access_control(admin_app)
+_add_request_security(admin_app)
+_add_request_security(public_app)
 
+admin_app.include_router(ui_router.router)
+admin_app.include_router(webhooks_router.router)
+admin_app.include_router(ln_addresses_router.api_router)
+admin_app.include_router(nip05_router.api_router)
 
-@app.middleware("http")
-async def discard_untrusted_proxy_headers(request: Request, call_next):
-    """Honor forwarding headers only when the immediate peer is trusted."""
+public_app.include_router(nip05_router.public_router)
+public_app.include_router(lnurl_router.router)
 
-    settings = get_settings()
-    trusted_networks = parse_trusted_proxy_cidrs(settings.trusted_proxy_cidrs)
-    client_host = request.client.host if request.client else ""
-    try:
-        client_ip = ip_address(client_host)
-    except ValueError:
-        client_ip = None
-    if client_ip is None or not any(client_ip in network for network in trusted_networks):
-        request.scope["headers"] = [
-            (name, value)
-            for name, value in request.scope["headers"]
-            if name.lower() not in FORWARDED_HEADERS
-        ]
-    trusted_hosts = parse_trusted_hosts(settings.trusted_hosts)
-    if not _host_is_trusted(request.headers.get("host", ""), trusted_hosts) or not _host_is_trusted(
-        get_public_host(request), trusted_hosts
-    ):
-        return PlainTextResponse("Invalid host header", status_code=400)
-    return await call_next(request)
-
-app.include_router(ui_router.router)
-app.include_router(webhooks_router.router)
-app.include_router(ln_addresses_router.api_router)
-app.include_router(nip05_router.api_router)
-app.include_router(nip05_router.public_router)
-app.include_router(lnurl_router.router)
 
 def _register_client_redirect(path: str) -> None:
     target = f"{path.strip('/')}/"
     target = f"/{target}" if not target.startswith("/") else target
 
-    @app.get(path, include_in_schema=False)
+    @admin_app.get(path, include_in_schema=False)
     async def _redirect_to_trailing_slash() -> RedirectResponse:
         return RedirectResponse(url=target, status_code=307)
 
@@ -156,13 +292,37 @@ for _client_path in ("/logs", "/liquidity", "/settings", "/identities", "/addres
     _register_client_redirect(_client_path)
 
 if STATIC_DIR.exists():
-    @app.get("/", include_in_schema=False)
+    @admin_app.get("/", include_in_schema=False)
     async def _spa_root() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
     for _spa_path in SPA_ROUTES:
-        @app.get(_spa_path, include_in_schema=False)
+        @admin_app.get(_spa_path, include_in_schema=False)
         async def _spa_route() -> FileResponse:
             return FileResponse(STATIC_DIR / "index.html")
 
-    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+    admin_app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+
+class ListenerDispatchApp:
+    """Dispatch requests to route-isolated ASGI apps by local listener port."""
+
+    def __init__(self, *, admin: ASGIApp, public: ASGIApp) -> None:
+        self.admin = admin
+        self.public = public
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        server = scope.get("server")
+        is_public_request = (
+            scope["type"] in {"http", "websocket"}
+            and server is not None
+            and server[1] == get_settings().public_service_port
+        )
+        target = self.public if is_public_request else self.admin
+        await target(scope, receive, send)
+
+
+app = ListenerDispatchApp(
+    admin=admin_app,
+    public=public_app,
+)

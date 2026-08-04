@@ -44,8 +44,8 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 
 ### 🚀 Umbrel
 1. Open the Umbrel App Store and search for **“lnSwitchboard.”**
-2. Click **Install** and wait for Umbrel to launch the container on port `22121`.
-3. Visit `http://umbrel.local:22121/` (or your Umbrel’s IP) and follow the proxy instructions to point `/.well-known/lnurlp/` at the service.
+2. Click **Install** and wait for Umbrel to launch lnSwitchboard.
+3. Open lnSwitchboard from the Umbrel dashboard. Umbrel's authenticated `app_proxy` reaches the administration listener on port `22121`; public connectors use port `21212` directly on the private app network.
 
 Umbrel keeps lnSwitchboard updated automatically, so you always receive the latest features and security fixes.
 
@@ -71,7 +71,9 @@ Then run:
 docker compose up -d
 ```
 
-Compose binds port `22121` to loopback by default. Set `LNSWITCHBOARD_BIND_ADDRESS` only when the service must listen on another host interface. Once the service is running, point your reverse proxy so that only `/.well-known/lnurlp/*` and `/.well-known/nostr.json` are internet-facing. Keep the dashboard and `/api/*` routes behind a VPN, SSH tunnel, or HTTP auth. The admin API is same-origin by default and deliberately does not grant cross-origin browser access.
+Compose binds both listeners to loopback by default. Port `22121` serves only the administration UI and API. The application allows direct loopback/RFC1918 LAN clients (plus IPv6 ULA/link-local clients) and returns `403` to WAN peers. In an Umbrel environment, a peer in `TRUSTED_PROXY_CIDRS` is treated as Umbrel's authenticated `app_proxy`; outside Umbrel, a trusted proxy may forward administration only for a LAN-origin client. Port `21212` serves only LNURL-pay and NIP-05 routes, so a self-hosted nginx or other public reverse proxy can forward directly to that listener. Override `LNSWITCHBOARD_BIND_ADDRESS` or `LNSWITCHBOARD_PUBLIC_BIND_ADDRESS` only when the corresponding listener must bind another host interface.
+
+Requests on port `21212` use the direct `Host` value, or forwarding headers from peers listed in `TRUSTED_PROXY_CIDRS`. The resolved domain must match the domain of at least one configured Lightning Address or Nostr identity; otherwise the public listener returns `404`.
 
 Set `TRUSTED_HOSTS` to every hostname that may serve lnSwitchboard (comma-separated; `*.example.com` wildcards are supported). Requests with any other `Host` value are rejected, which protects a loopback deployment from DNS rebinding. Forwarding headers are ignored unless the immediate reverse proxy is explicitly listed in `TRUSTED_PROXY_CIDRS` (comma-separated IPs or CIDR ranges). Configure the narrowest possible proxy network so LNURL callback URLs and client rate limits use the original HTTPS request safely; never trust an entire shared LAN. Outbound webhooks and Nostr zap receipts refuse destinations on private, loopback, link-local, or reserved networks by default; enable `ALLOW_PRIVATE_WEBHOOKS` or `ALLOW_PRIVATE_NOSTR_RELAYS` only when intentionally targeting trusted local services.
 
@@ -83,7 +85,7 @@ The supported toolchain is Python 3.11 or newer and Node.js 22.22.2 or newer. CI
 python3.11 -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt
 cd frontend && npm ci && npm run build && cd ..
-.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 22121 --no-proxy-headers
+.venv/bin/python -m backend.app.server
 ```
 
 Set `LND_TLS_PATH`, `LND_MACAROON_PATH`, and `LND_READONLY_MACAROON_PATH` to existing LND files before launching. lnSwitchboard uses `invoice.macaroon` for invoice creation/lookup/subscription and `readonly.macaroon` for liquidity reads such as `ListChannels`. By default, lnSwitchboard verifies LND's certificate against `LND_HOST` using the trust roots from `LND_TLS_PATH`; set `LND_TLS_SERVER_NAME` only when you intentionally need to verify against a different certificate SAN. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`. Environment settings saved through the dashboard are persisted to `.env` and apply after lnSwitchboard restarts.

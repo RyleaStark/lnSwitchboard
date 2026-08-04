@@ -19,6 +19,7 @@ from ..nip05_store import (
     NostrIdentityStore,
 )
 from ..nip05_utils import NpubFormatError, hex_to_npub, npub_to_hex
+from ..request_utils import get_public_domain
 
 
 api_router = APIRouter(prefix="/api/nip05", tags=["nostr"])
@@ -204,15 +205,7 @@ async def delete_identity(
 
 
 def _resolve_domain(request: Request) -> str:
-    host = (
-        request.headers.get("x-forwarded-host")
-        or request.headers.get("host")
-        or (request.url.hostname or "")
-    )
-    host = host.split(",")[0].strip()
-    if ":" in host:
-        host = host.split(":", 1)[0]
-    return host.lower()
+    return get_public_domain(request)
 
 
 @public_router.get("/.well-known/nostr.json")
