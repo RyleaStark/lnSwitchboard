@@ -25,9 +25,10 @@ describe("proxy deployment snippets", () => {
     expect(snippets.find((item) => item.label === "Caddy")?.snippet).toContain(
       "pay.example.com",
     )
-    expect(snippets.find((item) => item.label === "Cloudflare Tunnel")?.snippet).toContain(
-      "service: http://extended-umbrella-lnswitchboard_app_1:21212",
+    expect(snippets.find((item) => item.label === "Custom")?.snippet).toContain(
+      "Upstream: http://extended-umbrella-lnswitchboard_app_1:21212",
     )
+    expect(snippets.find((item) => item.label === "Cloudflare Tunnel")).toBeUndefined()
     const combined = snippets.map((item) => item.snippet).join("\n")
     expect(combined).not.toContain(":22121")
     expect(combined).not.toContain("lnprofile")

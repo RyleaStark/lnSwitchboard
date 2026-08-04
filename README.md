@@ -77,6 +77,19 @@ The connector starts from the current released `cloudflare/cloudflared:2026.7.3`
 
 Before a tunnel has been authorized, the connector may restart with backoff while waiting for `./secrets/cloudflared/tunnel.token`; this is expected. The Connections page distinguishes the installed connector capability from an authenticated, connected tunnel.
 
+Open **Connections → Cloudflare** to onboard a hostname. No OAuth client, callback URL, or Cloudflare application registration is required. Follow the link in the page to [create a custom API token](https://dash.cloudflare.com/profile/api-tokens) with only these permissions:
+
+- Account / Cloudflare Tunnel / Edit
+- Account / Account Settings / Read
+- Zone / DNS / Edit
+- Zone / Zone / Read
+
+Restrict the token resources to the Cloudflare account and zone that will host the public name, then paste it into the private lnSwitchboard administration page. Do not put the token in `.env`, Compose configuration, URLs, or command-line arguments.
+
+lnSwitchboard validates the token, returns only accessible account and zone metadata, and encrypts the token at rest. The raw token is never returned by the API or persisted in browser storage. A short-lived, `Secure`, `HttpOnly`, `SameSite=Lax` cookie identifies the encrypted server-side authorization during account, zone, and hostname selection.
+
+The page remains visible but disabled until the connector is installed. lnSwitchboard creates a remotely managed tunnel, configures its origin to the deployment's isolated `21212` listener, and creates one proxied CNAME. Existing DNS records are never overwritten or adopted. During disconnect, lnSwitchboard revalidates its DNS ownership marker before removing the record; changed records are preserved.
+
 Compose binds both listeners to loopback by default. Port `22121` serves only the administration UI and API. The application allows direct loopback/RFC1918 LAN clients (plus IPv6 ULA/link-local clients) and returns `403` to WAN peers. In an Umbrel environment, a peer in `TRUSTED_PROXY_CIDRS` is treated as Umbrel's authenticated `app_proxy`; outside Umbrel, a trusted proxy may forward administration only for a LAN-origin client. Port `21212` serves only LNURL-pay and NIP-05 routes, so a self-hosted nginx or other public reverse proxy can forward directly to that listener. Override `LNSWITCHBOARD_BIND_ADDRESS` or `LNSWITCHBOARD_PUBLIC_BIND_ADDRESS` only when the corresponding listener must bind another host interface.
 
 Requests on port `21212` use the direct `Host` value, or forwarding headers from peers listed in `TRUSTED_PROXY_CIDRS`. The resolved domain must match the domain of at least one configured Lightning Address or Nostr identity; otherwise the public listener returns `404`.

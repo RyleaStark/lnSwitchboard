@@ -149,6 +149,7 @@ def test_pinned_webhook_connection_preserves_host_and_path() -> None:
         "/identities/",
         "/settings/",
         "/webhooks/",
+        "/connections/cloudflare/",
     ],
 )
 def test_spa_routes_serve_frontend_entrypoint(test_client, path: str) -> None:

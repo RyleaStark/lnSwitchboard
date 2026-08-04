@@ -1,6 +1,6 @@
 import type { DeploymentEnv } from "@/lib/api"
 
-export type ProxyEngine = "nginx" | "caddy" | "cloudflare"
+export type ProxyEngine = "nginx" | "caddy" | "custom"
 
 export type ProxyHelpItem = {
   icon: ProxyEngine
@@ -52,17 +52,15 @@ export function buildProxyHelpItems(value?: string | null, publicHost = "your-do
 }`,
     },
     {
-      icon: "cloudflare",
-      label: "Cloudflare Tunnel",
-      title: "Cloudflare Tunnel Reverse Proxy",
-      description: "Route the public hostname to lnSwitchboard's isolated public listener.",
-      snippet: `tunnel: <tunnel-id>
-credentials-file: /etc/cloudflared/<tunnel-id>.json
-
-ingress:
-  - hostname: ${publicHost}
-    service: http://${upstream}
-  - service: http_status:404`,
+      icon: "custom",
+      label: "Custom",
+      title: "Custom Reverse Proxy",
+      description: "Use these requirements with any reverse proxy that can reach lnSwitchboard's public listener.",
+      snippet: `Public hostname: ${publicHost}
+Upstream: http://${upstream}
+Preserve the original Host header.
+Forward the original client IP only from a configured trusted proxy.
+Never route public traffic to port 22121.`,
     },
   ]
 }

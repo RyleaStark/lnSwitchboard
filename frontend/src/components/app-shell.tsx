@@ -2,6 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router"
 import { useQuery } from "@tanstack/react-query"
 import {
   BadgeDollarSignIcon,
+  CableIcon,
   ChevronRightIcon,
   CircleIcon,
   GaugeIcon,
@@ -11,6 +12,7 @@ import {
   InfoIcon,
   ListIcon,
   MenuIcon,
+  NetworkIcon,
   PlugZapIcon,
   SettingsIcon,
   WebhookIcon,
@@ -19,6 +21,7 @@ import {
 import { useEffect, useMemo } from "react"
 import { toast } from "sonner"
 
+import { CloudflareIcon } from "@/components/cloudflare-icon"
 import { CodeBlock, CopyButton } from "@/components/common"
 import { TemplateVariablesDialog } from "@/components/template-variables-dialog"
 import { Badge } from "@/components/ui/badge"
@@ -130,6 +133,39 @@ export function AppShell() {
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   ))}
+                  <SidebarMenuItem>
+                    <Collapsible
+                      defaultOpen={location.pathname.startsWith("/connections/")}
+                      className="group/connections"
+                    >
+                      <CollapsibleTrigger asChild>
+                        <SidebarMenuButton
+                          type="button"
+                          isActive={location.pathname.startsWith("/connections/")}
+                          tooltip="Connections"
+                        >
+                          <CableIcon />
+                          <span>Connections</span>
+                          <ChevronRightIcon className="ml-auto transition-transform group-data-[state=open]/connections:rotate-90" />
+                        </SidebarMenuButton>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent>
+                        <SidebarMenuSub>
+                          <SidebarMenuSubItem>
+                            <SidebarMenuSubButton
+                              asChild
+                              isActive={isActiveRoute(location.pathname, "/connections/cloudflare/")}
+                            >
+                              <NavLink to="/connections/cloudflare/">
+                                <CloudflareIcon />
+                                <span>Cloudflare</span>
+                              </NavLink>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                        </SidebarMenuSub>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </SidebarMenuItem>
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
@@ -298,13 +334,7 @@ function ProxyEngineIcon({ engine }: { engine: ProxyEngine }) {
     )
   }
 
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path fill="#f38020" d="M9.5 8.2a5 5 0 0 1 9.3 1.7 3.9 3.9 0 0 1-.6 7.8H7.5a4.1 4.1 0 0 1-.6-8.2 5 5 0 0 1 2.6-1.3Z" />
-      <path fill="#faae40" d="M15.6 8.9a4.7 4.7 0 0 1 4.4 3.1 3 3 0 0 1-.7 5.8h-7.7a3.4 3.4 0 0 1-.3-6.8 4.8 4.8 0 0 1 4.3-2.1Z" />
-      <path fill="#ffffff" d="M6.9 17.6h12.5a2.4 2.4 0 0 0 1.7-.7 3.1 3.1 0 0 1-1.8.5H7.5a3 3 0 0 1-2.2-.9 4 4 0 0 0 1.6 1.1Z" opacity="0.85" />
-    </svg>
-  )
+  return <NetworkIcon />
 }
 
 function StatusRow({

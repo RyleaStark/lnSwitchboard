@@ -234,6 +234,61 @@ export type WebhookDelivery = {
   last_attempt?: WebhookAttempt | null
 }
 
+export type ConnectionProvider = {
+  id: string
+  name: string
+  capability: "available" | "unavailable"
+  reason: string | null
+}
+
+export type ConnectedDomain = {
+  hostname: string
+  status: "pending" | "active" | "error"
+  external_id: string | null
+  zone_id: string | null
+  last_error: string | null
+}
+
+export type ProviderConnection = {
+  id: string
+  provider: string
+  external_id: string
+  label: string
+  status: "disconnected" | "authorizing" | "provisioning" | "connected" | "degraded" | "error"
+  account_id: string | null
+  public_metadata: Record<string, JsonValue>
+  last_error: string | null
+  created_at: string
+  updated_at: string
+  domains: ConnectedDomain[]
+}
+
+export type ConnectionsResponse = {
+  providers: ConnectionProvider[]
+  connections: ProviderConnection[]
+}
+
+export type CloudflareSetup = {
+  available: boolean
+  origin: string
+  required_permissions: string[]
+  authorization_method: "api_token"
+}
+
+export type CloudflareAuthorization = {
+  accounts: Array<{
+    id: string
+    name: string
+    zones: Array<{ id: string; name: string }>
+  }>
+}
+
+export type CloudflareProvisionPayload = {
+  account_id: string
+  zone_id: string
+  hostname: string
+}
+
 export class ApiError extends Error {
   status: number
   detail: unknown
@@ -368,5 +423,31 @@ export const api = {
     request<{ updated: string[]; restart_required: boolean }>("api/settings/env", {
       method: "PUT",
       body: JSON.stringify({ values }),
+    }),
+  connections: () => request<ConnectionsResponse>("api/connections"),
+  cloudflareSetup: () => request<CloudflareSetup>("api/connections/cloudflare/setup"),
+  authorizeCloudflare: (apiToken: string) =>
+    request<CloudflareAuthorization>("api/connections/cloudflare/authorize", {
+      method: "POST",
+      body: JSON.stringify({ api_token: apiToken }),
+    }),
+  cloudflareAuthorization: () =>
+    request<CloudflareAuthorization>("api/connections/cloudflare/authorization"),
+  cancelCloudflareAuthorization: () =>
+    request<{ cancelled: boolean }>("api/connections/cloudflare/authorization", {
+      method: "DELETE",
+    }),
+  provisionCloudflare: (payload: CloudflareProvisionPayload) =>
+    request<ProviderConnection>("api/connections/cloudflare/provision", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  refreshCloudflareStatus: (connectionId: string) =>
+    request<ProviderConnection>(`api/connections/cloudflare/${connectionId}/status`, {
+      method: "POST",
+    }),
+  disconnectCloudflare: (connectionId: string) =>
+    request<{ disconnected: boolean }>(`api/connections/cloudflare/${connectionId}`, {
+      method: "DELETE",
     }),
 }

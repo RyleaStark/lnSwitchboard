@@ -40,7 +40,16 @@ from .version import get_version
 LOGGER = logging.getLogger("lnswitchboard")
 BASE_DIR = Path(__file__).resolve().parents[2]
 STATIC_DIR = BASE_DIR / "frontend" / "static"
-SPA_ROUTES = ("/logs/", "/liquidity/", "/settings/", "/identities/", "/addresses/", "/invoices/", "/webhooks/")
+SPA_ROUTES = (
+    "/logs/",
+    "/liquidity/",
+    "/settings/",
+    "/identities/",
+    "/addresses/",
+    "/invoices/",
+    "/webhooks/",
+    "/connections/cloudflare/",
+)
 FORWARDED_HEADERS = frozenset(
     {
         b"cf-connecting-ip",
