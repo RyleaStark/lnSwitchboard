@@ -20,6 +20,7 @@ def test_compose_cloudflared_contract_is_isolated_and_digest_pinned() -> None:
     )
     assert ":latest" not in image
     assert cloudflared["entrypoint"] == ["cloudflared"]
+    assert cloudflared["user"] == "65532:${CLOUDFLARED_TOKEN_GID:-0}"
     assert "ports" not in cloudflared
     assert cloudflared.get("privileged") is not True
     assert cloudflared.get("network_mode") != "host"
@@ -42,6 +43,8 @@ def test_compose_cloudflared_contract_is_isolated_and_digest_pinned() -> None:
         "/app/secrets/cloudflared/tunnel.token"
     )
     assert app["environment"]["CLOUDFLARED_METRICS_URL"] == "http://cloudflared:2000"
+    assert app["environment"]["CLOUDFLARED_ORIGIN_URL"] == "http://lnswitchboard:21212"
+    assert app["environment"]["CLOUDFLARED_TOKEN_GID"] == "${CLOUDFLARED_TOKEN_GID:-0}"
 
 
 def test_compose_never_exposes_docker_socket_or_admin_origin_to_cloudflared() -> None:
@@ -51,3 +54,14 @@ def test_compose_never_exposes_docker_socket_or_admin_origin_to_cloudflared() ->
     assert "/var/run/docker.sock" not in raw
     assert "22121" not in cloudflared_section
     assert "21212" in raw
+
+
+def test_cloudflare_onboarding_requires_no_oauth_configuration() -> None:
+    deployment_files = [
+        ROOT / ".env.example",
+        ROOT / "docker-compose.yml",
+        ROOT / "backend" / "app" / "config.py",
+    ]
+
+    for path in deployment_files:
+        assert "CLOUDFLARE_OAUTH" not in path.read_text(encoding="utf-8")

@@ -16,6 +16,8 @@ services:
       CLOUDFLARED_CONNECTOR_ENABLED: "true"
       CLOUDFLARED_TOKEN_PATH: /app/secrets/cloudflared/tunnel.token
       CLOUDFLARED_METRICS_URL: http://cloudflared:2000
+      CLOUDFLARED_ORIGIN_URL: http://lnswitchboard:21212
+      CLOUDFLARED_TOKEN_GID: "${CLOUDFLARED_TOKEN_GID:-0}"
     volumes:
       - ./secrets:/app/secrets:rw
       - ${APP_LIGHTNING_NODE_DATA_DIR:-/app-data/lightning/data/lnd}:/lnd:ro
@@ -26,7 +28,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
     container_name: lnswitchboard-cloudflared
-    user: "65532:65532"
+    user: "65532:${CLOUDFLARED_TOKEN_GID:-0}"
     entrypoint: ["cloudflared"]
     command:
       - tunnel

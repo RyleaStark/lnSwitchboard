@@ -16,6 +16,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from .deps import (
+    get_cloudflare_service_dep,
     get_ln_address_store_dep,
     get_ln_client_dep,
     get_log_storage_dep,
@@ -154,6 +155,12 @@ async def lifespan(app: FastAPI):
         webhook_dispatcher=webhook_dispatcher,
     )
     await webhook_dispatcher.resume_pending_retries()
+    if settings.cloudflared_connector_enabled:
+        try:
+            cloudflare_service = await get_cloudflare_service_dep()
+            await cloudflare_service.recover_incomplete_provisioning()
+        except Exception as exc:  # pragma: no cover - network runtime
+            LOGGER.warning("Unable to recover incomplete Cloudflare provisioning: %s", exc)
     await invoice_subscription_worker.start()
     await invoice_full_refresh_worker.start()
     app.state.invoice_subscription_worker = invoice_subscription_worker

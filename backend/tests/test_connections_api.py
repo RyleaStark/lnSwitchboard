@@ -11,7 +11,12 @@ def test_connections_api_lists_provider_capabilities_and_connections(test_client
         label="Cloudflare Tunnel",
         status="connected",
         account_id="account-123",
-        public_metadata={"tunnel_name": "lnswitchboard"},
+        public_metadata={
+            "origin": "http://lnswitchboard:21212",
+            "tunnel_name": "lnswitchboard",
+            "recovery_authorization_id": "must-not-leak",
+            "connector_token": "must-not-leak-either",
+        },
     )
     store.replace_domains(
         connection.id,
@@ -30,7 +35,13 @@ def test_connections_api_lists_provider_capabilities_and_connections(test_client
             "reason": "connector_not_installed",
         }
     ]
-    assert payload["connections"][0]["id"] == connection.id
+    assert response.json()["connections"][0]["id"] == connection.id
+    metadata = response.json()["connections"][0]["public_metadata"]
+    assert metadata == {
+        "origin": "http://lnswitchboard:21212",
+        "tunnel_name": "lnswitchboard",
+    }
+    assert "must-not-leak" not in response.text
     assert payload["connections"][0]["provider"] == "cloudflare"
     assert payload["connections"][0]["domains"] == [
         {

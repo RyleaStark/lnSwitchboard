@@ -52,6 +52,23 @@ class ProviderConnection:
     domains: list[ConnectedDomain] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ProvisioningJournal:
+    id: str
+    provider: str
+    authorization_owner: str
+    account_id: str
+    zone_id: str
+    hostname: str
+    resource_name: str
+    external_id: str | None
+    domain_external_id: str | None
+    phase: str
+    last_error: str | None
+    created_at: str
+    updated_at: str
+
+
 class ConnectionStore:
     """Store non-secret provider ownership and observed domain state."""
 
@@ -94,6 +111,25 @@ class ConnectionStore:
                     updated_at TEXT NOT NULL,
                     UNIQUE(connection_id, hostname),
                     FOREIGN KEY(connection_id) REFERENCES provider_connections(id) ON DELETE CASCADE
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS connection_provisioning_journals (
+                    id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    authorization_owner TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    zone_id TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    resource_name TEXT NOT NULL,
+                    external_id TEXT,
+                    domain_external_id TEXT,
+                    phase TEXT NOT NULL,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -178,7 +214,9 @@ class ConnectionStore:
             ).fetchone()
         return self.get_connection(str(row["id"]))  # type: ignore[return-value]
 
-    def replace_domains(self, connection_id: str, domains: Sequence[Mapping[str, Any]]) -> None:
+    def replace_domains(
+        self, connection_id: str, domains: Sequence[Mapping[str, Any]]
+    ) -> None:
         normalized: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in domains:
@@ -206,7 +244,10 @@ class ConnectionStore:
             ).fetchone()
             if exists is None:
                 raise KeyError(connection_id)
-            connection.execute("DELETE FROM connected_domains WHERE connection_id = ?", (connection_id,))
+            connection.execute(
+                "DELETE FROM connected_domains WHERE connection_id = ?",
+                (connection_id,),
+            )
             connection.executemany(
                 """
                 INSERT INTO connected_domains (
@@ -263,13 +304,120 @@ class ConnectionStore:
         by_connection: dict[str, list[Any]] = {}
         for row in domain_rows:
             by_connection.setdefault(str(row["connection_id"]), []).append(row)
-        return [self._row_to_connection(row, by_connection.get(str(row["id"]), [])) for row in rows]
+        return [
+            self._row_to_connection(row, by_connection.get(str(row["id"]), []))
+            for row in rows
+        ]
+
+    def create_provisioning_journal(
+        self,
+        *,
+        provider: str,
+        authorization_owner: str,
+        account_id: str,
+        zone_id: str,
+        hostname: str,
+        resource_name: str,
+    ) -> ProvisioningJournal:
+        journal_id = str(uuid.uuid4())
+        now = _utc_now()
+        with sqlite_connection(self.path) as connection:
+            connection.execute(
+                """
+                INSERT INTO connection_provisioning_journals (
+                    id, provider, authorization_owner, account_id, zone_id,
+                    hostname, resource_name, phase, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
+                """,
+                (
+                    journal_id,
+                    self._validate_provider(provider),
+                    authorization_owner,
+                    account_id,
+                    zone_id,
+                    hostname,
+                    resource_name,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_provisioning_journal(journal_id)  # type: ignore[return-value]
+
+    def update_provisioning_journal(
+        self, journal_id: str, **changes: str | None
+    ) -> ProvisioningJournal:
+        allowed = {
+            "external_id",
+            "domain_external_id",
+            "phase",
+            "last_error",
+        }
+        if not changes or not set(changes).issubset(allowed):
+            raise ValueError("unsupported provisioning journal update")
+        assignments = ", ".join(f"{key} = ?" for key in changes)
+        values = list(changes.values())
+        values.extend([_utc_now(), journal_id])
+        with sqlite_connection(self.path) as connection:
+            cursor = connection.execute(
+                f"UPDATE connection_provisioning_journals SET {assignments}, updated_at = ? WHERE id = ?",
+                values,
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(journal_id)
+        return self.get_provisioning_journal(journal_id)  # type: ignore[return-value]
+
+    def get_provisioning_journal(self, journal_id: str) -> ProvisioningJournal | None:
+        with sqlite_connection(self.path) as connection:
+            row = connection.execute(
+                "SELECT * FROM connection_provisioning_journals WHERE id = ?",
+                (journal_id,),
+            ).fetchone()
+        return self._row_to_journal(row) if row is not None else None
+
+    def list_provisioning_journals(self, provider: str) -> list[ProvisioningJournal]:
+        with sqlite_connection(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM connection_provisioning_journals
+                WHERE provider = ? ORDER BY created_at ASC, id ASC
+                """,
+                (self._validate_provider(provider),),
+            ).fetchall()
+        return [self._row_to_journal(row) for row in rows]
+
+    def delete_provisioning_journal(self, journal_id: str) -> bool:
+        with sqlite_connection(self.path) as connection:
+            cursor = connection.execute(
+                "DELETE FROM connection_provisioning_journals WHERE id = ?",
+                (journal_id,),
+            )
+        return cursor.rowcount > 0
 
     def delete_connection(self, connection_id: str) -> bool:
         with sqlite_connection(self.path) as connection:
             connection.execute("PRAGMA foreign_keys = ON")
-            cursor = connection.execute("DELETE FROM provider_connections WHERE id = ?", (connection_id,))
+            cursor = connection.execute(
+                "DELETE FROM provider_connections WHERE id = ?", (connection_id,)
+            )
             return cursor.rowcount > 0
+
+    @staticmethod
+    def _row_to_journal(row: Any) -> ProvisioningJournal:
+        return ProvisioningJournal(
+            id=str(row["id"]),
+            provider=str(row["provider"]),
+            authorization_owner=str(row["authorization_owner"]),
+            account_id=str(row["account_id"]),
+            zone_id=str(row["zone_id"]),
+            hostname=str(row["hostname"]),
+            resource_name=str(row["resource_name"]),
+            external_id=row["external_id"],
+            domain_external_id=row["domain_external_id"],
+            phase=str(row["phase"]),
+            last_error=row["last_error"],
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
 
     @staticmethod
     def _row_to_connection(row: Any, domain_rows: Sequence[Any]) -> ProviderConnection:

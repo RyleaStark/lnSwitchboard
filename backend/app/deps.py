@@ -6,6 +6,8 @@ from functools import lru_cache
 
 from fastapi import Depends, HTTPException, Request, status
 
+from .cloudflare_client import CloudflareClient
+from .cloudflare_service import CloudflareService
 from .config import Settings, get_settings
 from .connection_secret_store import ConnectionSecretStore
 from .connection_store import ConnectionStore
@@ -72,6 +74,20 @@ def _get_connection_store() -> ConnectionStore:
 def _get_connection_secret_store() -> ConnectionSecretStore:
     settings = get_settings()
     return ConnectionSecretStore(settings.data_store_path, settings.connection_secret_key_path)
+
+
+@lru_cache()
+def _get_cloudflare_service() -> CloudflareService:
+    settings = get_settings()
+    return CloudflareService(
+        store=_get_connection_store(),
+        secrets=_get_connection_secret_store(),
+        client_factory=CloudflareClient,
+        connector_enabled=settings.cloudflared_connector_enabled,
+        token_path=settings.cloudflared_token_path,
+        origin_url=settings.cloudflared_origin_url,
+        token_gid=settings.cloudflared_token_gid,
+    )
 
 
 @lru_cache()
@@ -150,6 +166,10 @@ async def get_connection_store_dep() -> ConnectionStore:
 
 async def get_connection_secret_store_dep() -> ConnectionSecretStore:
     return _get_connection_secret_store()
+
+
+async def get_cloudflare_service_dep() -> CloudflareService:
+    return _get_cloudflare_service()
 
 
 async def get_webhook_dispatcher_dep() -> WebhookDispatcher:

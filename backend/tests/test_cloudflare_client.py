@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+
+from backend.app.cloudflare_client import CloudflareAPIError, CloudflareClient
+
+API_TOKEN = "do-not-leak-this-api-token"
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_client_builds_remote_tunnel_dns_and_public_only_ingress() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/cfd_tunnel"):
+            result = {"id": "tunnel-id", "name": "tunnel"}
+        elif request.url.path.endswith("/configurations"):
+            result = {}
+        elif request.url.path.endswith("/dns_records"):
+            result = {"id": "dns-id"}
+        else:
+            raise AssertionError(request.url)
+        return httpx.Response(
+            200, json={"success": True, "errors": [], "result": result}
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    await client.create_tunnel("account-id", "tunnel")
+    await client.configure_tunnel(
+        "account-id",
+        "tunnel-id",
+        "pay.example.com",
+        "http://app:21212",
+    )
+    await client.create_dns_record("zone-id", "pay.example.com", "tunnel-id")
+
+    assert all(
+        request.headers["authorization"] == f"Bearer {API_TOKEN}"
+        for request in requests
+    )
+    tunnel_body = json.loads(requests[0].content)
+    assert tunnel_body == {"name": "tunnel", "config_src": "cloudflare"}
+    config_body = json.loads(requests[1].content)
+    assert config_body == {
+        "config": {
+            "ingress": [
+                {"hostname": "pay.example.com", "service": "http://app:21212"},
+                {"service": "http_status:404"},
+            ]
+        }
+    }
+    assert "22121" not in requests[1].content.decode()
+    dns_body = json.loads(requests[2].content)
+    assert dns_body["content"] == "tunnel-id.cfargotunnel.com"
+    assert dns_body["proxied"] is True
+
+
+@pytest.mark.anyio
+async def test_client_error_is_sanitized_and_never_echoes_token_or_provider_message() -> (
+    None
+):
+    provider_message = f"invalid token {API_TOKEN}"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "success": False,
+                "errors": [{"code": 10000, "message": provider_message}],
+                "result": None,
+            },
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+
+    with pytest.raises(CloudflareAPIError) as captured:
+        await client.verify_token()
+
+    rendered = str(captured.value)
+    assert rendered == "Cloudflare rejected the request with HTTP 403 (codes: 10000)"
+    assert API_TOKEN not in rendered
+    assert provider_message not in rendered
+
+
+@pytest.mark.anyio
+async def test_delete_operations_are_idempotent_when_resource_is_already_gone() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        requests.append(_request)
+        return httpx.Response(
+            404,
+            json={"success": False, "errors": [{"code": 81044}], "result": None},
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+
+    await client.delete_dns_record("zone-id", "record-id")
+    await client.cleanup_tunnel_connections("account-id", "tunnel-id")
+    await client.delete_tunnel("account-id", "tunnel-id")
+
+    cleanup_request = requests[1]
+    assert cleanup_request.headers["content-type"] == "application/json"
+    assert cleanup_request.content == b"{}"
+
+
+@pytest.mark.anyio
+async def test_account_discovery_paginates_until_short_page() -> None:
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        pages.append(page)
+        result = (
+            [{"id": str(index)} for index in range(50)]
+            if page == 1
+            else [{"id": "last"}]
+        )
+        return httpx.Response(
+            200, json={"success": True, "errors": [], "result": result}
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+
+    accounts = await client.list_accounts()
+
+    assert len(accounts) == 51
+    assert pages == [1, 2]

@@ -166,6 +166,11 @@ class Settings(BaseSettings):
         env="CLOUDFLARED_METRICS_URL",
         default="http://cloudflared:2000",
     )
+    cloudflared_origin_url: str = _env_field(
+        env="CLOUDFLARED_ORIGIN_URL",
+        default="http://lnswitchboard:21212",
+    )
+    cloudflared_token_gid: int = _env_field(env="CLOUDFLARED_TOKEN_GID", default=0)
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     trusted_proxy_cidrs: str = _env_field(env="TRUSTED_PROXY_CIDRS", default="")
     trusted_hosts: str = _env_field(env="TRUSTED_HOSTS", default="localhost,127.0.0.1,[::1]")
