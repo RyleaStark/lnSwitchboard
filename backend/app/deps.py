@@ -20,6 +20,8 @@ from .nostr_zaps import NostrZapPublisher
 from .nip05_store import NostrIdentityStore
 from .rate_limiter import RateLimiter
 from .request_utils import get_client_ip, get_proxy_debug_info
+from .tailscale_connector import TailscaleConnector
+from .tailscale_service import TailscaleService
 from .webhook_dispatcher import WebhookDispatcher
 
 
@@ -87,6 +89,19 @@ def _get_cloudflare_service() -> CloudflareService:
         token_path=settings.cloudflared_token_path,
         origin_url=settings.cloudflared_origin_url,
         token_gid=settings.cloudflared_token_gid,
+    )
+
+
+@lru_cache()
+def _get_tailscale_service() -> TailscaleService:
+    settings = get_settings()
+    return TailscaleService(
+        connector=TailscaleConnector(
+            control_dir=settings.tailscale_control_dir,
+            status_dir=settings.tailscale_status_dir,
+        ),
+        store=_get_connection_store(),
+        connector_enabled=settings.tailscale_connector_enabled,
     )
 
 
@@ -170,6 +185,10 @@ async def get_connection_secret_store_dep() -> ConnectionSecretStore:
 
 async def get_cloudflare_service_dep() -> CloudflareService:
     return _get_cloudflare_service()
+
+
+async def get_tailscale_service_dep() -> TailscaleService:
+    return _get_tailscale_service()
 
 
 async def get_webhook_dispatcher_dep() -> WebhookDispatcher:

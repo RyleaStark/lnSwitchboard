@@ -21,6 +21,7 @@ from .deps import (
     get_ln_client_dep,
     get_log_storage_dep,
     get_nip05_store_dep,
+    get_tailscale_service_dep,
     get_webhook_dispatcher_dep,
 )
 from .invoice_worker import InvoiceFullRefreshWorker, InvoiceSubscriptionWorker
@@ -49,6 +50,7 @@ SPA_ROUTES = (
     "/invoices/",
     "/webhooks/",
     "/connections/cloudflare/",
+    "/connections/tailscale/",
 )
 FORWARDED_HEADERS = frozenset(
     {
@@ -59,6 +61,7 @@ FORWARDED_HEADERS = frozenset(
         b"x-forwarded-host",
         b"x-forwarded-port",
         b"x-forwarded-proto",
+        b"x-forwarded-user",
         b"x-real-ip",
     }
 )
@@ -170,6 +173,12 @@ async def lifespan(app: FastAPI):
             await cloudflare_service.recover_incomplete_provisioning()
         except Exception as exc:  # pragma: no cover - network runtime
             LOGGER.warning("Unable to recover incomplete Cloudflare provisioning: %s", exc)
+    if settings.tailscale_connector_enabled:
+        try:
+            tailscale_service = await get_tailscale_service_dep()
+            await tailscale_service.recover_incomplete_provisioning()
+        except Exception:  # pragma: no cover - private runtime
+            LOGGER.warning("Unable to recover incomplete Tailscale provisioning")
     await invoice_subscription_worker.start()
     await invoice_full_refresh_worker.start()
     app.state.invoice_subscription_worker = invoice_subscription_worker
@@ -237,16 +246,26 @@ def _add_admin_access_control(target_app: FastAPI) -> None:
         settings = get_settings()
         peer = request.client.host if request.client else ""
         peer_is_proxy = _is_trusted_proxy(peer, settings.trusted_proxy_cidrs)
+        request.state.authenticated_admin_proxy = False
+        request.state.authenticated_admin_https = False
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        proxy_is_https = peer_is_proxy and forwarded_proto == "https"
 
         if (
             settings.dep_env.upper() in {"UMBREL", "UMBREL-DEV"}
             and peer_is_proxy
             and _is_lan_address(peer)
         ):
+            request.state.authenticated_admin_proxy = True
+            request.state.authenticated_admin_https = proxy_is_https
             return await call_next(request)
         if peer_is_proxy:
             proxy_client = _get_admin_proxy_client(request, settings.trusted_proxy_cidrs)
             if proxy_client is not None and _is_lan_address(proxy_client):
+                request.state.authenticated_admin_proxy = bool(
+                    request.headers.get("x-forwarded-user", "").strip()
+                )
+                request.state.authenticated_admin_https = proxy_is_https
                 return await call_next(request)
             return PlainTextResponse("Forbidden", status_code=status.HTTP_403_FORBIDDEN)
         if _is_lan_address(peer):

@@ -45,6 +45,7 @@ export default function App() {
               <Route path="addresses/" element={<AddressesPage />} />
               <Route path="identities/" element={<IdentitiesPage />} />
               <Route path="connections/cloudflare/" element={<ConnectionsPage />} />
+              <Route path="connections/tailscale/" element={<ConnectionsPage />} />
               <Route path="settings/" element={<SettingsPage />} />
               <Route path="webhooks/" element={<WebhooksPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />

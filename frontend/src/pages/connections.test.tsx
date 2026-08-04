@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router"
 
@@ -19,6 +19,12 @@ vi.mock("@/lib/api", async (importOriginal) => ({
     provisionCloudflare: vi.fn(),
     refreshCloudflareStatus: vi.fn(),
     disconnectCloudflare: vi.fn(),
+    tailscaleSetup: vi.fn(),
+    beginTailscaleLogin: vi.fn(),
+    tailscaleLoginStatus: vi.fn(),
+    cancelTailscaleLogin: vi.fn(),
+    refreshTailscaleStatus: vi.fn(),
+    disconnectTailscale: vi.fn(),
   },
 }))
 
@@ -32,6 +38,26 @@ const setup = {
     "Account Settings Read",
   ],
   authorization_method: "api_token" as const,
+}
+
+const tailscaleSetup = {
+  available: true,
+  authorization_method: "web_login" as const,
+  default_device_name: "lns",
+  device_name_max_length: 63,
+  public_origin: "http://127.0.0.1:21212",
+  public_port: 443 as const,
+  required_tag: "tag:lnswitchboard",
+  prerequisites: [
+    "magic_dns",
+    "https_certificates",
+    "funnel_node_attribute",
+    "funnel_port_443",
+  ],
+}
+
+function tailscaleAuthUrl() {
+  return "https://" + "login.tailscale.com" + "/a/" + "TEST_ONLY_AUTHORIZATION"
 }
 
 function renderPage(path = "/connections/cloudflare/") {
@@ -53,10 +79,15 @@ beforeEach(() => {
   vi.mocked(api.connections).mockResolvedValue({
     providers: [
       { id: "cloudflare", name: "Cloudflare", capability: "available", reason: null },
+      { id: "tailscale", name: "Tailscale Funnel", capability: "available", reason: null },
     ],
     connections: [],
   })
   vi.mocked(api.cloudflareSetup).mockResolvedValue(setup)
+  vi.mocked(api.tailscaleSetup).mockResolvedValue(tailscaleSetup)
+  vi.mocked(api.tailscaleLoginStatus).mockRejectedValue(
+    new ApiError(404, "Login not found", "Login not found"),
+  )
   vi.mocked(api.cloudflareAuthorization).mockRejectedValue(
     new ApiError(404, "Authorization not found", "Authorization not found"),
   )
@@ -204,4 +235,364 @@ test("loads the short-lived token authorization and provisions the selected host
   })
   expect(api.cloudflareAuthorization).toHaveBeenCalled()
   expect(document.body.textContent).not.toContain("cloudflare-token-secret")
+})
+
+test("asks for a device name and suggests lns by default", async () => {
+  renderPage("/connections/tailscale/")
+
+  const deviceName = await screen.findByLabelText("Device name")
+  expect(deviceName).toHaveValue("lns")
+  expect(screen.getByRole("button", { name: "Connect Tailscale" })).toBeEnabled()
+  expect(screen.queryByLabelText("Public hostname")).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/API token/i)).not.toBeInTheDocument()
+  expect(document.body.textContent).not.toContain("22121")
+})
+
+test("opens the transient Tailscale login link and QR without query or browser storage", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
+    state: "needs_login",
+    device_name: "my-node",
+    auth_url: tailscaleAuthUrl(),
+    expires_in_seconds: 300,
+  })
+  const { client } = renderPage("/connections/tailscale/")
+
+  const deviceName = await screen.findByLabelText("Device name")
+  await user.clear(deviceName)
+  await user.type(deviceName, "My-Node")
+  await user.click(screen.getByRole("button", { name: "Connect Tailscale" }))
+
+  await waitFor(() => expect(api.beginTailscaleLogin).toHaveBeenCalledWith("my-node"))
+  expect(await screen.findByRole("link", { name: "Open Tailscale login" })).toHaveAttribute(
+    "href",
+    tailscaleAuthUrl(),
+  )
+  expect(await screen.findByRole("img", { name: "Tailscale login QR code" })).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^data:image\/svg\+xml/),
+  )
+  expect(client.getMutationCache().getAll()).toHaveLength(0)
+  expect(window.localStorage?.length ?? 0).toBe(0)
+  expect(window.sessionStorage?.length ?? 0).toBe(0)
+
+  await user.click(screen.getByRole("button", { name: "Check status" }))
+  await waitFor(() =>
+    expect(screen.queryByRole("link", { name: "Open Tailscale login" })).not.toBeInTheDocument(),
+  )
+  expect(screen.queryByRole("img", { name: "Tailscale login QR code" })).not.toBeInTheDocument()
+})
+
+test("blocks connect while startup recovery is in flight", async () => {
+  let rejectRecovery: ((reason: unknown) => void) | undefined
+  vi.mocked(api.tailscaleLoginStatus).mockReturnValueOnce(
+    new Promise((_, reject) => {
+      rejectRecovery = reject
+    }),
+  )
+
+  renderPage("/connections/tailscale/")
+  await waitFor(() => expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(1))
+
+  const connectButton = await screen.findByRole("button", { name: "Connect Tailscale" })
+  expect(connectButton).toBeDisabled()
+  act(() => connectButton.click())
+  expect(api.beginTailscaleLogin).not.toHaveBeenCalled()
+
+  await act(async () => {
+    rejectRecovery?.(new ApiError(404, "not found", "Not found"))
+  })
+  await waitFor(() => expect(connectButton).toBeEnabled())
+})
+
+test("permits only one same-tick connect operation", async () => {
+  let resolveBegin:
+    | ((value: Awaited<ReturnType<typeof api.beginTailscaleLogin>>) => void)
+    | undefined
+  vi.mocked(api.beginTailscaleLogin).mockReturnValueOnce(
+    new Promise((resolve) => {
+      resolveBegin = resolve
+    }),
+  )
+
+  renderPage("/connections/tailscale/")
+  await waitFor(() => expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(1))
+  const connectButton = await screen.findByRole("button", { name: "Connect Tailscale" })
+
+  act(() => {
+    connectButton.click()
+    connectButton.click()
+  })
+  expect(api.beginTailscaleLogin).toHaveBeenCalledTimes(1)
+
+  await act(async () => {
+    resolveBegin?.({
+      state: "needs_login",
+      device_name: "lns",
+      auth_url: tailscaleAuthUrl(),
+      expires_in_seconds: 300,
+    })
+  })
+  expect(await screen.findByRole("link", { name: "Open Tailscale login" })).toBeInTheDocument()
+})
+
+test("serializes Tailscale status checks and cancellation", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
+    state: "needs_login",
+    device_name: "lns",
+    auth_url: tailscaleAuthUrl(),
+    expires_in_seconds: 300,
+  })
+  renderPage("/connections/tailscale/")
+
+  const connectButton = await screen.findByRole("button", { name: "Connect Tailscale" })
+  await waitFor(() => expect(connectButton).toBeEnabled())
+  await user.click(connectButton)
+  await screen.findByRole("link", { name: "Open Tailscale login" })
+
+  let resolveStatus: ((value: {
+    state: "needs_login"
+    device_name: string
+    auth_url: string
+    expires_in_seconds: number
+  }) => void) | undefined
+  vi.mocked(api.tailscaleLoginStatus).mockImplementationOnce(
+    () => new Promise((resolve) => { resolveStatus = resolve }),
+  )
+
+  await user.click(screen.getByRole("button", { name: "Check status" }))
+  expect(await screen.findByRole("button", { name: "Checking…" })).toBeDisabled()
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled()
+
+  resolveStatus?.({
+    state: "needs_login",
+    device_name: "lns",
+    auth_url: tailscaleAuthUrl(),
+    expires_in_seconds: 300,
+  })
+  await waitFor(() => expect(screen.getByRole("button", { name: "Check status" })).toBeEnabled())
+
+  let resolveCancel: ((value: { cancelled: boolean }) => void) | undefined
+  vi.mocked(api.cancelTailscaleLogin).mockImplementationOnce(
+    () => new Promise((resolve) => { resolveCancel = resolve }),
+  )
+  await user.click(screen.getByRole("button", { name: "Cancel" }))
+  expect(await screen.findByRole("button", { name: "Cancelling…" })).toBeDisabled()
+  expect(screen.getByRole("button", { name: "Check status" })).toBeDisabled()
+
+  resolveCancel?.({ cancelled: true })
+  await waitFor(() =>
+    expect(screen.queryByRole("link", { name: "Open Tailscale login" })).not.toBeInTheDocument(),
+  )
+})
+
+test("clears the authorization link when status loses authenticated proxy access", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
+    state: "needs_login",
+    device_name: "lns",
+    auth_url: tailscaleAuthUrl(),
+    expires_in_seconds: 300,
+  })
+
+  renderPage("/connections/tailscale/")
+  await waitFor(() => expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(1))
+  await user.click(await screen.findByRole("button", { name: "Connect Tailscale" }))
+  await screen.findByRole("link", { name: "Open Tailscale login" })
+  await waitFor(() => expect(api.beginTailscaleLogin).toHaveBeenCalledTimes(1))
+  await screen.findByRole("button", { name: "Check status" })
+
+  vi.mocked(api.tailscaleLoginStatus).mockRejectedValueOnce(
+    new ApiError(403, "authenticated HTTPS administration required", "Forbidden"),
+  )
+  await user.click(screen.getByRole("button", { name: "Check status" }))
+
+  await waitFor(() => {
+    expect(screen.queryByRole("link", { name: "Open Tailscale login" })).not.toBeInTheDocument()
+  })
+  expect(screen.queryByAltText("Tailscale login QR code")).not.toBeInTheDocument()
+  expect(screen.getByText(/authenticated HTTPS admin proxy to use Tailscale onboarding/i)).toBeInTheDocument()
+})
+
+test("clears the authorization link when cancellation loses authenticated proxy access", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
+    state: "needs_login",
+    device_name: "lns",
+    auth_url: tailscaleAuthUrl(),
+    expires_in_seconds: 300,
+  })
+  vi.mocked(api.cancelTailscaleLogin).mockRejectedValueOnce(
+    new ApiError(403, "authenticated HTTPS administration required", "Forbidden"),
+  )
+
+  renderPage("/connections/tailscale/")
+  await waitFor(() => expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(1))
+  await user.click(await screen.findByRole("button", { name: "Connect Tailscale" }))
+  await screen.findByRole("link", { name: "Open Tailscale login" })
+  await waitFor(() => expect(api.beginTailscaleLogin).toHaveBeenCalledTimes(1))
+  await screen.findByRole("button", { name: "Check status" })
+  await user.click(screen.getByRole("button", { name: "Cancel" }))
+
+  await waitFor(() => {
+    expect(screen.queryByRole("link", { name: "Open Tailscale login" })).not.toBeInTheDocument()
+  })
+  expect(screen.queryByAltText("Tailscale login QR code")).not.toBeInTheDocument()
+  expect(screen.getByText(/authenticated HTTPS admin proxy to use Tailscale onboarding/i)).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Connect Tailscale" })).toBeDisabled()
+})
+
+test("does not poll while cancellation is pending", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
+    state: "needs_login",
+    device_name: "lns",
+    auth_url: tailscaleAuthUrl(),
+    expires_in_seconds: 300,
+  })
+  let resolveCancel: ((value: { cancelled: boolean }) => void) | undefined
+  vi.mocked(api.cancelTailscaleLogin).mockReturnValueOnce(
+    new Promise<{ cancelled: boolean }>((resolve) => {
+      resolveCancel = resolve
+    }),
+  )
+
+  renderPage("/connections/tailscale/")
+  await waitFor(() => expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(1))
+  await user.click(await screen.findByRole("button", { name: "Connect Tailscale" }))
+  await screen.findByRole("link", { name: "Open Tailscale login" })
+  await waitFor(() => expect(api.beginTailscaleLogin).toHaveBeenCalledTimes(1))
+  await screen.findByRole("button", { name: "Check status" })
+  const statusCalls = vi.mocked(api.tailscaleLoginStatus).mock.calls.length
+
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+  await new Promise((resolve) => window.setTimeout(resolve, 2_200))
+  expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(statusCalls)
+
+  resolveCancel?.({ cancelled: true })
+  await waitFor(() => expect(api.cancelTailscaleLogin).toHaveBeenCalledTimes(1))
+})
+
+test("explains that Tailscale onboarding requires an authenticated HTTPS proxy", async () => {
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "tailscale", name: "Tailscale Funnel", capability: "unavailable", reason: "authenticated_https_admin_required" },
+    ],
+    connections: [],
+  })
+
+  renderPage("/connections/tailscale/")
+
+  expect(await screen.findByText("Authenticated HTTPS required")).toBeInTheDocument()
+  expect(
+    screen.getByText(/Open lnSwitchboard through an authenticated HTTPS admin proxy/),
+  ).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Connect Tailscale" })).toBeDisabled()
+  expect(api.tailscaleSetup).not.toHaveBeenCalled()
+  expect(api.tailscaleLoginStatus).not.toHaveBeenCalled()
+})
+
+test("shows missing tailnet prerequisites without changing policy", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
+    state: "prerequisites_required",
+    device_name: "lns",
+    hostname: "lns.example.ts.net",
+    missing_prerequisites: ["magic_dns", "funnel_port_443"],
+  })
+
+  renderPage("/connections/tailscale/")
+  await waitFor(() => expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(1))
+  await user.click(await screen.findByRole("button", { name: "Connect Tailscale" }))
+
+  expect(await screen.findByText("Tailnet setup required")).toBeInTheDocument()
+  expect(screen.getByText(/Enable MagicDNS/)).toBeInTheDocument()
+  expect(screen.getByText(/Allow Funnel on HTTPS port 443/)).toBeInTheDocument()
+  expect(screen.getByText(/will not change tailnet policy automatically/)).toBeInTheDocument()
+})
+
+test("disables existing Tailscale management outside the authenticated HTTPS proxy", async () => {
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      {
+        id: "tailscale",
+        name: "Tailscale Funnel",
+        capability: "unavailable",
+        reason: "authenticated_https_admin_required",
+      },
+    ],
+    connections: [
+      {
+        id: "ts-connection",
+        provider: "tailscale",
+        label: "Tailscale Funnel",
+        status: "connected",
+        last_error: null,
+        external_id: "node-123",
+        account_id: null,
+        public_metadata: { device_name: "lns", origin: "http://127.0.0.1:21212" },
+        domains: [
+          {
+            hostname: "lns.example.ts.net",
+            status: "active",
+            external_id: null,
+            zone_id: null,
+            last_error: null,
+          },
+        ],
+        created_at: "2026-08-04T00:00:00Z",
+        updated_at: "2026-08-04T00:00:00Z",
+      },
+    ],
+  })
+
+  renderPage("/connections/tailscale/")
+
+  expect(await screen.findByText("lns.example.ts.net")).toBeInTheDocument()
+  expect(
+    screen.getByText(/authenticated HTTPS admin proxy to refresh or disconnect Tailscale/i),
+  ).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Refresh status" })).toBeDisabled()
+  expect(screen.getByRole("button", { name: "Disconnect" })).toBeDisabled()
+  expect(api.tailscaleSetup).not.toHaveBeenCalled()
+  expect(api.tailscaleLoginStatus).not.toHaveBeenCalled()
+})
+
+test("renders connected Tailscale refresh and disconnect controls", async () => {
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "tailscale", name: "Tailscale Funnel", capability: "available", reason: null },
+    ],
+    connections: [
+      {
+        id: "ts-connection",
+        provider: "tailscale",
+        label: "Tailscale Funnel",
+        status: "connected",
+        last_error: null,
+        external_id: "node-123",
+        account_id: null,
+        public_metadata: { device_name: "lns", origin: "http://127.0.0.1:21212" },
+        domains: [
+          {
+            hostname: "lns.example.ts.net",
+            status: "active",
+            external_id: null,
+            zone_id: null,
+            last_error: null,
+          },
+        ],
+        created_at: "2026-08-04T00:00:00Z",
+        updated_at: "2026-08-04T00:00:00Z",
+      },
+    ],
+  })
+
+  renderPage("/connections/tailscale/")
+
+  expect(await screen.findByText("lns.example.ts.net")).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Refresh status" })).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Copy hostname" })).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument()
 })

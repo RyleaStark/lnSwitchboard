@@ -297,6 +297,27 @@ export type CloudflareProvisionPayload = {
   hostname: string
 }
 
+export type TailscaleSetup = {
+  available: boolean
+  authorization_method: "web_login"
+  default_device_name: string
+  device_name_max_length: number
+  public_origin: string
+  public_port: 443
+  required_tag: string
+  prerequisites: string[]
+}
+
+export type TailscaleLogin = {
+  state: "needs_login" | "prerequisites_required" | "connected" | "expired"
+  device_name: string
+  auth_url?: string | null
+  expires_in_seconds?: number
+  hostname?: string
+  missing_prerequisites?: string[]
+  connection?: ProviderConnection
+}
+
 export class ApiError extends Error {
   status: number
   detail: unknown
@@ -456,6 +477,23 @@ export const api = {
     }),
   disconnectCloudflare: (connectionId: string) =>
     request<{ disconnected: boolean }>(`api/connections/cloudflare/${connectionId}`, {
+      method: "DELETE",
+    }),
+  tailscaleSetup: () => request<TailscaleSetup>("api/connections/tailscale/setup"),
+  beginTailscaleLogin: (deviceName: string) =>
+    request<TailscaleLogin>("api/connections/tailscale/login", {
+      method: "POST",
+      body: JSON.stringify({ device_name: deviceName }),
+    }),
+  tailscaleLoginStatus: () => request<TailscaleLogin>("api/connections/tailscale/login"),
+  cancelTailscaleLogin: () =>
+    request<{ cancelled: boolean }>("api/connections/tailscale/login", { method: "DELETE" }),
+  refreshTailscaleStatus: (connectionId: string) =>
+    request<ProviderConnection>(`api/connections/tailscale/${connectionId}/status`, {
+      method: "POST",
+    }),
+  disconnectTailscale: (connectionId: string) =>
+    request<{ disconnected: boolean }>(`api/connections/tailscale/${connectionId}`, {
       method: "DELETE",
     }),
 }

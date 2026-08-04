@@ -171,6 +171,15 @@ class Settings(BaseSettings):
         default="http://lnswitchboard:21212",
     )
     cloudflared_token_gid: int = _env_field(env="CLOUDFLARED_TOKEN_GID", default=0)
+    tailscale_connector_enabled: bool = _env_field(
+        env="TAILSCALE_CONNECTOR_ENABLED", default=False
+    )
+    tailscale_control_dir: Path = _env_field(
+        env="TAILSCALE_CONTROL_DIR", default=Path("secrets/tailscale/control")
+    )
+    tailscale_status_dir: Path = _env_field(
+        env="TAILSCALE_STATUS_DIR", default=Path("secrets/tailscale/status")
+    )
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     trusted_proxy_cidrs: str = _env_field(env="TRUSTED_PROXY_CIDRS", default="")
     trusted_hosts: str = _env_field(env="TRUSTED_HOSTS", default="localhost,127.0.0.1,[::1]")
@@ -192,6 +201,8 @@ class Settings(BaseSettings):
         "data_store_path",
         "connection_secret_key_path",
         "cloudflared_token_path",
+        "tailscale_control_dir",
+        "tailscale_status_dir",
         "macaroon_store_path",
         "nostr_zap_secret_path",
         mode="before",

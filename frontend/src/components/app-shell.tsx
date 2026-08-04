@@ -179,6 +179,17 @@ export function AppShell() {
                               </SidebarNavLink>
                             </SidebarMenuSubButton>
                           </SidebarMenuSubItem>
+                          <SidebarMenuSubItem>
+                            <SidebarMenuSubButton
+                              asChild
+                              isActive={isActiveRoute(location.pathname, "/connections/tailscale/")}
+                            >
+                              <SidebarNavLink to="/connections/tailscale/">
+                                <NetworkIcon />
+                                <span>Tailscale</span>
+                              </SidebarNavLink>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
                         </SidebarMenuSub>
                       </CollapsibleContent>
                     </Collapsible>
@@ -234,8 +245,8 @@ export function AppShell() {
               </SidebarGroupContent>
             </SidebarGroup>
           </SidebarContent>
-          <SidebarFooter className="gap-3 p-4">
-            <div className="flex flex-col gap-2 rounded-md border bg-background/70 p-3 text-xs">
+          <SidebarFooter className="gap-2 p-2">
+            <div className="flex flex-col gap-2 rounded-md border bg-background/70 p-2 text-xs">
               <StatusRow label="API" tone={serviceOk ? "ok" : "pending"} value={serviceOk ? "Online" : "Checking"} />
               <Tooltip>
                 <TooltipTrigger asChild>

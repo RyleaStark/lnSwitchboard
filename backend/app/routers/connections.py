@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Awaitable, Callable, TypeVar
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..cloudflare_client import CloudflareAPIError
 from ..cloudflare_service import (
@@ -23,11 +23,21 @@ from ..deps import (
     get_cloudflare_service_dep,
     get_connection_store_dep,
     get_settings_dep,
+    get_tailscale_service_dep,
+)
+from ..tailscale_connector import TailscaleProtocolError
+from ..tailscale_service import (
+    TailscaleNotFoundError,
+    TailscaleOperationError,
+    TailscaleService,
+    TailscaleUnavailableError,
+    TailscaleValidationError,
 )
 
 router = APIRouter(prefix="/api/connections", tags=["connections"])
 _Result = TypeVar("_Result")
 CLOUDFLARE_AUTHORIZATION_COOKIE = "lnswitchboard_cloudflare_authorization"
+TAILSCALE_LOGIN_COOKIE = "lnswitchboard_tailscale_login"
 _REQUIRED_PERMISSIONS = [
     "Account / Cloudflare Tunnel / Edit",
     "Account / Account Settings / Read",
@@ -53,6 +63,45 @@ class CloudflareProvisionRequest(BaseModel):
     account_id: str
     zone_id: str
     hostname: str
+
+
+class TailscaleLoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device_name: str = Field(default="lns", min_length=1, max_length=63)
+
+
+async def require_authenticated_tailscale_admin(request: Request) -> None:
+    if not (
+        getattr(request.state, "authenticated_admin_proxy", False)
+        and getattr(request.state, "authenticated_admin_https", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tailscale onboarding requires an authenticated HTTPS admin proxy",
+        )
+
+
+async def _tailscale_call(operation: Callable[[], Awaitable[_Result]]) -> _Result:
+    try:
+        return await operation()
+    except TailscaleUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except TailscaleValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    except TailscaleNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except (TailscaleOperationError, TailscaleProtocolError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Tailscale operation failed",
+        ) from exc
 
 
 async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Result:
@@ -90,10 +139,23 @@ async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Resu
 
 @router.get("")
 async def list_connections(
+    request: Request,
     store: ConnectionStore = Depends(get_connection_store_dep),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
     connector_available = settings.cloudflared_connector_enabled
+    tailscale_authenticated = bool(
+        getattr(request.state, "authenticated_admin_proxy", False)
+        and getattr(request.state, "authenticated_admin_https", False)
+    )
+    tailscale_available = (
+        settings.tailscale_connector_enabled and tailscale_authenticated
+    )
+    tailscale_reason = None
+    if not settings.tailscale_connector_enabled:
+        tailscale_reason = "connector_not_installed"
+    elif not tailscale_authenticated:
+        tailscale_reason = "authenticated_https_admin_required"
     return {
         "providers": [
             {
@@ -101,12 +163,127 @@ async def list_connections(
                 "name": "Cloudflare",
                 "capability": "available" if connector_available else "unavailable",
                 "reason": None if connector_available else "connector_not_installed",
-            }
+            },
+            {
+                "id": "tailscale",
+                "name": "Tailscale Funnel",
+                "capability": "available" if tailscale_available else "unavailable",
+                "reason": tailscale_reason,
+            },
         ],
         "connections": [
             _serialize_connection(connection) for connection in store.list_connections()
         ],
     }
+
+
+@router.get(
+    "/tailscale/setup",
+    dependencies=[Depends(require_authenticated_tailscale_admin)],
+)
+async def tailscale_setup(
+    service: TailscaleService = Depends(get_tailscale_service_dep),
+) -> dict[str, object]:
+    return service.setup()
+
+
+@router.post(
+    "/tailscale/login",
+    dependencies=[Depends(require_authenticated_tailscale_admin)],
+)
+async def begin_tailscale_login(
+    payload: TailscaleLoginRequest,
+    response: Response,
+    service: TailscaleService = Depends(get_tailscale_service_dep),
+) -> dict[str, object]:
+    flow_id, result = await _tailscale_call(
+        lambda: service.begin_login(payload.device_name)
+    )
+    response.set_cookie(
+        TAILSCALE_LOGIN_COOKIE,
+        flow_id,
+        max_age=service.login_ttl_seconds,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/api/connections/tailscale",
+    )
+    return result
+
+
+@router.get(
+    "/tailscale/login",
+    dependencies=[Depends(require_authenticated_tailscale_admin)],
+)
+async def tailscale_login_status(
+    response: Response,
+    flow_id: str | None = Cookie(default=None, alias=TAILSCALE_LOGIN_COOKIE),
+    service: TailscaleService = Depends(get_tailscale_service_dep),
+) -> dict[str, object]:
+    if not flow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tailscale login flow was not found",
+        )
+    result = await _tailscale_call(lambda: service.poll_login(flow_id))
+    if result.get("state") in {"connected", "expired"}:
+        response.delete_cookie(
+            TAILSCALE_LOGIN_COOKIE,
+            path="/api/connections/tailscale",
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
+    return result
+
+
+@router.delete(
+    "/tailscale/login",
+    dependencies=[Depends(require_authenticated_tailscale_admin)],
+)
+async def cancel_tailscale_login(
+    response: Response,
+    flow_id: str | None = Cookie(default=None, alias=TAILSCALE_LOGIN_COOKIE),
+    service: TailscaleService = Depends(get_tailscale_service_dep),
+) -> dict[str, bool]:
+    if not flow_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tailscale login flow was not found",
+        )
+    cancelled = await _tailscale_call(lambda: service.cancel_login(flow_id))
+    response.delete_cookie(
+        TAILSCALE_LOGIN_COOKIE,
+        path="/api/connections/tailscale",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+    return {"cancelled": cancelled}
+
+
+@router.post(
+    "/tailscale/{connection_id}/status",
+    dependencies=[Depends(require_authenticated_tailscale_admin)],
+)
+async def refresh_tailscale_status(
+    connection_id: str,
+    service: TailscaleService = Depends(get_tailscale_service_dep),
+) -> dict[str, object]:
+    connection = await _tailscale_call(lambda: service.refresh(connection_id))
+    return _serialize_connection(connection)
+
+
+@router.delete(
+    "/tailscale/{connection_id}",
+    dependencies=[Depends(require_authenticated_tailscale_admin)],
+)
+async def disconnect_tailscale(
+    connection_id: str,
+    service: TailscaleService = Depends(get_tailscale_service_dep),
+) -> dict[str, bool]:
+    disconnected = await _tailscale_call(lambda: service.disconnect(connection_id))
+    return {"disconnected": disconnected}
 
 
 @router.get("/cloudflare/setup")

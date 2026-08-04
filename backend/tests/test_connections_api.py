@@ -33,7 +33,13 @@ def test_connections_api_lists_provider_capabilities_and_connections(test_client
             "name": "Cloudflare",
             "capability": "unavailable",
             "reason": "connector_not_installed",
-        }
+        },
+        {
+            "id": "tailscale",
+            "name": "Tailscale Funnel",
+            "capability": "unavailable",
+            "reason": "connector_not_installed",
+        },
     ]
     assert response.json()["connections"][0]["id"] == connection.id
     metadata = response.json()["connections"][0]["public_metadata"]

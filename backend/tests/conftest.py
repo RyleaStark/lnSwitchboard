@@ -74,6 +74,7 @@ def configure_env(tmp_path):
     os.environ["DATA_STORE_PATH"] = str(data_store_path)
     os.environ["CONNECTION_SECRET_KEY_PATH"] = str(tmp_path / "connection-secrets.key")
     os.environ.pop("CLOUDFLARED_CONNECTOR_ENABLED", None)
+    os.environ.pop("TAILSCALE_CONNECTOR_ENABLED", None)
     os.environ["LND_GRPC_PORT"] = "10009"
     os.environ["MACAROON_STORE_PATH"] = str(macaroon)
     os.environ["LNURL_COMMENT_MAX_LENGTH"] = "120"
@@ -93,6 +94,7 @@ def configure_env(tmp_path):
     deps._get_connection_store.cache_clear()
     deps._get_connection_secret_store.cache_clear()
     deps._get_cloudflare_service.cache_clear()
+    deps._get_tailscale_service.cache_clear()
     deps._get_rate_limiter.cache_clear()
     deps._get_ln_client.cache_clear()
     deps._get_macaroon_store.cache_clear()
@@ -112,6 +114,7 @@ def configure_env(tmp_path):
     deps._get_connection_store.cache_clear()
     deps._get_connection_secret_store.cache_clear()
     deps._get_cloudflare_service.cache_clear()
+    deps._get_tailscale_service.cache_clear()
     deps._get_rate_limiter.cache_clear()
     deps._get_ln_client.cache_clear()
     deps._get_macaroon_store.cache_clear()

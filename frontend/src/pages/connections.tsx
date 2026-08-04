@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { RefreshCwIcon, ShieldCheckIcon, Trash2Icon } from "lucide-react"
+import { ExternalLinkIcon, NetworkIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XIcon } from "lucide-react"
+import QRCode from "qrcode"
+import { useLocation } from "react-router"
 
 import { toast } from "sonner"
 
 import { CloudflareIcon } from "@/components/cloudflare-icon"
+import { CopyButton } from "@/components/common"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -37,9 +40,18 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ApiError, api, type CloudflareAuthorization, type ProviderConnection } from "@/lib/api"
+import { ApiError, api, type CloudflareAuthorization, type ProviderConnection, type TailscaleLogin } from "@/lib/api"
 
 export function ConnectionsPage() {
+  const location = useLocation()
+  return location.pathname.includes("/connections/tailscale") ? (
+    <TailscaleConnectionsPage />
+  ) : (
+    <CloudflareConnectionsPage />
+  )
+}
+
+function CloudflareConnectionsPage() {
   const queryClient = useQueryClient()
 
   const [accountId, setAccountId] = useState("")
@@ -235,6 +247,501 @@ export function ConnectionsPage() {
           )}
         </CardContent>
       </Card>
+    </div>
+  )
+}
+
+function TailscaleConnectionsPage() {
+  const queryClient = useQueryClient()
+  const [deviceName, setDeviceName] = useState("lns")
+  const [login, setLogin] = useState<TailscaleLogin | null>(null)
+  const [qrCode, setQrCode] = useState<string | null>(null)
+  const [connecting, setConnecting] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const [pollFailures, setPollFailures] = useState(0)
+  const [proxyAccessDenied, setProxyAccessDenied] = useState(false)
+  const operationInFlight = useRef<"check" | "connect" | "cancel" | null>(null)
+  const recoveryAttempted = useRef(false)
+  const connections = useQuery({ queryKey: ["connections"], queryFn: api.connections })
+  const provider = connections.data?.providers.find((item) => item.id === "tailscale")
+  const providerAvailable = provider?.capability === "available"
+  const setup = useQuery({
+    queryKey: ["tailscale-setup"],
+    queryFn: api.tailscaleSetup,
+    enabled: providerAvailable,
+  })
+  const connection = connections.data?.connections.find((item) => item.provider === "tailscale")
+  const providerReason = provider?.reason ?? null
+  const setupForbidden = setup.error instanceof ApiError && setup.error.status === 403
+  const authenticatedProxyRequired =
+    providerReason === "authenticated_https_admin_required" || setupForbidden || proxyAccessDenied
+  const available = setup.data?.available === true && providerAvailable && !authenticatedProxyRequired
+  const normalizedName = deviceName.trim().toLowerCase()
+  const validName = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(normalizedName)
+
+  const clearLoginView = useCallback(() => {
+    setLogin(null)
+    setQrCode(null)
+    setPollFailures(0)
+  }, [])
+
+  const applyLoginResult = useCallback(
+    async (result: TailscaleLogin) => {
+      if (result.state === "expired") {
+        clearLoginView()
+        toast.error("Tailscale login expired. Start a new login.")
+        return
+      }
+      setLogin(result)
+      if (result.state === "connected") {
+        setQrCode(null)
+        await queryClient.invalidateQueries({ queryKey: ["connections"] })
+        toast.success("Tailscale Funnel connected")
+      }
+    },
+    [clearLoginView, queryClient],
+  )
+
+  const checkLogin = useCallback(
+    async (announceError = true) => {
+      if (operationInFlight.current !== null) return
+      operationInFlight.current = "check"
+      setChecking(true)
+      try {
+        await applyLoginResult(await api.tailscaleLoginStatus())
+        setPollFailures(0)
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          if (login !== null) {
+            clearLoginView()
+            toast.error("Tailscale login expired. Start a new login.")
+          }
+          return
+        }
+        if (error instanceof ApiError && error.status === 403) {
+          clearLoginView()
+          setProxyAccessDenied(true)
+          toast.error(
+            "Open lnSwitchboard through an authenticated HTTPS admin proxy to manage Tailscale.",
+          )
+          return
+        }
+        setPollFailures((value) => Math.min(value + 1, 4))
+        if (announceError) {
+          toast.error(
+            error instanceof Error ? error.message : "Unable to check Tailscale login",
+          )
+        }
+      } finally {
+        if (operationInFlight.current === "check") operationInFlight.current = null
+        setChecking(false)
+      }
+    },
+    [applyLoginResult, clearLoginView, login],
+  )
+
+  useEffect(() => {
+    if (setup.data?.default_device_name) setDeviceName(setup.data.default_device_name)
+  }, [setup.data?.default_device_name])
+
+  useEffect(() => {
+    if (authenticatedProxyRequired) clearLoginView()
+  }, [authenticatedProxyRequired, clearLoginView])
+
+  useEffect(() => {
+    if (!available || recoveryAttempted.current) return
+    recoveryAttempted.current = true
+    void checkLogin(false)
+  }, [available, checkLogin])
+
+  useEffect(() => {
+    if (login?.state !== "needs_login") return
+    const delay = Math.min(2_000 * 2 ** pollFailures, 30_000)
+    const timeout = window.setTimeout(() => void checkLogin(false), delay)
+    return () => window.clearTimeout(timeout)
+  }, [checkLogin, login?.state, pollFailures])
+
+  useEffect(() => {
+    let active = true
+    const authUrl = login?.state === "needs_login" ? login.auth_url : null
+    if (!authUrl) {
+      setQrCode(null)
+      return
+    }
+    void QRCode.toString(authUrl, {
+      type: "svg",
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 192,
+    }).then((svg) => {
+      if (active) setQrCode(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`)
+    })
+    return () => {
+      active = false
+    }
+  }, [login])
+
+  const connect = async () => {
+    if (!available || !validName || operationInFlight.current !== null) return
+    operationInFlight.current = "connect"
+    setConnecting(true)
+    try {
+      await applyLoginResult(await api.beginTailscaleLogin(normalizedName))
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        clearLoginView()
+        setProxyAccessDenied(true)
+        toast.error(
+          "Open lnSwitchboard through an authenticated HTTPS admin proxy to manage Tailscale.",
+        )
+      } else {
+        toast.error(error instanceof Error ? error.message : "Unable to start Tailscale login")
+      }
+    } finally {
+      if (operationInFlight.current === "connect") operationInFlight.current = null
+      setConnecting(false)
+    }
+  }
+
+  const cancel = async () => {
+    if (operationInFlight.current !== null) return
+    operationInFlight.current = "cancel"
+    setCancelling(true)
+    try {
+      await api.cancelTailscaleLogin()
+      clearLoginView()
+      await queryClient.invalidateQueries({ queryKey: ["connections"] })
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        clearLoginView()
+        setProxyAccessDenied(true)
+        toast.error(
+          "Open lnSwitchboard through an authenticated HTTPS admin proxy to manage Tailscale.",
+        )
+      } else {
+        toast.error(error instanceof Error ? error.message : "Unable to cancel Tailscale login")
+      }
+    } finally {
+      if (operationInFlight.current === "cancel") operationInFlight.current = null
+      setCancelling(false)
+    }
+  }
+
+  const handleManagementError = (error: unknown, fallback: string) => {
+    if (error instanceof ApiError && error.status === 403) {
+      clearLoginView()
+      setProxyAccessDenied(true)
+      toast.error(
+        "Open lnSwitchboard through an authenticated HTTPS admin proxy to manage Tailscale.",
+      )
+      return
+    }
+    toast.error(error instanceof Error ? error.message : fallback)
+  }
+
+  const refresh = useMutation({
+    mutationFn: api.refreshTailscaleStatus,
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["connections"] }),
+    onError: (error) => handleManagementError(error, "Status refresh failed"),
+  })
+  const disconnect = useMutation({
+    mutationFn: api.disconnectTailscale,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["connections"] })
+      toast.success("Tailscale Funnel disconnected")
+    },
+    onError: (error) => handleManagementError(error, "Disconnect failed"),
+  })
+
+  if (connections.isPending || (providerAvailable && setup.isPending)) {
+    return <ConnectionsSkeleton />
+  }
+  if (connections.isError || (providerAvailable && setup.isError && !setupForbidden)) {
+    return <ConnectionsLoadError />
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <header className="flex items-start gap-3">
+        <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-foreground/5 ring-1 ring-foreground/10">
+          <NetworkIcon className="size-6" />
+        </div>
+        <div className="min-w-0">
+          <h1 className="font-heading text-2xl font-semibold tracking-tight text-balance">Connections</h1>
+          <p className="mt-1 max-w-2xl text-sm leading-normal text-pretty text-muted-foreground">
+            Authorize a dedicated Tailscale node, then expose only lnSwitchboard&apos;s isolated public listener through Funnel.
+          </p>
+        </div>
+      </header>
+
+      <Card aria-disabled={!available ? true : undefined}>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <NetworkIcon className="size-5" />
+            <CardTitle><h2>Tailscale Funnel</h2></CardTitle>
+          </div>
+          <CardDescription className="max-w-2xl text-pretty">
+            Uses a short-lived browser login. Public HTTPS traffic reaches only port 21212; the Tailscale hostname is discovered after login.
+          </CardDescription>
+          <CardAction>
+            {!available ? (
+              <Badge variant="secondary">
+                {authenticatedProxyRequired ? "Authenticated HTTPS required" : "Connector not installed"}
+              </Badge>
+            ) : connection ? (
+              <ConnectionStatusBadge status={connection.status} />
+            ) : (
+              <Badge variant="outline">Ready to connect</Badge>
+            )}
+          </CardAction>
+        </CardHeader>
+        <CardContent>
+          {connection ? (
+            <ConnectedTailscale
+              connection={connection}
+              refreshing={refresh.isPending}
+              disconnecting={disconnect.isPending}
+              managementDisabled={!available}
+              authenticatedProxyRequired={authenticatedProxyRequired}
+              onRefresh={() => refresh.mutate(connection.id)}
+              onDisconnect={() => disconnect.mutate(connection.id)}
+            />
+          ) : login?.state === "needs_login" && login.auth_url ? (
+            <TailscaleLoginPrompt
+              authUrl={login.auth_url}
+              qrCode={qrCode}
+              expiresIn={login.expires_in_seconds ?? 0}
+              checking={checking || connecting}
+              cancelling={cancelling}
+              onCheck={() => void checkLogin()}
+              onCancel={() => void cancel()}
+            />
+          ) : login?.state === "prerequisites_required" ? (
+            <TailscalePrerequisites
+              hostname={login.hostname ?? "Tailscale hostname unavailable"}
+              missing={login.missing_prerequisites ?? []}
+              checking={checking || connecting}
+              onCheck={() => void checkLogin()}
+              onCancel={() => void cancel()}
+              cancelling={cancelling}
+            />
+          ) : (
+            <FieldGroup className="max-w-2xl">
+              <Field>
+                <FieldLabel htmlFor="tailscale-device-name">Device name</FieldLabel>
+                <Input
+                  id="tailscale-device-name"
+                  value={deviceName}
+                  maxLength={setup.data?.device_name_max_length ?? 63}
+                  aria-invalid={!validName}
+                  aria-describedby={!validName ? "tailscale-device-name-error" : undefined}
+                  disabled={!available || connecting}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  onChange={(event) => setDeviceName(event.target.value)}
+                />
+                <FieldDescription>
+                  Suggested: lns. Use one DNS label with letters, numbers, or internal hyphens. Your public .ts.net hostname is discovered from Tailscale.
+                </FieldDescription>
+                {!validName ? (
+                  <p id="tailscale-device-name-error" role="alert" className="text-sm text-destructive">
+                    Use 1–63 letters, numbers, or internal hyphens.
+                  </p>
+                ) : null}
+              </Field>
+              <Button type="button" disabled={!available || !validName || connecting || checking || cancelling} onClick={() => void connect()}>
+                <ShieldCheckIcon />
+                {connecting ? "Starting login…" : "Connect Tailscale"}
+              </Button>
+              {!available ? (
+                <p className="text-sm text-muted-foreground">
+                  {authenticatedProxyRequired
+                    ? "Open lnSwitchboard through an authenticated HTTPS admin proxy to use Tailscale onboarding."
+                    : "Add the Tailscale sidecar to this deployment stack to enable onboarding."}
+                </p>
+              ) : null}
+            </FieldGroup>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function TailscaleLoginPrompt({
+  authUrl,
+  qrCode,
+  expiresIn,
+  checking,
+  cancelling,
+  onCheck,
+  onCancel,
+}: {
+  authUrl: string
+  qrCode: string | null
+  expiresIn: number
+  checking: boolean
+  cancelling: boolean
+  onCheck: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_12rem] md:items-start">
+      <div className="space-y-4">
+        <div>
+          <h3 className="font-medium">Finish login in Tailscale</h3>
+          <p className="mt-1 max-w-xl text-sm leading-normal text-pretty text-muted-foreground">
+            Open the one-time login page or scan the QR code, sign in, and approve this dedicated node. This page checks automatically.
+          </p>
+        </div>
+        <a
+          className="inline-flex items-center gap-2 text-sm font-medium text-primary underline-offset-4 hover:underline"
+          href={authUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Open Tailscale login <ExternalLinkIcon className="size-4" />
+        </a>
+        <p className="text-xs text-muted-foreground">Login expires in about {Math.max(0, Math.ceil(expiresIn / 60))} minutes.</p>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" disabled={checking || cancelling} onClick={onCheck}>
+            {checking ? "Checking…" : "Check status"}
+          </Button>
+          <Button type="button" variant="ghost" disabled={cancelling || checking} onClick={onCancel}>
+            <XIcon /> {cancelling ? "Cancelling…" : "Cancel"}
+          </Button>
+        </div>
+      </div>
+      <div className="flex aspect-square items-center justify-center overflow-hidden rounded-xl bg-white p-2 ring-1 ring-black/10">
+        {qrCode ? (
+          <img className="size-full" src={qrCode} alt="Tailscale login QR code" />
+        ) : (
+          <Skeleton className="size-full rounded-lg" />
+        )}
+      </div>
+    </div>
+  )
+}
+
+const prerequisiteLabels: Record<string, string> = {
+  magic_dns: "Enable MagicDNS for the tailnet.",
+  https_certificates: "Enable HTTPS certificates for the reported node hostname.",
+  funnel_node_attribute: "Grant tag:lnswitchboard the funnel node attribute.",
+  funnel_port_443: "Allow Funnel on HTTPS port 443.",
+}
+
+function TailscalePrerequisites({
+  hostname,
+  missing,
+  checking,
+  cancelling,
+  onCheck,
+  onCancel,
+}: {
+  hostname: string
+  missing: string[]
+  checking: boolean
+  cancelling: boolean
+  onCheck: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="font-medium">Tailnet setup required</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          The node is signed in as <span className="font-medium text-foreground">{hostname}</span>. lnSwitchboard will not change tailnet policy automatically.
+        </p>
+      </div>
+      <ul className="space-y-2 text-sm text-muted-foreground">
+        {missing.map((item) => <li key={item}>• {prerequisiteLabels[item] ?? item}</li>)}
+      </ul>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" disabled={checking || cancelling} onClick={onCheck}>
+          {checking ? "Checking…" : "Check again"}
+        </Button>
+        <Button type="button" variant="ghost" disabled={cancelling || checking} onClick={onCancel}>
+          {cancelling ? "Cancelling…" : "Disconnect node"}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function ConnectedTailscale({
+  connection,
+  refreshing,
+  disconnecting,
+  managementDisabled,
+  authenticatedProxyRequired,
+  onRefresh,
+  onDisconnect,
+}: {
+  connection: ProviderConnection
+  refreshing: boolean
+  disconnecting: boolean
+  managementDisabled: boolean
+  authenticatedProxyRequired: boolean
+  onRefresh: () => void
+  onDisconnect: () => void
+}) {
+  const disabled = managementDisabled || refreshing || disconnecting
+  return (
+    <div className="flex flex-col gap-5">
+      {managementDisabled ? (
+        <p role="alert" className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
+          {authenticatedProxyRequired
+            ? "Open lnSwitchboard through an authenticated HTTPS admin proxy to refresh or disconnect Tailscale."
+            : "Restore the Tailscale connector to refresh or disconnect this connection."}
+        </p>
+      ) : null}
+      {connection.domains.map((domain) => (
+        <div key={domain.hostname} className="rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
+          <div className="flex min-w-0 items-center justify-between gap-3">
+            <span className="min-w-0 truncate font-medium" title={domain.hostname}>{domain.hostname}</span>
+            <div className="flex shrink-0 items-center gap-2">
+              <CopyButton
+                value={domain.hostname}
+                label="Copy hostname"
+                copiedLabel="Hostname copied"
+              />
+              <Badge variant={domain.status === "error" ? "destructive" : "outline"}>{domain.status}</Badge>
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">Authoritative Tailscale hostname • Funnel HTTPS 443 → lnSwitchboard 21212</p>
+          {domain.last_error ? (
+            <p role="alert" className="mt-2 text-xs text-destructive">{domain.last_error}</p>
+          ) : null}
+        </div>
+      ))}
+      {connection.last_error ? <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{connection.last_error}</p> : null}
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" disabled={disabled} onClick={onRefresh}>
+          <RefreshCwIcon className={refreshing ? "animate-spin" : undefined} />
+          {refreshing ? "Checking…" : "Refresh status"}
+        </Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button variant="destructive" disabled={disabled}>
+              <Trash2Icon /> {disconnecting ? "Disconnecting…" : "Disconnect"}
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Disconnect Tailscale Funnel?</AlertDialogTitle>
+              <AlertDialogDescription>
+                lnSwitchboard will disable public Funnel ingress before logging out and removing its dedicated node state.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction variant="destructive" onClick={onDisconnect}>Disconnect Funnel</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
     </div>
   )
 }
