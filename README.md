@@ -77,7 +77,7 @@ Set `TRUSTED_HOSTS` to every hostname that may serve lnSwitchboard (comma-separa
 
 ### 🧩 Manual (bare metal)
 
-The supported toolchain is Python 3.11 or newer and Node.js 22.22.2 or newer. CI, release images, `.python-version`, and `.nvmrc` currently pin Python 3.14.6 and Node.js 22.23.1.
+The supported toolchain is Python 3.11 or newer and Node.js 22.22.2 or newer. CI, release images, `.python-version`, and `.nvmrc` currently pin Python 3.14.6 and Node.js 26.5.1.
 
 ```bash
 python3.11 -m venv .venv
