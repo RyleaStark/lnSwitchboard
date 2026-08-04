@@ -83,6 +83,7 @@ def _get_webhook_dispatcher() -> WebhookDispatcher:
         max_retries=settings.webhook_max_retries,
         retry_window_seconds=settings.webhook_retry_window_seconds,
         zap_publisher=_get_zap_publisher(),
+        allow_private_webhooks=settings.allow_private_webhooks,
     )
 
 
@@ -94,9 +95,11 @@ def _get_nostr_signer_store() -> NostrSignerStore:
 
 @lru_cache()
 def _get_zap_publisher() -> NostrZapPublisher:
+    settings = get_settings()
     return NostrZapPublisher(
         signer_store=_get_nostr_signer_store(),
         storage=_get_log_storage(),
+        allow_private_relays=settings.allow_private_nostr_relays,
     )
 
 

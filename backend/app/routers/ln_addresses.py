@@ -276,11 +276,11 @@ async def _resolve_forwarding_target(payload: LNAddressPayload) -> Optional[Forw
     try:
         target = await fetch_forwarding_discovery(payload.forward_to or "")
     except ForwardingTargetError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     local_identifier = f"{payload.local_part}@{payload.domain}"
     if target.address == local_identifier:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Forwarding target cannot be the same as the local address",
         )
     return target
@@ -309,7 +309,7 @@ async def validate_forwarding_address(payload: ForwardingValidationPayload) -> D
     try:
         target = await fetch_forwarding_discovery(payload.forward_to)
     except ForwardingTargetError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     return _forwarding_validation_response(target)
 
 

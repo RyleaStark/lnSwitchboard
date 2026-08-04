@@ -71,18 +71,22 @@ Then run:
 docker compose up -d
 ```
 
-Once the service is running, point your reverse proxy so that only `/.well-known/lnurlp/*` and `/.well-known/nostr.json` hit port `22121`. Keep the dashboard behind a VPN, SSH tunnel, or HTTP auth.
+Compose binds port `22121` to loopback by default. Set `LNSWITCHBOARD_BIND_ADDRESS` only when the service must listen on another host interface. Once the service is running, point your reverse proxy so that only `/.well-known/lnurlp/*` and `/.well-known/nostr.json` are internet-facing. Keep the dashboard and `/api/*` routes behind a VPN, SSH tunnel, or HTTP auth. The admin API is same-origin by default and deliberately does not grant cross-origin browser access.
+
+Set `TRUSTED_HOSTS` to every hostname that may serve lnSwitchboard (comma-separated; `*.example.com` wildcards are supported). Requests with any other `Host` value are rejected, which protects a loopback deployment from DNS rebinding. Forwarding headers are ignored unless the immediate reverse proxy is explicitly listed in `TRUSTED_PROXY_CIDRS` (comma-separated IPs or CIDR ranges). Configure the narrowest possible proxy network so LNURL callback URLs and client rate limits use the original HTTPS request safely; never trust an entire shared LAN. Outbound webhooks and Nostr zap receipts refuse destinations on private, loopback, link-local, or reserved networks by default; enable `ALLOW_PRIVATE_WEBHOOKS` or `ALLOW_PRIVATE_NOSTR_RELAYS` only when intentionally targeting trusted local services.
 
 ### 🧩 Manual (bare metal)
 
+The supported toolchain is Python 3.11 or newer and Node.js 22.22.2 or newer. CI, release images, `.python-version`, and `.nvmrc` currently pin Python 3.11.15 and Node.js 22.23.1.
+
 ```bash
-python3.12 -m venv .venv
+python3.11 -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt
 cd frontend && npm ci && npm run build && cd ..
-.venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 22121
+.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 22121 --no-proxy-headers
 ```
 
-Set `LND_TLS_PATH`, `LND_MACAROON_PATH`, and `LND_READONLY_MACAROON_PATH` to existing LND files before launching. lnSwitchboard uses `invoice.macaroon` for invoice creation/lookup/subscription and `readonly.macaroon` for liquidity reads such as `ListChannels`. By default, lnSwitchboard verifies LND's certificate against `LND_HOST` using the trust roots from `LND_TLS_PATH`; set `LND_TLS_SERVER_NAME` only when you intentionally need to verify against a different certificate SAN. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`.
+Set `LND_TLS_PATH`, `LND_MACAROON_PATH`, and `LND_READONLY_MACAROON_PATH` to existing LND files before launching. lnSwitchboard uses `invoice.macaroon` for invoice creation/lookup/subscription and `readonly.macaroon` for liquidity reads such as `ListChannels`. By default, lnSwitchboard verifies LND's certificate against `LND_HOST` using the trust roots from `LND_TLS_PATH`; set `LND_TLS_SERVER_NAME` only when you intentionally need to verify against a different certificate SAN. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`. Environment settings saved through the dashboard are persisted to `.env` and apply after lnSwitchboard restarts.
 
 ### 🛠️ LND Diagnostics
 
@@ -96,7 +100,7 @@ docker exec <lnswitchboard-container> lnswitchboard-diagnose-lnd
 
 ## How it Works (Under the Hood)
 
-1. **FastAPI core** mounts the static frontend and exposes LNURL, UI, identity, and LN-address routers. CORS is limited to `GET` since only public endpoints should be internet-facing.
+1. **FastAPI core** mounts the static frontend and exposes LNURL, UI, identity, and LN-address routers. The UI and admin API stay same-origin; only the explicitly documented public endpoints should be internet-facing.
 2. **LN client** (`grpc.aio`) talks to LND using your TLS cert + invoice macaroon, generating invoices with properly hashed metadata and watching channel capacity to set `maxSendable`.
 3. **LN address store** lives in SQLite, so per-handle overrides survive restarts and apply to every `user+tag`.
 4. **Request log storage** mirrors all discovery/invoice/verify events in SQLite plus an in-memory deque for fast UI reads. Older entries age out via `LOG_RETENTION_DAYS`.

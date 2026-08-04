@@ -248,7 +248,7 @@ async def get_env_settings(
 @router.put("/settings/env")
 async def put_env_settings(payload: EnvSettingsUpdate) -> Dict[str, Any]:
     updated = update_env_settings(payload.values)
-    return {"updated": list(updated.keys())}
+    return {"updated": list(updated.keys()), "restart_required": bool(updated)}
 
 
 @router.get("/channels/public")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 
 from fastapi.testclient import TestClient
 
@@ -74,7 +75,9 @@ def test_identity_crud_and_listing(test_client: TestClient):
     assert post_delete_list == []
 
 
-def test_well_known_scopes_entries_by_domain(test_client: TestClient):
+def test_well_known_scopes_entries_by_domain(monkeypatch, test_client: TestClient):
+    monkeypatch.setenv("TRUSTED_HOSTS", "testserver,nostr.example")
+    config.get_settings.cache_clear()
     alice = create_identity(
         test_client,
         {
@@ -194,7 +197,7 @@ def test_well_known_filters_invalid_stored_relay_hints(test_client: TestClient):
         },
     )
     db_path = config.get_settings().data_store_path
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute(
             "UPDATE nostr_identities SET relays = ? WHERE id = ?",
             (

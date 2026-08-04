@@ -146,7 +146,7 @@ def _prepare_payload(payload: IdentityPayload) -> Dict[str, Any]:
     try:
         relays = _normalize_relays(payload.relays)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     return {
         "local_part": payload.local_part,
         "domain": payload.domain,

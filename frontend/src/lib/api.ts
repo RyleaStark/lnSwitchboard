@@ -365,7 +365,7 @@ export const api = {
     }),
   envSettings: () => request<{ settings: EnvSetting[] }>("api/settings/env"),
   updateEnvSettings: (values: Record<string, string>) =>
-    request<{ updated: string[] }>("api/settings/env", {
+    request<{ updated: string[]; restart_required: boolean }>("api/settings/env", {
       method: "PUT",
       body: JSON.stringify({ values }),
     }),

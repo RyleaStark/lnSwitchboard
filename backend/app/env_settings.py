@@ -11,7 +11,6 @@ from fastapi import HTTPException, status
 from pydantic import ValidationError
 
 from . import config
-from . import deps
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE = Path(os.environ.get("LNSWITCHBOARD_ENV_FILE", BASE_DIR / ".env")).resolve()
@@ -393,18 +392,5 @@ def update_env_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
         ) from exc
 
     _write_env_file(env_values)
-    for key, value in env_values.items():
-        os.environ[key] = value
-
-    config.get_settings.cache_clear()
-    deps._get_rate_limiter.cache_clear()
-    deps._get_ln_client.cache_clear()
-    deps._get_log_storage.cache_clear()
-    deps._get_macaroon_store.cache_clear()
-    deps._get_readonly_macaroon_store.cache_clear()
-    deps._get_nip05_store.cache_clear()
-    deps._get_webhook_dispatcher.cache_clear()
-    deps._get_nostr_signer_store.cache_clear()
-    deps._get_zap_publisher.cache_clear()
 
     return changed

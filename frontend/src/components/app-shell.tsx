@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom"
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router"
 import { useQuery } from "@tanstack/react-query"
 import {
   BadgeDollarSignIcon,

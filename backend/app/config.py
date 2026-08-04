@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from functools import lru_cache
+from ipaddress import IPv4Network, IPv6Network, ip_network
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -51,6 +52,37 @@ def parse_payer_data_config(value: Any) -> Dict[str, bool]:
             raise ValueError("LNURL_PAYER_DATA must be a JSON object or shorthand list")
         return _validated_config({str(key): bool(val) for key, val in data.items()})
     raise ValueError("Unsupported value for LNURL_PAYER_DATA")
+
+
+def parse_trusted_proxy_cidrs(value: str | Sequence[str]) -> tuple[IPv4Network | IPv6Network, ...]:
+    """Parse trusted reverse-proxy networks from a comma-separated value."""
+
+    values = value.split(",") if isinstance(value, str) else value
+    networks: list[IPv4Network | IPv6Network] = []
+    for item in values:
+        normalized = str(item).strip()
+        if normalized:
+            networks.append(ip_network(normalized, strict=False))
+    return tuple(networks)
+
+
+def parse_trusted_hosts(value: str | Sequence[str]) -> tuple[str, ...]:
+    """Parse allowed HTTP Host values, including optional leading wildcards."""
+
+    values = value.split(",") if isinstance(value, str) else value
+    hosts: list[str] = []
+    for item in values:
+        host = str(item).strip().lower()
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        if not host:
+            continue
+        if "://" in host or "/" in host or any(character.isspace() for character in host):
+            raise ValueError("TRUSTED_HOSTS entries must be hostnames or IP addresses")
+        hosts.append(host)
+    if not hosts:
+        raise ValueError("TRUSTED_HOSTS must contain at least one host")
+    return tuple(hosts)
 
 
 def _env_field(*, env: str | Sequence[str], default: Any = PydanticUndefined, **kwargs: Any) -> Any:
@@ -110,6 +142,10 @@ class Settings(BaseSettings):
     log_retention_days: int = _env_field(env="LOG_RETENTION_DAYS", default=180)
     data_store_path: Path = _env_field(env="DATA_STORE_PATH", default=Path("secrets/lnswitchboard.db"))
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
+    trusted_proxy_cidrs: str = _env_field(env="TRUSTED_PROXY_CIDRS", default="")
+    trusted_hosts: str = _env_field(env="TRUSTED_HOSTS", default="localhost,127.0.0.1,[::1]")
+    allow_private_nostr_relays: bool = _env_field(env="ALLOW_PRIVATE_NOSTR_RELAYS", default=False)
+    allow_private_webhooks: bool = _env_field(env="ALLOW_PRIVATE_WEBHOOKS", default=False)
     ui_poll_seconds: int = _env_field(env="UI_POLL_SECONDS", default=10)
     macaroon_store_path: Path = _env_field(env="MACAROON_STORE_PATH", default=Path("secrets/macaroon.hex"))
     lnd_macaroon_path: Optional[Path] = _env_field(env="LND_MACAROON_PATH", default=None)
@@ -144,6 +180,20 @@ class Settings(BaseSettings):
         if trimmed.lower() in {"", "none", "false", "off", "disabled"}:
             return None
         return trimmed
+
+    @field_validator("trusted_proxy_cidrs", mode="before")
+    @classmethod
+    def _validate_trusted_proxy_cidrs(cls, value: Optional[str]) -> str:
+        normalized = str(value or "").strip()
+        parse_trusted_proxy_cidrs(normalized)
+        return normalized
+
+    @field_validator("trusted_hosts", mode="before")
+    @classmethod
+    def _validate_trusted_hosts(cls, value: Optional[str]) -> str:
+        normalized = str(value or "").strip()
+        parse_trusted_hosts(normalized)
+        return normalized
 
     @field_validator("dep_env", mode="before")
     @classmethod

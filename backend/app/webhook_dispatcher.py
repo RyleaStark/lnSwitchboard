@@ -16,6 +16,7 @@ import httpx
 from .ln_address_store import AddressNotFoundError, LNAddressStore
 from .log_storage import InvoiceEvent, RequestLogStorage
 from .nostr_zaps import NostrZapPublisher
+from .outbound_security import OutboundHTTPStatusError, ensure_public_endpoint, post_to_pinned_endpoint
 from .version import get_version
 
 Sender = Callable[[str, Dict[str, Any], Dict[str, str]], Awaitable[None]]
@@ -43,6 +44,7 @@ class WebhookDispatcher:
         sender: Optional[Sender] = None,
         delivery_storage: Optional[RequestLogStorage] = None,
         zap_publisher: Optional[NostrZapPublisher] = None,
+        allow_private_webhooks: bool = False,
     ) -> None:
         self._address_store = address_store
         self._timeout = max(1.0, float(timeout_seconds))
@@ -52,6 +54,7 @@ class WebhookDispatcher:
         self._logger = logging.getLogger("lnswitchboard.webhooks")
         self._delivery_storage = delivery_storage
         self._zap_publisher = zap_publisher
+        self._allow_private_webhooks = allow_private_webhooks
         self._max_retries = max(0, int(max_retries))
         self._max_attempts = 1 + self._max_retries
         if self._max_retries > 0:
@@ -420,8 +423,15 @@ class WebhookDispatcher:
             return True
         except Exception as exc:  # pragma: no cover - network runtime
             latency_ms = int((time.perf_counter() - started) * 1000)
-            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-            response_body = exc.response.text if isinstance(exc, httpx.HTTPStatusError) else None
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+                response_body = exc.response.text
+            elif isinstance(exc, OutboundHTTPStatusError):
+                status_code = exc.status_code
+                response_body = exc.response_body
+            else:
+                status_code = None
+                response_body = None
             will_retry = attempt < self._max_attempts and self._max_retries > 0
             delivery_status = "retrying" if will_retry else "failed"
             if self._delivery_storage is not None and delivery_id:
@@ -487,14 +497,18 @@ class WebhookDispatcher:
         if self._sender is not None:
             await self._sender(url, payload, headers)
             return
-        timeout = httpx.Timeout(self._timeout)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                url,
-                content=self._payload_body(payload).encode("utf-8"),
-                headers={**headers, "Content-Type": "application/json"},
-            )
-            response.raise_for_status()
+        connect_host = await ensure_public_endpoint(
+            url,
+            allowed_schemes=("http", "https"),
+            allow_private=self._allow_private_webhooks,
+        )
+        await post_to_pinned_endpoint(
+            url,
+            connect_host=connect_host,
+            body=self._payload_body(payload).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+            timeout=self._timeout,
+        )
 
     @staticmethod
     def _payload_body(payload: Dict[str, Any]) -> str:

@@ -68,6 +68,21 @@ def test_lnurl_metadata(test_client: TestClient):
     assert data["commentAllowed"] == config.get_settings().comment_max_length
 
 
+def test_untrusted_forwarding_headers_cannot_spoof_public_urls(test_client: TestClient):
+    response = test_client.get(
+        "/.well-known/lnurlp/bones",
+        headers={
+            "X-Forwarded-For": "198.51.100.99",
+            "X-Forwarded-Host": "evil.example",
+            "X-Forwarded-Proto": "https",
+            "True-Client-IP": "198.51.100.100",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["callback"] == "http://testserver/.well-known/lnurlp/bones"
+
+
 def _create_nostr_identity(client: TestClient, *, local_part: str = "bones", pubkey: str = "b0" * 32):
     response = client.post(
         "/api/nip05/identities",
@@ -616,7 +631,10 @@ def test_lnd_status_endpoint_reports_errors(test_client: TestClient, monkeypatch
     assert response.json()["message"] == "tls.cert missing"
 
 
-def test_callback_and_ip_respect_forwarded_headers(test_client: TestClient):
+def test_callback_and_ip_respect_forwarded_headers(monkeypatch, test_client: TestClient):
+    monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+    monkeypatch.setenv("TRUSTED_HOSTS", "testserver,wallet.example.com")
+    config.get_settings.cache_clear()
     headers = {
         "Forwarded": 'for=203.0.113.10;proto=https;host=wallet.example.com',
         "X-Forwarded-Port": "8443",
@@ -668,7 +686,10 @@ def test_callback_and_ip_respect_forwarded_headers(test_client: TestClient):
     assert proxy["client"]["source"] == "Forwarded for"
 
 
-def test_client_ip_falls_back_to_cf_header(test_client: TestClient):
+def test_client_ip_falls_back_to_cf_header(monkeypatch, test_client: TestClient):
+    monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+    monkeypatch.setenv("TRUSTED_HOSTS", "testserver,public.example.com")
+    config.get_settings.cache_clear()
     headers = {
         "CF-Connecting-IP": "198.51.100.23",
         "Host": "public.example.com",
@@ -990,6 +1011,7 @@ def test_env_settings_update(test_client: TestClient):
     assert response.status_code == 200
     payload = response.json()
     assert "LNURL_METADATA_DESCRIPTION" in payload["updated"]
+    assert payload["restart_required"] is True
 
     refreshed = test_client.get("/api/settings/env").json()
     entry = next(item for item in refreshed["settings"] if item["key"] == "LNURL_METADATA_DESCRIPTION")

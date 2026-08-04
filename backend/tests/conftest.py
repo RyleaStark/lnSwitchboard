@@ -68,6 +68,10 @@ def configure_env(tmp_path):
     os.environ["MACAROON_STORE_PATH"] = str(macaroon)
     os.environ["LNURL_COMMENT_MAX_LENGTH"] = "120"
     os.environ["RATE_LIMIT_PER_MIN"] = "1000"
+    os.environ.pop("TRUSTED_PROXY_CIDRS", None)
+    os.environ["TRUSTED_HOSTS"] = "testserver,localhost,127.0.0.1,[::1]"
+    os.environ.pop("ALLOW_PRIVATE_NOSTR_RELAYS", None)
+    os.environ.pop("ALLOW_PRIVATE_WEBHOOKS", None)
     os.environ["LNSWITCHBOARD_ENV_FILE"] = str(env_file)
 
     config.get_settings.cache_clear()
@@ -87,6 +91,7 @@ def configure_env(tmp_path):
     os.environ.pop("LND_MACAROON_PATH", None)
     os.environ.pop("LND_READONLY_MACAROON_PATH", None)
     os.environ.pop("DEP_ENV", None)
+    os.environ.pop("TRUSTED_HOSTS", None)
     config.get_settings.cache_clear()
     deps._get_log_storage.cache_clear()
     deps._get_nip05_store.cache_clear()

@@ -63,7 +63,7 @@ async def test_webhook(
     dispatcher: WebhookDispatcher = Depends(get_webhook_dispatcher_dep),
 ) -> Dict[str, Any]:
     if not payload.url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Webhook URL must start with http:// or https://")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Webhook URL must start with http:// or https://")
     delivered = await dispatcher.dispatch_test(
         url=payload.url,
         secret=payload.secret,
