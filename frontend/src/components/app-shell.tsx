@@ -23,6 +23,7 @@ import { toast } from "sonner"
 
 import { CloudflareIcon } from "@/components/cloudflare-icon"
 import { CodeBlock, CopyButton } from "@/components/common"
+import { TailscaleIcon } from "@/components/tailscale-icon"
 import { TemplateVariablesDialog } from "@/components/template-variables-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -185,7 +186,7 @@ export function AppShell() {
                               isActive={isActiveRoute(location.pathname, "/connections/tailscale/")}
                             >
                               <SidebarNavLink to="/connections/tailscale/">
-                                <NetworkIcon />
+                                <TailscaleIcon />
                                 <span>Tailscale</span>
                               </SidebarNavLink>
                             </SidebarMenuSubButton>
