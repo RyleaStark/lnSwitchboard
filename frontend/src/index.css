@@ -95,15 +95,13 @@ body {
   min-width: 320px;
   min-height: 100svh;
   margin: 0;
-  background:
-    linear-gradient(135deg, color-mix(in oklch, var(--primary) 12%, transparent), transparent 22rem),
-    radial-gradient(circle at 100% 0%, color-mix(in oklch, var(--accent) 45%, transparent), transparent 24rem),
-    var(--background);
+  background: var(--background);
   color: var(--foreground);
 }
 
 #root {
   min-height: 100svh;
+  background: var(--background);
 }
 
 button,

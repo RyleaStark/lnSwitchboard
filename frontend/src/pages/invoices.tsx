@@ -49,7 +49,7 @@ export function InvoicesPage() {
         <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <CardTitle>Lightning invoices</CardTitle>
-            <CardDescription>{paginationLabel(invoices.data, query, "invoice")}</CardDescription>
+            <CardDescription>{invoices.isError ? "Couldn’t load invoices" : paginationLabel(invoices.data, query, "invoice")}</CardDescription>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
             <div className="relative">
@@ -64,12 +64,12 @@ export function InvoicesPage() {
                 placeholder="Search invoices"
               />
             </div>
-            <Pager page={page} totalPages={invoices.data?.total_pages ?? 0} setPage={setPage} />
+            {!invoices.isError ? <Pager page={page} totalPages={invoices.data?.total_pages ?? 0} setPage={setPage} /> : null}
           </div>
         </CardHeader>
         <CardContent>
           {invoices.isLoading ? <LoadingRows /> : null}
-          {invoices.isError ? <PageError message="Unable to load invoices." /> : null}
+          {invoices.isError ? <PageError message="Unable to load invoices." onRetry={() => void invoices.refetch()} retrying={invoices.isFetching} /> : null}
           {!invoices.isLoading && !invoices.isError && items.length === 0 ? (
             <EmptyPanel title={query ? "No matching invoices" : "No invoices yet"} description="Invoices appear after wallets request an LNURL invoice." />
           ) : null}

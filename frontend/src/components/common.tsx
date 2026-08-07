@@ -1,4 +1,4 @@
-import { CopyIcon, FileQuestionIcon } from "lucide-react"
+import { CopyIcon, FileQuestionIcon, RefreshCwIcon, TriangleAlertIcon } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -30,11 +30,11 @@ export function PageHeader({
   return (
     <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
       <div className="flex max-w-3xl flex-col gap-2">
-        <p className="text-xs font-medium uppercase tracking-normal text-muted-foreground">{eyebrow}</p>
+        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{eyebrow}</p>
         <h1 className="text-3xl font-semibold tracking-normal text-foreground md:text-4xl">{title}</h1>
         <p className="text-sm leading-6 text-muted-foreground">{description}</p>
       </div>
-      {action ? <div className={cn("flex shrink-0 items-center gap-2", actionAlign === "start" && "md:self-start")}>{action}</div> : null}
+      {action ? <div className={cn("flex w-full flex-wrap items-center gap-2 sm:w-auto", actionAlign === "start" && "md:self-start")}>{action}</div> : null}
     </div>
   )
 }
@@ -120,10 +120,30 @@ export function CodeBlock({
   )
 }
 
-export function PageError({ message }: { message: string }) {
+export function PageError({
+  message,
+  onRetry,
+  retrying = false,
+}: {
+  message: string
+  onRetry?: () => void
+  retrying?: boolean
+}) {
   return (
-    <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-      {message}
+    <div className="flex flex-col gap-3 rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-start gap-2">
+        <TriangleAlertIcon className="mt-0.5 size-4 shrink-0" />
+        <div>
+          <p className="font-medium">Couldn&apos;t load this section</p>
+          <p className="mt-1 text-destructive/80">{message}</p>
+        </div>
+      </div>
+      {onRetry ? (
+        <Button type="button" variant="outline" size="sm" className="w-full shrink-0 sm:w-auto" onClick={onRetry} disabled={retrying}>
+          <RefreshCwIcon className={cn(retrying && "animate-spin")} />
+          {retrying ? "Retrying" : "Retry"}
+        </Button>
+      ) : null}
     </div>
   )
 }

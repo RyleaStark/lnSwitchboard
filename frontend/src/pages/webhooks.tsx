@@ -112,7 +112,7 @@ export function WebhooksPage() {
           title="Webhooks"
           description="Delivery contract for settled Lightning payment automation."
         />
-        <PageError message="Unable to load the app version for webhook examples." />
+        <PageError message="Unable to load the app version for webhook examples." onRetry={() => void version.refetch()} retrying={version.isFetching} />
       </>
     )
   }
@@ -168,7 +168,7 @@ export function WebhooksPage() {
             </Field>
             <Field>
               <FieldLabel htmlFor="webhook-test-secret">Signing secret</FieldLabel>
-              <Input id="webhook-test-secret" value={testSecret} onChange={(event) => setTestSecret(event.target.value)} placeholder="Optional" />
+              <Input id="webhook-test-secret" type="password" autoComplete="off" value={testSecret} onChange={(event) => setTestSecret(event.target.value)} placeholder="Optional" />
               <FieldDescription>Uses the same HMAC headers as configured endpoints.</FieldDescription>
             </Field>
             {testError ? <FieldError>{testError}</FieldError> : null}

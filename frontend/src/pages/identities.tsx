@@ -126,7 +126,7 @@ export function IdentitiesPage() {
         </CardHeader>
         <CardContent>
           {identities.isLoading ? <LoadingRows /> : null}
-          {identities.isError ? <PageError message="Unable to load NIP-05 mappings." /> : null}
+          {identities.isError ? <PageError message="Unable to load NIP-05 mappings." onRetry={() => void identities.refetch()} retrying={identities.isFetching} /> : null}
           {!identities.isLoading && !identities.isError && rows.length === 0 ? (
             <EmptyPanel title={search ? "No matching mappings" : "No mappings yet"} description="Create a mapping to publish a Nostr identity from this domain." />
           ) : null}
@@ -161,7 +161,7 @@ export function IdentitiesPage() {
                 {rows.map((item) => (
                   <Card key={item.id}>
                     <CardHeader>
-                      <CardTitle className="text-base">{item.identifier}</CardTitle>
+                      <CardTitle className="min-w-0 break-all text-base">{item.identifier}</CardTitle>
                       <CardDescription>{shortHash(item.npub, 18, 8)}</CardDescription>
                     </CardHeader>
                     <CardContent className="flex flex-col gap-3">
@@ -248,7 +248,7 @@ function RelayList({ relays }: { relays: string[] }) {
   if (!items.length) return <span className="text-sm text-muted-foreground">No relay hints</span>
   return (
     <div className="flex flex-wrap gap-1.5">
-      {items.map((relay) => <Badge key={relay} variant="secondary">{relay}</Badge>)}
+      {items.map((relay) => <Badge key={relay} variant="secondary" className="max-w-full min-w-0 truncate" title={relay}>{relay}</Badge>)}
     </div>
   )
 }
