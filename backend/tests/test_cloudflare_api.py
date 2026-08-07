@@ -16,7 +16,7 @@ class FakeCloudflareService:
 
     async def authorize(self, api_token: str, account_id: str, tunnel_id: str):
         self.authorize_request = (api_token, account_id, tunnel_id)
-        return {"authorization_id": "authorization-flow-id"}
+        return {"authorization_id": "authorization-flow-id", "accounts": [{"id": account_id, "name": "Example account", "zones": [{"id": ZONE_ID, "name": "example.com"}]}]}
 
     async def provision(self, *, authorization_id: str, account_id: str, tunnel_id: str, zone_id: str, hostname: str):
         self.provision_request = {"authorization_id": authorization_id, "account_id": account_id, "tunnel_id": tunnel_id, "zone_id": zone_id, "hostname": hostname}
@@ -58,7 +58,7 @@ def test_cloudflare_api_collects_write_only_token_and_explicit_existing_tunnel_i
     finally:
         admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
     assert authorized.status_code == 200
-    assert authorized.json() == {}
+    assert authorized.json() == {"accounts": [{"id": ACCOUNT_ID, "name": "Example account", "zones": [{"id": ZONE_ID, "name": "example.com"}]}]}
     assert service.authorize_request == (secret, ACCOUNT_ID, TUNNEL_ID)
     assert secret not in authorized.text
     assert provisioned.status_code == 201

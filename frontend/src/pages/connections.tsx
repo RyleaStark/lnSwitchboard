@@ -75,11 +75,12 @@ function CloudflareConnectionsPage() {
     if (!token || authorizing) return
     setAuthorizing(true)
     try {
-      await api.authorizeCloudflare({ api_token: token, account_id: accountId.trim(), tunnel_id: tunnelId.trim() })
-      queryClient.setQueryData(["cloudflare-authorization"], {
-        accounts: [{ id: accountId.trim(), name: accountId.trim(), zones: [{ id: zoneId.trim(), name: zoneId.trim() }] }],
-      })
-      toast.success("Cloudflare token validated")
+      const authorization = await api.authorizeCloudflare({ api_token: token, account_id: accountId.trim(), tunnel_id: tunnelId.trim() })
+      const selectedAccount = authorization.accounts.find((account) => account.id === accountId.trim())
+      if (!selectedAccount?.zones.length) throw new Error("This token can access the tunnel but has no active DNS zones. Add Zone / Zone / Read and Zone / DNS / Edit for a zone, then try again.")
+      setZoneId(selectedAccount.zones[0].id)
+      queryClient.setQueryData(["cloudflare-authorization"], authorization)
+      toast.success("Tunnel and DNS access confirmed")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Token validation failed")
     } finally {
@@ -155,7 +156,7 @@ function CloudflareConnectionsPage() {
               <h2 className="font-heading text-xl font-semibold tracking-tight">Cloudflare Tunnel</h2>
             </div>
             <p className="max-w-2xl text-sm text-pretty text-muted-foreground">
-              Configures your existing remotely managed tunnel and a proxied DNS record for one public hostname. Tunnel traffic reaches only port 21212.
+              Bring an existing Cloudflare Tunnel online, then choose where your Lightning Addresses should be available.
             </p>
           </div>
           <div className="shrink-0">
@@ -208,12 +209,10 @@ function CloudflareConnectionsPage() {
               apiToken={apiToken}
               accountId={accountId}
               tunnelId={tunnelId}
-              zoneId={zoneId}
               pending={authorizing}
               onTokenChange={setApiToken}
               onAccountChange={setAccountId}
               onTunnelChange={setTunnelId}
-              onZoneChange={setZoneId}
               onSubmit={() => void authorize()}
             />
           )}
@@ -667,12 +666,10 @@ function AuthorizationForm({
   apiToken,
   accountId,
   tunnelId,
-  zoneId,
   pending,
   onTokenChange,
   onAccountChange,
   onTunnelChange,
-  onZoneChange,
   onSubmit,
 }: {
   available: boolean
@@ -682,21 +679,19 @@ function AuthorizationForm({
   apiToken: string
   accountId: string
   tunnelId: string
-  zoneId: string
   pending: boolean
   onTokenChange: (value: string) => void
   onAccountChange: (value: string) => void
   onTunnelChange: (value: string) => void
-  onZoneChange: (value: string) => void
   onSubmit: () => void
 }) {
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.8fr)]">
       <div className="space-y-4">
         <div>
-          <h3 className="font-medium">Connect with a scoped API token</h3>
+          <h3 className="font-medium">1. Choose your existing tunnel</h3>
           <p className="mt-1 max-w-xl text-sm leading-normal text-pretty text-muted-foreground">
-            Create a least-privilege token in Cloudflare, then paste it here once. lnSwitchboard validates it over the private administrative connection and encrypts it immediately.
+            Enter the account and tunnel you already created in Cloudflare. Then authorize lnSwitchboard to configure one public Lightning Address.
           </p>
         </div>
         <a
@@ -720,12 +715,9 @@ function AuthorizationForm({
           <FieldLabel htmlFor="cloudflare-tunnel-id">Existing tunnel ID</FieldLabel>
           <Input id="cloudflare-tunnel-id" value={tunnelId} disabled={!available || pending} autoComplete="off" onChange={(event) => onTunnelChange(event.target.value)} />
         </Field>
+        <h3 className="pt-2 font-medium">2. Authorize DNS access</h3>
         <Field className="max-w-xl">
-          <FieldLabel htmlFor="cloudflare-zone-id">Zone ID</FieldLabel>
-          <Input id="cloudflare-zone-id" value={zoneId} disabled={!available || pending} autoComplete="off" onChange={(event) => onZoneChange(event.target.value)} />
-        </Field>
-        <Field className="max-w-xl">
-          <FieldLabel htmlFor="cloudflare-api-token">Cloudflare API token</FieldLabel>
+          <FieldLabel htmlFor="cloudflare-api-token">User API token</FieldLabel>
           <Input
             id="cloudflare-api-token"
             type="password"
@@ -738,7 +730,7 @@ function AuthorizationForm({
             onChange={(event) => onTokenChange(event.target.value)}
           />
           <FieldDescription>
-            The token is never placed in a URL or browser storage and is cleared from this field after validation.
+            Use a user-scoped API token from Profile → API Tokens, not a Global API Key or an account-owned token. It is cleared after validation and never placed in a URL or browser storage.
           </FieldDescription>
         </Field>
         <Button
@@ -747,7 +739,7 @@ function AuthorizationForm({
           onClick={onSubmit}
         >
           <ShieldCheckIcon />
-          {pending ? "Validating…" : "Validate token"}
+          {pending ? "Checking access…" : "Connect tunnel"}
         </Button>
         {!available ? (
           <p className="text-sm text-muted-foreground">
