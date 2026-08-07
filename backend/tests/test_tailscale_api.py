@@ -3,26 +3,12 @@ from __future__ import annotations
 import asyncio
 
 import httpx
-import pytest
-
 from backend.app import deps
 from backend.app.main import admin_app, public_app
-from backend.app.routers import connections as connections_router
 
 
 def _auth_url() -> str:
     return "https://" + "login.tailscale.com" + "/a/" + "TEST_ONLY_TOKEN"
-
-
-@pytest.fixture(autouse=True)
-def bypass_authenticated_proxy_gate():
-    admin_app.dependency_overrides[
-        connections_router.require_authenticated_tailscale_admin
-    ] = lambda: None
-    yield
-    admin_app.dependency_overrides.pop(
-        connections_router.require_authenticated_tailscale_admin, None
-    )
 
 
 class FakeTailscaleService:
@@ -100,7 +86,7 @@ def test_tailscale_setup_and_begin_login_use_lns_default_and_private_cookie(
     cookie = login.headers["set-cookie"]
     assert "lnswitchboard_tailscale_login=" in cookie
     assert "HttpOnly" in cookie
-    assert "Secure" in cookie
+    assert "Secure" not in cookie
     assert "SameSite=lax" in cookie
     assert "Path=/api/connections/tailscale" in cookie
     assert "Max-Age=300" in cookie

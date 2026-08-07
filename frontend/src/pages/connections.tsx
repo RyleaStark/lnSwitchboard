@@ -198,9 +198,7 @@ function CloudflareConnectionsPage() {
               <Badge variant="outline">Ready to connect</Badge>
             ) : (
               <Badge variant="secondary">
-                {provider?.reason === "authenticated_https_admin_required"
-                  ? "Authenticated HTTPS required"
-                  : "Connector not installed"}
+                Connector not installed
               </Badge>
             )}
           </CardAction>
@@ -262,7 +260,6 @@ function TailscaleConnectionsPage() {
   const [cancelling, setCancelling] = useState(false)
   const [checking, setChecking] = useState(false)
   const [pollFailures, setPollFailures] = useState(0)
-  const [proxyAccessDenied, setProxyAccessDenied] = useState(false)
   const operationInFlight = useRef<"check" | "connect" | "cancel" | null>(null)
   const recoveryAttempted = useRef(false)
   const connections = useQuery({ queryKey: ["connections"], queryFn: api.connections })
@@ -274,11 +271,7 @@ function TailscaleConnectionsPage() {
     enabled: providerAvailable,
   })
   const connection = connections.data?.connections.find((item) => item.provider === "tailscale")
-  const providerReason = provider?.reason ?? null
-  const setupForbidden = setup.error instanceof ApiError && setup.error.status === 403
-  const authenticatedProxyRequired =
-    providerReason === "authenticated_https_admin_required" || setupForbidden || proxyAccessDenied
-  const available = setup.data?.available === true && providerAvailable && !authenticatedProxyRequired
+  const available = setup.data?.available === true && providerAvailable
   const normalizedName = deviceName.trim().toLowerCase()
   const validName = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(normalizedName)
 
@@ -321,14 +314,6 @@ function TailscaleConnectionsPage() {
           }
           return
         }
-        if (error instanceof ApiError && error.status === 403) {
-          clearLoginView()
-          setProxyAccessDenied(true)
-          toast.error(
-            "Open lnSwitchboard through an authenticated HTTPS admin proxy to manage Tailscale.",
-          )
-          return
-        }
         setPollFailures((value) => Math.min(value + 1, 4))
         if (announceError) {
           toast.error(
@@ -346,10 +331,6 @@ function TailscaleConnectionsPage() {
   useEffect(() => {
     if (setup.data?.default_device_name) setDeviceName(setup.data.default_device_name)
   }, [setup.data?.default_device_name])
-
-  useEffect(() => {
-    if (authenticatedProxyRequired) clearLoginView()
-  }, [authenticatedProxyRequired, clearLoginView])
 
   useEffect(() => {
     if (!available || recoveryAttempted.current) return
@@ -391,15 +372,7 @@ function TailscaleConnectionsPage() {
     try {
       await applyLoginResult(await api.beginTailscaleLogin(normalizedName))
     } catch (error) {
-      if (error instanceof ApiError && error.status === 403) {
-        clearLoginView()
-        setProxyAccessDenied(true)
-        toast.error(
-          "Open lnSwitchboard through an authenticated HTTPS admin proxy to manage Tailscale.",
-        )
-      } else {
-        toast.error(error instanceof Error ? error.message : "Unable to start Tailscale login")
-      }
+      toast.error(error instanceof Error ? error.message : "Unable to start Tailscale login")
     } finally {
       if (operationInFlight.current === "connect") operationInFlight.current = null
       setConnecting(false)
@@ -415,15 +388,7 @@ function TailscaleConnectionsPage() {
       clearLoginView()
       await queryClient.invalidateQueries({ queryKey: ["connections"] })
     } catch (error) {
-      if (error instanceof ApiError && error.status === 403) {
-        clearLoginView()
-        setProxyAccessDenied(true)
-        toast.error(
-          "Open lnSwitchboard through an authenticated HTTPS admin proxy to manage Tailscale.",
-        )
-      } else {
-        toast.error(error instanceof Error ? error.message : "Unable to cancel Tailscale login")
-      }
+      toast.error(error instanceof Error ? error.message : "Unable to cancel Tailscale login")
     } finally {
       if (operationInFlight.current === "cancel") operationInFlight.current = null
       setCancelling(false)
@@ -431,14 +396,6 @@ function TailscaleConnectionsPage() {
   }
 
   const handleManagementError = (error: unknown, fallback: string) => {
-    if (error instanceof ApiError && error.status === 403) {
-      clearLoginView()
-      setProxyAccessDenied(true)
-      toast.error(
-        "Open lnSwitchboard through an authenticated HTTPS admin proxy to manage Tailscale.",
-      )
-      return
-    }
     toast.error(error instanceof Error ? error.message : fallback)
   }
 
@@ -459,7 +416,7 @@ function TailscaleConnectionsPage() {
   if (connections.isPending || (providerAvailable && setup.isPending)) {
     return <ConnectionsSkeleton />
   }
-  if (connections.isError || (providerAvailable && setup.isError && !setupForbidden)) {
+  if (connections.isError || (providerAvailable && setup.isError)) {
     return <ConnectionsLoadError />
   }
 
@@ -489,7 +446,7 @@ function TailscaleConnectionsPage() {
           <CardAction>
             {!available ? (
               <Badge variant="secondary">
-                {authenticatedProxyRequired ? "Authenticated HTTPS required" : "Connector not installed"}
+                Connector not installed
               </Badge>
             ) : connection ? (
               <ConnectionStatusBadge status={connection.status} />
@@ -505,7 +462,6 @@ function TailscaleConnectionsPage() {
               refreshing={refresh.isPending}
               disconnecting={disconnect.isPending}
               managementDisabled={!available}
-              authenticatedProxyRequired={authenticatedProxyRequired}
               onRefresh={() => refresh.mutate(connection.id)}
               onDisconnect={() => disconnect.mutate(connection.id)}
             />
@@ -559,9 +515,7 @@ function TailscaleConnectionsPage() {
               </Button>
               {!available ? (
                 <p className="text-sm text-muted-foreground">
-                  {authenticatedProxyRequired
-                    ? "Open lnSwitchboard through an authenticated HTTPS admin proxy to use Tailscale onboarding."
-                    : "Add the Tailscale sidecar to this deployment stack to enable onboarding."}
+                  Add the Tailscale sidecar to this deployment stack to enable onboarding.
                 </p>
               ) : null}
             </FieldGroup>
@@ -677,7 +631,6 @@ function ConnectedTailscale({
   refreshing,
   disconnecting,
   managementDisabled,
-  authenticatedProxyRequired,
   onRefresh,
   onDisconnect,
 }: {
@@ -685,7 +638,6 @@ function ConnectedTailscale({
   refreshing: boolean
   disconnecting: boolean
   managementDisabled: boolean
-  authenticatedProxyRequired: boolean
   onRefresh: () => void
   onDisconnect: () => void
 }) {
@@ -694,9 +646,7 @@ function ConnectedTailscale({
     <div className="flex flex-col gap-5">
       {managementDisabled ? (
         <p role="alert" className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
-          {authenticatedProxyRequired
-            ? "Open lnSwitchboard through an authenticated HTTPS admin proxy to refresh or disconnect Tailscale."
-            : "Restore the Tailscale connector to refresh or disconnect this connection."}
+          Restore the Tailscale connector to refresh or disconnect this connection.
         </p>
       ) : null}
       {connection.domains.map((domain) => (

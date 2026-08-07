@@ -3,7 +3,7 @@ name: Publish RC image
 on:
   push:
     branches:
-      - feat/provider-publication-rc1
+      - main
   workflow_dispatch:
     inputs:
       version:

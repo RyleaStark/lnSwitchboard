@@ -26,7 +26,7 @@ def _reset_settings() -> None:
     deps._get_tailscale_service.cache_clear()
 
 
-def test_tailscale_onboarding_rejects_direct_lan_without_authenticated_proxy(
+def test_tailscale_onboarding_allows_direct_http_admin_access(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("DEP_ENV", "DOCKER")
@@ -40,14 +40,14 @@ def test_tailscale_onboarding_rejects_direct_lan_without_authenticated_proxy(
             headers={"host": "admin.test"},
             base_url="http://admin.test",
         )
-        == 403
+        == 200
     )
 
 
-def test_tailscale_onboarding_requires_authenticated_https_trusted_proxy(
+def test_tailscale_onboarding_allows_authenticated_http_umbrel_proxy(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("DEP_ENV", "DOCKER")
+    monkeypatch.setenv("DEP_ENV", "UMBREL-DEV")
     monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.0.0.2/32")
     monkeypatch.setenv("TRUSTED_HOSTS", "admin.test")
     _reset_settings()
@@ -58,25 +58,12 @@ def test_tailscale_onboarding_requires_authenticated_https_trusted_proxy(
     }
 
     assert (
-        _request_setup(peer="10.0.0.2", headers=forwarded, base_url="http://admin.test")
-        == 403
-    )
-    assert (
         _request_setup(
             peer="10.0.0.2",
             headers={
                 **forwarded,
-                "x-forwarded-user": "bones",
                 "x-forwarded-proto": "http",
             },
-            base_url="http://admin.test",
-        )
-        == 403
-    )
-    assert (
-        _request_setup(
-            peer="10.0.0.2",
-            headers={**forwarded, "x-forwarded-user": "bones"},
             base_url="http://admin.test",
         )
         == 200

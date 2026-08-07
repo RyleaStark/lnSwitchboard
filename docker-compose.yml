@@ -1,6 +1,6 @@
 services:
   lnswitchboard:
-    image: ghcr.io/ryleastark/lnswitchboard:0.4.0.rc1
+    image: ghcr.io/ryleastark/lnswitchboard:0.4.0.rc2
     container_name: lnswitchboard
     restart: unless-stopped
     environment:
@@ -27,7 +27,7 @@ services:
       - ${APP_LIGHTNING_NODE_DATA_DIR:-/app-data/lightning/data/lnd}:/lnd:ro
     ports:
       - "${LNSWITCHBOARD_BIND_ADDRESS:-127.0.0.1}:22121:22121"
-      - "${LNSWITCHBOARD_PUBLIC_BIND_ADDRESS:-127.0.0.1}:21212:21212"
+      - "${PUBLIC_SERVICE_PORT:-21212}:21212"
 
   cloudflared:
     image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf

@@ -387,7 +387,7 @@ test("serializes Tailscale status checks and cancellation", async () => {
   )
 })
 
-test("clears the authorization link when status loses authenticated proxy access", async () => {
+test("keeps the authorization link when a status check is rejected", async () => {
   const user = userEvent.setup()
   vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
     state: "needs_login",
@@ -404,18 +404,15 @@ test("clears the authorization link when status loses authenticated proxy access
   await screen.findByRole("button", { name: "Check status" })
 
   vi.mocked(api.tailscaleLoginStatus).mockRejectedValueOnce(
-    new ApiError(403, "authenticated HTTPS administration required", "Forbidden"),
+    new ApiError(403, "administration forbidden", "Forbidden"),
   )
   await user.click(screen.getByRole("button", { name: "Check status" }))
 
-  await waitFor(() => {
-    expect(screen.queryByRole("link", { name: "Open Tailscale login" })).not.toBeInTheDocument()
-  })
-  expect(screen.queryByAltText("Tailscale login QR code")).not.toBeInTheDocument()
-  expect(screen.getByText(/authenticated HTTPS admin proxy to use Tailscale onboarding/i)).toBeInTheDocument()
+  expect(screen.getByRole("link", { name: "Open Tailscale login" })).toBeInTheDocument()
+  expect(screen.getByAltText("Tailscale login QR code")).toBeInTheDocument()
 })
 
-test("clears the authorization link when cancellation loses authenticated proxy access", async () => {
+test("keeps the authorization link when cancellation is rejected", async () => {
   const user = userEvent.setup()
   vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
     state: "needs_login",
@@ -424,7 +421,7 @@ test("clears the authorization link when cancellation loses authenticated proxy 
     expires_in_seconds: 300,
   })
   vi.mocked(api.cancelTailscaleLogin).mockRejectedValueOnce(
-    new ApiError(403, "authenticated HTTPS administration required", "Forbidden"),
+    new ApiError(403, "administration forbidden", "Forbidden"),
   )
 
   renderPage("/connections/tailscale/")
@@ -435,12 +432,8 @@ test("clears the authorization link when cancellation loses authenticated proxy 
   await screen.findByRole("button", { name: "Check status" })
   await user.click(screen.getByRole("button", { name: "Cancel" }))
 
-  await waitFor(() => {
-    expect(screen.queryByRole("link", { name: "Open Tailscale login" })).not.toBeInTheDocument()
-  })
-  expect(screen.queryByAltText("Tailscale login QR code")).not.toBeInTheDocument()
-  expect(screen.getByText(/authenticated HTTPS admin proxy to use Tailscale onboarding/i)).toBeInTheDocument()
-  expect(screen.getByRole("button", { name: "Connect Tailscale" })).toBeDisabled()
+  expect(screen.getByRole("link", { name: "Open Tailscale login" })).toBeInTheDocument()
+  expect(screen.getByAltText("Tailscale login QR code")).toBeInTheDocument()
 })
 
 test("does not poll while cancellation is pending", async () => {
@@ -474,20 +467,18 @@ test("does not poll while cancellation is pending", async () => {
   await waitFor(() => expect(api.cancelTailscaleLogin).toHaveBeenCalledTimes(1))
 })
 
-test("explains that Tailscale onboarding requires an authenticated HTTPS proxy", async () => {
+test("explains that Tailscale onboarding needs its connector", async () => {
   vi.mocked(api.connections).mockResolvedValue({
     providers: [
-      { id: "tailscale", name: "Tailscale Funnel", capability: "unavailable", reason: "authenticated_https_admin_required" },
+      { id: "tailscale", name: "Tailscale Funnel", capability: "unavailable", reason: "connector_not_installed" },
     ],
     connections: [],
   })
 
   renderPage("/connections/tailscale/")
 
-  expect(await screen.findByText("Authenticated HTTPS required")).toBeInTheDocument()
-  expect(
-    screen.getByText(/Open lnSwitchboard through an authenticated HTTPS admin proxy/),
-  ).toBeInTheDocument()
+  expect(await screen.findByText("Connector not installed")).toBeInTheDocument()
+  expect(screen.getByText(/Add the Tailscale sidecar to this deployment stack/)).toBeInTheDocument()
   expect(screen.getByRole("button", { name: "Connect Tailscale" })).toBeDisabled()
   expect(api.tailscaleSetup).not.toHaveBeenCalled()
   expect(api.tailscaleLoginStatus).not.toHaveBeenCalled()
@@ -512,14 +503,14 @@ test("shows missing tailnet prerequisites without changing policy", async () => 
   expect(screen.getByText(/will not change tailnet policy automatically/)).toBeInTheDocument()
 })
 
-test("disables existing Tailscale management outside the authenticated HTTPS proxy", async () => {
+test("disables existing Tailscale management when its connector is unavailable", async () => {
   vi.mocked(api.connections).mockResolvedValue({
     providers: [
       {
         id: "tailscale",
         name: "Tailscale Funnel",
         capability: "unavailable",
-        reason: "authenticated_https_admin_required",
+        reason: "connector_not_installed",
       },
     ],
     connections: [
@@ -550,9 +541,7 @@ test("disables existing Tailscale management outside the authenticated HTTPS pro
   renderPage("/connections/tailscale/")
 
   expect(await screen.findByText("lns.example.ts.net")).toBeInTheDocument()
-  expect(
-    screen.getByText(/authenticated HTTPS admin proxy to refresh or disconnect Tailscale/i),
-  ).toBeInTheDocument()
+  expect(screen.getByText(/Restore the Tailscale connector to refresh or disconnect/)).toBeInTheDocument()
   expect(screen.getByRole("button", { name: "Refresh status" })).toBeDisabled()
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeDisabled()
   expect(api.tailscaleSetup).not.toHaveBeenCalled()

@@ -77,28 +77,6 @@ class TailscaleLoginRequest(BaseModel):
     device_name: str = Field(default="lns", min_length=1, max_length=63)
 
 
-async def require_authenticated_tailscale_admin(request: Request) -> None:
-    if not (
-        getattr(request.state, "authenticated_admin_proxy", False)
-        and getattr(request.state, "authenticated_admin_https", False)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Tailscale onboarding requires an authenticated HTTPS admin proxy",
-        )
-
-
-async def require_authenticated_cloudflare_admin(request: Request) -> None:
-    if not (
-        getattr(request.state, "authenticated_admin_proxy", False)
-        and getattr(request.state, "authenticated_admin_https", False)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cloudflare onboarding requires an authenticated HTTPS admin proxy",
-        )
-
-
 async def _tailscale_call(operation: Callable[[], Awaitable[_Result]]) -> _Result:
     try:
         return await operation()
@@ -160,23 +138,11 @@ async def list_connections(
     store: ConnectionStore = Depends(get_connection_store_dep),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
-    cloudflare_authenticated = bool(
-        getattr(request.state, "authenticated_admin_proxy", False)
-        and getattr(request.state, "authenticated_admin_https", False)
+    connector_available = settings.cloudflared_connector_enabled
+    tailscale_available = settings.tailscale_connector_enabled
+    tailscale_reason = (
+        None if tailscale_available else "connector_not_installed"
     )
-    connector_available = settings.cloudflared_connector_enabled and cloudflare_authenticated
-    tailscale_authenticated = bool(
-        getattr(request.state, "authenticated_admin_proxy", False)
-        and getattr(request.state, "authenticated_admin_https", False)
-    )
-    tailscale_available = (
-        settings.tailscale_connector_enabled and tailscale_authenticated
-    )
-    tailscale_reason = None
-    if not settings.tailscale_connector_enabled:
-        tailscale_reason = "connector_not_installed"
-    elif not tailscale_authenticated:
-        tailscale_reason = "authenticated_https_admin_required"
     return {
         "providers": [
             {
@@ -184,13 +150,7 @@ async def list_connections(
                 "name": "Cloudflare",
                 "capability": "available" if connector_available else "unavailable",
                 "reason": (
-                    None
-                    if connector_available
-                    else (
-                        "connector_not_installed"
-                        if not settings.cloudflared_connector_enabled
-                        else "authenticated_https_admin_required"
-                    )
+                    None if connector_available else "connector_not_installed"
                 ),
             },
             {
@@ -208,7 +168,6 @@ async def list_connections(
 
 @router.get(
     "/tailscale/setup",
-    dependencies=[Depends(require_authenticated_tailscale_admin)],
 )
 async def tailscale_setup(
     service: TailscaleService = Depends(get_tailscale_service_dep),
@@ -218,7 +177,6 @@ async def tailscale_setup(
 
 @router.post(
     "/tailscale/login",
-    dependencies=[Depends(require_authenticated_tailscale_admin)],
 )
 async def begin_tailscale_login(
     payload: TailscaleLoginRequest,
@@ -234,7 +192,7 @@ async def begin_tailscale_login(
         flow_id,
         max_age=service.login_ttl_seconds,
         httponly=True,
-        secure=True,
+        secure=False,
         samesite="lax",
         path="/api/connections/tailscale",
     )
@@ -243,7 +201,6 @@ async def begin_tailscale_login(
 
 @router.get(
     "/tailscale/login",
-    dependencies=[Depends(require_authenticated_tailscale_admin)],
 )
 async def tailscale_login_status(
     response: Response,
@@ -261,7 +218,7 @@ async def tailscale_login_status(
         response.delete_cookie(
             TAILSCALE_LOGIN_COOKIE,
             path="/api/connections/tailscale",
-            secure=True,
+            secure=False,
             httponly=True,
             samesite="lax",
         )
@@ -270,7 +227,6 @@ async def tailscale_login_status(
 
 @router.delete(
     "/tailscale/login",
-    dependencies=[Depends(require_authenticated_tailscale_admin)],
 )
 async def cancel_tailscale_login(
     response: Response,
@@ -287,7 +243,7 @@ async def cancel_tailscale_login(
     response.delete_cookie(
         TAILSCALE_LOGIN_COOKIE,
         path="/api/connections/tailscale",
-        secure=True,
+        secure=False,
         httponly=True,
         samesite="lax",
     )
@@ -296,7 +252,6 @@ async def cancel_tailscale_login(
 
 @router.post(
     "/tailscale/{connection_id}/status",
-    dependencies=[Depends(require_authenticated_tailscale_admin)],
 )
 async def refresh_tailscale_status(
     connection_id: str,
@@ -308,7 +263,6 @@ async def refresh_tailscale_status(
 
 @router.delete(
     "/tailscale/{connection_id}",
-    dependencies=[Depends(require_authenticated_tailscale_admin)],
 )
 async def disconnect_tailscale(
     connection_id: str,
@@ -332,7 +286,6 @@ async def cloudflare_setup(
 
 @router.post(
     "/cloudflare/authorize",
-    dependencies=[Depends(require_authenticated_cloudflare_admin)],
 )
 async def authorize_cloudflare(
     request: Request,
@@ -357,7 +310,7 @@ async def authorize_cloudflare(
         CLOUDFLARE_AUTHORIZATION_COOKIE,
         str(authorization["authorization_id"]),
         max_age=900,
-        secure=True,
+        secure=False,
         httponly=True,
         samesite="lax",
         path="/api/connections/cloudflare",
@@ -367,7 +320,6 @@ async def authorize_cloudflare(
 
 @router.get(
     "/cloudflare/authorization",
-    dependencies=[Depends(require_authenticated_cloudflare_admin)],
 )
 async def get_cloudflare_authorization(
     request: Request,
@@ -385,7 +337,6 @@ async def get_cloudflare_authorization(
 
 @router.delete(
     "/cloudflare/authorization",
-    dependencies=[Depends(require_authenticated_cloudflare_admin)],
 )
 async def cancel_cloudflare_authorization(
     request: Request,
@@ -399,7 +350,7 @@ async def cancel_cloudflare_authorization(
     response.delete_cookie(
         CLOUDFLARE_AUTHORIZATION_COOKIE,
         path="/api/connections/cloudflare",
-        secure=True,
+        secure=False,
         httponly=True,
         samesite="lax",
     )
@@ -409,7 +360,6 @@ async def cancel_cloudflare_authorization(
 @router.post(
     "/cloudflare/provision",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_authenticated_cloudflare_admin)],
 )
 async def provision_cloudflare(
     request: CloudflareProvisionRequest,
@@ -431,7 +381,7 @@ async def provision_cloudflare(
     response.delete_cookie(
         CLOUDFLARE_AUTHORIZATION_COOKIE,
         path="/api/connections/cloudflare",
-        secure=True,
+        secure=False,
         httponly=True,
         samesite="lax",
     )
@@ -440,7 +390,6 @@ async def provision_cloudflare(
 
 @router.post(
     "/cloudflare/{connection_id}/status",
-    dependencies=[Depends(require_authenticated_cloudflare_admin)],
 )
 async def refresh_cloudflare_status(
     connection_id: str,
@@ -452,7 +401,6 @@ async def refresh_cloudflare_status(
 
 @router.delete(
     "/cloudflare/{connection_id}",
-    dependencies=[Depends(require_authenticated_cloudflare_admin)],
 )
 async def disconnect_cloudflare(
     connection_id: str,
