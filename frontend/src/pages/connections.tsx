@@ -567,7 +567,7 @@ function TailscaleLoginPrompt({
 const prerequisiteLabels: Record<string, string> = {
   magic_dns: "Enable MagicDNS for the tailnet.",
   https_certificates: "Enable HTTPS certificates for the reported node hostname.",
-  funnel_node_attribute: "Grant tag:lnswitchboard the funnel node attribute.",
+  funnel_node_attribute: "Grant this node (or an operator-chosen tag) the Funnel node attribute.",
   funnel_port_443: "Allow Funnel on HTTPS port 443.",
 }
 

@@ -152,8 +152,9 @@ def test_supervisor_starts_and_cancels_login_with_validated_device_name(
         commands = command_log.read_text(encoding="utf-8")
         assert (
             f"tailscale --socket={env['TS_SOCKET']} up --json --reset "
-            "--hostname=lns --advertise-tags=tag:lnswitchboard --accept-dns=false"
+            "--hostname=lns --accept-dns=false"
         ) in commands
+        assert "--advertise-tags=" not in commands
         assert stat.S_IMODE((status_dir / "login.json").stat().st_mode) == 0o600
         assert not (status_dir / "login.stderr").exists()
         assert process.stdout is not None

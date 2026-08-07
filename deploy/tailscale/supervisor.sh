@@ -137,7 +137,6 @@ begin_login() {
     rm -f "$STATUS_DIR/login.json"
     "$TAILSCALE_BIN" --socket="$SOCKET" up --json --reset \
         --hostname="$device_name" \
-        --advertise-tags=tag:lnswitchboard \
         --accept-dns=false \
         >"$STATUS_DIR/login.json" 2>/dev/null &
     LOGIN_PID=$!

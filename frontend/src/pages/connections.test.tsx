@@ -47,7 +47,7 @@ const tailscaleSetup = {
   device_name_max_length: 63,
   public_origin: "http://127.0.0.1:21212",
   public_port: 443 as const,
-  required_tag: "tag:lnswitchboard",
+
   prerequisites: [
     "magic_dns",
     "https_certificates",

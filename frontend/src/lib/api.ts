@@ -301,7 +301,6 @@ export type TailscaleSetup = {
   device_name_max_length: number
   public_origin: string
   public_port: 443
-  required_tag: string
   prerequisites: string[]
 }
 

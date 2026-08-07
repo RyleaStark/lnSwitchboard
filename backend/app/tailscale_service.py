@@ -249,7 +249,6 @@ class TailscaleService:
             "device_name_max_length": 63,
             "public_origin": _FIXED_ORIGIN,
             "public_port": FUNNEL_PORT,
-            "required_tag": "tag:lnswitchboard",
             "prerequisites": [
                 "magic_dns",
                 "https_certificates",
