@@ -145,12 +145,12 @@ function MetricCard({
 }) {
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-3 pb-2">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 p-4 pb-1.5 sm:p-6 sm:pb-2">
         <CardDescription>{label}</CardDescription>
         <span className="text-muted-foreground [&_svg]:size-4">{icon}</span>
       </CardHeader>
-      <CardContent className="flex flex-col gap-1">
-        <div className="text-2xl font-semibold tracking-normal">{value}</div>
+      <CardContent className="flex flex-col gap-0.5 p-4 pt-1.5 sm:gap-1 sm:p-6 sm:pt-0">
+        <div className="text-xl font-semibold tracking-normal sm:text-2xl">{value}</div>
         {note ? <p className="text-xs text-muted-foreground">{note}</p> : null}
       </CardContent>
     </Card>
