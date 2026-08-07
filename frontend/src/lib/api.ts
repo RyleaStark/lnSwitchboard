@@ -284,15 +284,12 @@ export type CloudflareSetup = {
 }
 
 export type CloudflareAuthorization = {
-  accounts: Array<{
-    id: string
-    name: string
-    zones: Array<{ id: string; name: string }>
-  }>
+  accounts: Array<{ id: string; name: string; zones: Array<{ id: string; name: string }> }>
 }
 
 export type CloudflareProvisionPayload = {
   account_id: string
+  tunnel_id: string
   zone_id: string
   hostname: string
 }
@@ -455,10 +452,10 @@ export const api = {
     }),
   connections: () => request<ConnectionsResponse>("api/connections"),
   cloudflareSetup: () => request<CloudflareSetup>("api/connections/cloudflare/setup"),
-  authorizeCloudflare: (apiToken: string) =>
+  authorizeCloudflare: (payload: { api_token: string; account_id: string; tunnel_id: string }) =>
     request<CloudflareAuthorization>("api/connections/cloudflare/authorize", {
       method: "POST",
-      body: JSON.stringify({ api_token: apiToken }),
+      body: JSON.stringify(payload),
     }),
   cloudflareAuthorization: () =>
     request<CloudflareAuthorization>("api/connections/cloudflare/authorization"),

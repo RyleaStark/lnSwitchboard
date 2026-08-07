@@ -89,16 +89,16 @@ lnSwitchboard starts Tailscale's interactive browser login and shows its short-l
 
 Open **Connections → Cloudflare** to onboard a hostname. No OAuth client, callback URL, or Cloudflare application registration is required. Follow the link in the page to [create a custom API token](https://dash.cloudflare.com/profile/api-tokens) with only these permissions:
 
-- Account / Cloudflare Tunnel / Edit
-- Account / Account Settings / Read
+- Account / Cloudflare One Connectors / Edit
+  - Compatible dashboard label: Account / Cloudflare One Connector: cloudflared / Edit
 - Zone / DNS / Edit
 - Zone / Zone / Read
 
 Restrict the token resources to the Cloudflare account and zone that will host the public name, then paste it into the administration panel. lnSwitchboard supports HTTP or HTTPS administration; the operator is responsible for securing the administration path. Do not put the token in `.env`, Compose configuration, URLs, command-line arguments, or browser storage.
 
-lnSwitchboard validates the token, returns only accessible account and active-zone metadata, and encrypts the token at rest. If the account has no active zone, the UI links to Cloudflare Websites so the user can create and activate one before revalidating the scoped token. Enter the intended exact hostname; lnSwitchboard queries that hostname in the selected zone and refuses an existing DNS record rather than overwriting or adopting it.
+lnSwitchboard validates the token against the explicit Cloudflare account ID and existing tunnel ID you supply, encrypts the API token at rest, and never returns it to the browser. Enter the zone ID and intended exact hostname; lnSwitchboard checks that hostname in the selected zone and refuses an existing DNS record rather than overwriting or adopting it.
 
-The page remains visible but disabled until the connector is installed. lnSwitchboard creates a remotely managed tunnel, reads its ingress configuration, overrides only the selected hostname to the isolated `21212` public listener, preserves unrelated routes and the terminal fallback, writes the configuration, then reads it back to verify the route before creating one proxied CNAME. During disconnect, lnSwitchboard revalidates its DNS ownership marker before removing the record; changed records are preserved.
+The page remains visible but disabled until the connector is installed. lnSwitchboard never creates or deletes the selected tunnel: it reads its ingress configuration, overrides only the selected hostname to the isolated `21212` public listener, preserves unrelated routes and the terminal fallback, writes the configuration, then reads it back to verify the route before creating one proxied CNAME. During disconnect, lnSwitchboard removes only that hostname route and revalidates its DNS ownership marker before removing the record; changed records are preserved.
 
 Compose binds administration port `22121` to loopback by default and publishes public port `21212` for LNURL-pay and NIP-05 traffic. The administration listener allows direct loopback/RFC1918 LAN clients (plus IPv6 ULA/link-local clients) and returns `403` to WAN peers. Provider onboarding follows the same administration policy; it does not impose a stricter HTTPS or proxy-identity condition. Override `LNSWITCHBOARD_BIND_ADDRESS` only when the administration listener must bind another host interface.
 

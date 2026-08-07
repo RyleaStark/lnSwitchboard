@@ -128,10 +128,15 @@ test("guides token creation and clears the token after secure authorization", as
     "href",
     "https://dash.cloudflare.com/profile/api-tokens",
   )
+  await user.type(screen.getByLabelText("Cloudflare account ID"), "a".repeat(32))
+  await user.type(screen.getByLabelText("Existing tunnel ID"), "1".repeat(32))
+  await user.type(screen.getByLabelText("Zone ID"), "b".repeat(32))
   await user.type(tokenInput, "cloudflare-token-secret")
   await user.click(screen.getByRole("button", { name: "Validate token" }))
 
-  await waitFor(() => expect(api.authorizeCloudflare).toHaveBeenCalledWith("cloudflare-token-secret"))
+  await waitFor(() => expect(api.authorizeCloudflare).toHaveBeenCalledWith({
+    api_token: "cloudflare-token-secret", account_id: "a".repeat(32), tunnel_id: "1".repeat(32),
+  }))
   await waitFor(() => expect(screen.queryByLabelText(/API token/i)).not.toBeInTheDocument())
   expect(client.getMutationCache().getAll()).toHaveLength(0)
   expect(document.body.textContent).not.toContain("cloudflare-token-secret")
@@ -143,6 +148,9 @@ test("clears a rejected token without retaining it in the mutation cache", async
   const { client } = renderPage()
 
   const tokenInput = await screen.findByLabelText(/API token/i)
+  await user.type(screen.getByLabelText("Cloudflare account ID"), "a".repeat(32))
+  await user.type(screen.getByLabelText("Existing tunnel ID"), "1".repeat(32))
+  await user.type(screen.getByLabelText("Zone ID"), "b".repeat(32))
   await user.type(tokenInput, "rejected-cloudflare-token")
   await user.click(screen.getByRole("button", { name: "Validate token" }))
 
@@ -187,17 +195,9 @@ test("keeps connected management controls active when onboarding capability is u
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled()
 })
 
-test("loads the short-lived token authorization and provisions the selected hostname", async () => {
+test("collects explicit IDs and provisions the selected hostname on the existing tunnel", async () => {
   const user = userEvent.setup()
-  vi.mocked(api.cloudflareAuthorization).mockResolvedValue({
-    accounts: [
-      {
-        id: "a".repeat(32),
-        name: "Example Account",
-        zones: [{ id: "b".repeat(32), name: "example.com" }],
-      },
-    ],
-  })
+  vi.mocked(api.authorizeCloudflare).mockResolvedValue({ accounts: [] })
   vi.mocked(api.provisionCloudflare).mockResolvedValue({
     id: "connection-id",
     provider: "cloudflare",
@@ -222,13 +222,19 @@ test("loads the short-lived token authorization and provisions the selected host
 
   renderPage()
 
-  await screen.findByText("Example Account")
+  await user.type(await screen.findByLabelText("Cloudflare account ID"), "a".repeat(32))
+  await user.type(screen.getByLabelText("Existing tunnel ID"), "1".repeat(32))
+  await user.type(screen.getByLabelText("Zone ID"), "b".repeat(32))
+  await user.type(screen.getByLabelText(/API token/i), "cloudflare-token-secret")
+  await user.click(screen.getByRole("button", { name: "Validate token" }))
+  await screen.findByRole("button", { name: "Configure existing tunnel" })
   await user.type(screen.getByLabelText("Public hostname"), "pay.example.com")
-  await user.click(screen.getByRole("button", { name: "Create tunnel" }))
+  await user.click(screen.getByRole("button", { name: "Configure existing tunnel" }))
 
   await waitFor(() => {
     expect(vi.mocked(api.provisionCloudflare).mock.calls[0]?.[0]).toEqual({
       account_id: "a".repeat(32),
+      tunnel_id: "1".repeat(32),
       zone_id: "b".repeat(32),
       hostname: "pay.example.com",
     })

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ExternalLinkIcon, NetworkIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XIcon } from "lucide-react"
 import QRCode from "qrcode"
@@ -32,15 +32,8 @@ import {
 } from "@/components/ui/card"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ApiError, api, type CloudflareAuthorization, type ProviderConnection, type TailscaleLogin } from "@/lib/api"
+import { ApiError, api, type ProviderConnection, type TailscaleLogin } from "@/lib/api"
 
 export function ConnectionsPage() {
   const location = useLocation()
@@ -55,6 +48,7 @@ function CloudflareConnectionsPage() {
   const queryClient = useQueryClient()
 
   const [accountId, setAccountId] = useState("")
+  const [tunnelId, setTunnelId] = useState("")
   const [zoneId, setZoneId] = useState("")
   const [hostname, setHostname] = useState("")
   const [apiToken, setApiToken] = useState("")
@@ -77,31 +71,15 @@ function CloudflareConnectionsPage() {
   const authorizationMissing =
     pendingAuthorization.error instanceof ApiError && pendingAuthorization.error.status === 404
 
-  const selectedAccount = useMemo(
-    () => authorization?.accounts.find((account) => account.id === accountId),
-    [accountId, authorization],
-  )
-
-  useEffect(() => {
-    if (!authorization) return
-    const account = authorization.accounts[0]
-    setAccountId(account?.id ?? "")
-    setZoneId(account?.zones[0]?.id ?? "")
-  }, [authorization])
-
-  useEffect(() => {
-    if (!selectedAccount?.zones.some((zone) => zone.id === zoneId)) {
-      setZoneId(selectedAccount?.zones[0]?.id ?? "")
-    }
-  }, [selectedAccount, zoneId])
-
   const authorize = async () => {
     const token = apiToken.trim()
     if (!token || authorizing) return
     setAuthorizing(true)
     try {
-      const result = await api.authorizeCloudflare(token)
-      queryClient.setQueryData(["cloudflare-authorization"], result)
+      await api.authorizeCloudflare({ api_token: token, account_id: accountId.trim(), tunnel_id: tunnelId.trim() })
+      queryClient.setQueryData(["cloudflare-authorization"], {
+        accounts: [{ id: accountId.trim(), name: accountId.trim(), zones: [{ id: zoneId.trim(), name: zoneId.trim() }] }],
+      })
       toast.success("Cloudflare token validated")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Token validation failed")
@@ -189,7 +167,7 @@ function CloudflareConnectionsPage() {
             <CardTitle><h2>Cloudflare Tunnel</h2></CardTitle>
           </div>
           <CardDescription className="max-w-2xl text-pretty">
-            Creates a remotely managed tunnel and proxied DNS record for one public hostname. Tunnel traffic reaches only port 21212.
+            Configures your existing remotely managed tunnel and a proxied DNS record for one public hostname. Tunnel traffic reaches only port 21212.
           </CardDescription>
           <CardAction>
             {cloudflareConnection ? (
@@ -216,18 +194,17 @@ function CloudflareConnectionsPage() {
             />
           ) : authorization ? (
             <ProvisionForm
-              authorization={authorization}
               accountId={accountId}
+              tunnelId={tunnelId}
               zoneId={zoneId}
               hostname={hostname}
               pending={provision.isPending}
-              onAccountChange={setAccountId}
-              onZoneChange={setZoneId}
               onHostnameChange={setHostname}
               onBack={() => cancelAuthorization.mutate()}
               onSubmit={() =>
                 provision.mutate({
                   account_id: accountId,
+                  tunnel_id: tunnelId,
                   zone_id: zoneId,
                   hostname: hostname.trim(),
                 })
@@ -240,8 +217,14 @@ function CloudflareConnectionsPage() {
               reason={provider?.reason ?? null}
               error={pendingAuthorization.isError && !authorizationMissing}
               apiToken={apiToken}
+              accountId={accountId}
+              tunnelId={tunnelId}
+              zoneId={zoneId}
               pending={authorizing}
               onTokenChange={setApiToken}
+              onAccountChange={setAccountId}
+              onTunnelChange={setTunnelId}
+              onZoneChange={setZoneId}
               onSubmit={() => void authorize()}
             />
           )}
@@ -704,8 +687,14 @@ function AuthorizationForm({
   reason,
   error,
   apiToken,
+  accountId,
+  tunnelId,
+  zoneId,
   pending,
   onTokenChange,
+  onAccountChange,
+  onTunnelChange,
+  onZoneChange,
   onSubmit,
 }: {
   available: boolean
@@ -713,8 +702,14 @@ function AuthorizationForm({
   reason: string | null
   error: boolean
   apiToken: string
+  accountId: string
+  tunnelId: string
+  zoneId: string
   pending: boolean
   onTokenChange: (value: string) => void
+  onAccountChange: (value: string) => void
+  onTunnelChange: (value: string) => void
+  onZoneChange: (value: string) => void
   onSubmit: () => void
 }) {
   return (
@@ -739,6 +734,18 @@ function AuthorizationForm({
             Cloudflare authorization expired or could not be loaded. Validate the token again.
           </p>
         ) : null}
+        <Field className="max-w-xl">
+          <FieldLabel htmlFor="cloudflare-account-id">Cloudflare account ID</FieldLabel>
+          <Input id="cloudflare-account-id" value={accountId} disabled={!available || pending} autoComplete="off" onChange={(event) => onAccountChange(event.target.value)} />
+        </Field>
+        <Field className="max-w-xl">
+          <FieldLabel htmlFor="cloudflare-tunnel-id">Existing tunnel ID</FieldLabel>
+          <Input id="cloudflare-tunnel-id" value={tunnelId} disabled={!available || pending} autoComplete="off" onChange={(event) => onTunnelChange(event.target.value)} />
+        </Field>
+        <Field className="max-w-xl">
+          <FieldLabel htmlFor="cloudflare-zone-id">Zone ID</FieldLabel>
+          <Input id="cloudflare-zone-id" value={zoneId} disabled={!available || pending} autoComplete="off" onChange={(event) => onZoneChange(event.target.value)} />
+        </Field>
         <Field className="max-w-xl">
           <FieldLabel htmlFor="cloudflare-api-token">Cloudflare API token</FieldLabel>
           <Input
@@ -795,91 +802,36 @@ function AuthorizationForm({
 }
 
 function ProvisionForm({
-  authorization,
   accountId,
+  tunnelId,
   zoneId,
   hostname,
   pending,
-  onAccountChange,
-  onZoneChange,
   onHostnameChange,
   onBack,
   onSubmit,
 }: {
-  authorization: CloudflareAuthorization
   accountId: string
+  tunnelId: string
   zoneId: string
   hostname: string
   pending: boolean
-  onAccountChange: (value: string) => void
-  onZoneChange: (value: string) => void
   onHostnameChange: (value: string) => void
   onBack: () => void
   onSubmit: () => void
 }) {
-  const account = authorization.accounts.find((item) => item.id === accountId)
-  const ready = Boolean(accountId && zoneId && hostname.trim())
+  const ready = Boolean(accountId && tunnelId && zoneId && hostname.trim())
   return (
     <FieldGroup className="max-w-2xl">
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field>
-          <FieldLabel htmlFor="cloudflare-account">Account</FieldLabel>
-          <Select value={accountId} onValueChange={onAccountChange} disabled={pending}>
-            <SelectTrigger id="cloudflare-account" className="w-full">
-              <SelectValue placeholder="Select an account" />
-            </SelectTrigger>
-            <SelectContent>
-              {authorization.accounts.map((item) => (
-                <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-        <Field>
-          <FieldLabel htmlFor="cloudflare-zone">Zone</FieldLabel>
-          <Select value={zoneId} onValueChange={onZoneChange} disabled={pending || !account}>
-            <SelectTrigger id="cloudflare-zone" className="w-full">
-              <SelectValue placeholder="Select a zone" />
-            </SelectTrigger>
-            <SelectContent>
-              {account?.zones.map((zone) => (
-                <SelectItem key={zone.id} value={zone.id}>{zone.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-      </div>
-      {account && account.zones.length === 0 ? (
-        <FieldDescription>
-          This account has no active zones. Create and activate a zone in{" "}
-          <a className="underline" href="https://dash.cloudflare.com/?to=/:account/websites" target="_blank" rel="noreferrer">
-            Cloudflare Websites
-          </a>{" "}
-          then validate a fresh scoped token to discover it here.
-        </FieldDescription>
-      ) : null}
+      <Field><FieldLabel>Cloudflare account ID</FieldLabel><Input value={accountId} disabled /></Field>
+      <Field><FieldLabel>Existing tunnel ID</FieldLabel><Input value={tunnelId} disabled /></Field>
+      <Field><FieldLabel>Zone ID</FieldLabel><Input value={zoneId} disabled /></Field>
       <Field>
         <FieldLabel htmlFor="cloudflare-hostname">Public hostname</FieldLabel>
-        <Input
-          id="cloudflare-hostname"
-          value={hostname}
-          disabled={pending}
-          placeholder="pay.example.com"
-          autoCapitalize="none"
-          autoCorrect="off"
-          spellCheck={false}
-          onChange={(event) => onHostnameChange(event.target.value)}
-        />
-        <FieldDescription>
-          lnSwitchboard checks this exact hostname in the selected zone before it creates an owned DNS record. Existing records are never overwritten.
-        </FieldDescription>
+        <Input id="cloudflare-hostname" value={hostname} disabled={pending} placeholder="pay.example.com" autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={(event) => onHostnameChange(event.target.value)} />
+        <FieldDescription>lnSwitchboard checks this exact hostname before creating an owned DNS record. Existing records are never overwritten.</FieldDescription>
       </Field>
-      <div className="flex flex-wrap gap-2">
-        <Button type="button" disabled={!ready || pending} onClick={onSubmit}>
-          {pending ? "Creating tunnel…" : "Create tunnel"}
-        </Button>
-        <Button type="button" variant="ghost" disabled={pending} onClick={onBack}>Back</Button>
-      </div>
+      <div className="flex flex-wrap gap-2"><Button type="button" disabled={!ready || pending} onClick={onSubmit}>{pending ? "Configuring tunnel…" : "Configure existing tunnel"}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onBack}>Back</Button></div>
     </FieldGroup>
   )
 }
@@ -933,7 +885,7 @@ function ConnectedCloudflare({
             <AlertDialogHeader>
               <AlertDialogTitle>Disconnect Cloudflare Tunnel?</AlertDialogTitle>
               <AlertDialogDescription>
-                lnSwitchboard will disable public ingress, remove its owned DNS record, and delete its managed tunnel. DNS records that no longer match are preserved.
+                lnSwitchboard will remove its public ingress route and owned DNS record. The existing tunnel itself is preserved; DNS records that no longer match are also preserved.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

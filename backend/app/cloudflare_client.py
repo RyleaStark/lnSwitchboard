@@ -155,6 +155,14 @@ class CloudflareClient:
             None,
         )
 
+    async def get_tunnel(
+        self, account_id: str, tunnel_id: str
+    ) -> dict[str, Any] | None:
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}", allow_not_found=True
+        )
+        return result if isinstance(result, dict) else None
+
     async def configure_tunnel(
         self,
         account_id: str,
@@ -222,6 +230,30 @@ class CloudflareClient:
         routes.append({"hostname": hostname, "service": origin_url})
         routes.append(fallback or {"service": "http_status:404"})
         return routes
+
+    async def remove_tunnel_route(
+        self, account_id: str, tunnel_id: str, hostname: str
+    ) -> None:
+        current = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+        )
+        config = current.get("config") if isinstance(current, dict) else None
+        if not isinstance(config, dict):
+            raise CloudflareAPIError(502)
+        ingress = config.get("ingress")
+        if not isinstance(ingress, list):
+            raise CloudflareAPIError(502)
+        retained = [
+            dict(route) for route in ingress
+            if isinstance(route, dict)
+            and str(route.get("hostname", "")).lower().rstrip(".") != hostname.lower().rstrip(".")
+        ]
+        if len(retained) == len(ingress):
+            return
+        await self._request(
+            "PUT", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
+            json={"config": {**config, "ingress": retained}},
+        )
 
     async def disable_tunnel(self, account_id: str, tunnel_id: str) -> None:
         await self._request(

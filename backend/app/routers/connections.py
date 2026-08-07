@@ -39,8 +39,7 @@ _Result = TypeVar("_Result")
 CLOUDFLARE_AUTHORIZATION_COOKIE = "lnswitchboard_cloudflare_authorization"
 TAILSCALE_LOGIN_COOKIE = "lnswitchboard_tailscale_login"
 _REQUIRED_PERMISSIONS = [
-    "Account / Cloudflare Tunnel / Edit",
-    "Account / Account Settings / Read",
+    "Account / Cloudflare One Connectors / Edit",
     "Zone / DNS / Edit",
     "Zone / Zone / Read",
 ]
@@ -67,6 +66,7 @@ def _serialize_connection(connection: ProviderConnection) -> dict[str, object]:
 
 class CloudflareProvisionRequest(BaseModel):
     account_id: str
+    tunnel_id: str
     zone_id: str
     hostname: str
 
@@ -300,12 +300,21 @@ async def authorize_cloudflare(
             detail="Invalid Cloudflare authorization request",
         ) from exc
     api_token = payload.get("api_token") if isinstance(payload, dict) else None
-    if not isinstance(api_token, str) or not 1 <= len(api_token) <= 4096:
+    account_id = payload.get("account_id") if isinstance(payload, dict) else None
+    tunnel_id = payload.get("tunnel_id") if isinstance(payload, dict) else None
+    if (
+        not isinstance(api_token, str)
+        or not isinstance(account_id, str)
+        or not isinstance(tunnel_id, str)
+        or not 1 <= len(api_token) <= 4096
+    ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Invalid Cloudflare authorization request",
         )
-    authorization = await _cloudflare_call(lambda: service.authorize(api_token))
+    authorization = await _cloudflare_call(
+        lambda: service.authorize(api_token, account_id, tunnel_id)
+    )
     response.set_cookie(
         CLOUDFLARE_AUTHORIZATION_COOKIE,
         str(authorization["authorization_id"]),
@@ -315,7 +324,7 @@ async def authorize_cloudflare(
         samesite="lax",
         path="/api/connections/cloudflare",
     )
-    return {"accounts": authorization["accounts"]}
+    return {}
 
 
 @router.get(
@@ -374,6 +383,7 @@ async def provision_cloudflare(
         lambda: service.provision(
             authorization_id=authorization_id,
             account_id=request.account_id,
+            tunnel_id=request.tunnel_id,
             zone_id=request.zone_id,
             hostname=request.hostname,
         )

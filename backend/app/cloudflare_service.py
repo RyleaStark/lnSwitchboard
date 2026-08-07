@@ -19,6 +19,7 @@ _AUTHORIZATION_PREFIX = "cloudflare-authorization:"
 _AUTHORIZATION_ID = re.compile(r"^[A-Za-z0-9_-]{32}$")
 _AUTHORIZATION_TTL_SECONDS = 15 * 60
 _RESOURCE_ID = re.compile(r"^[a-fA-F0-9]{32}$")
+_TUNNEL_ID = re.compile(r"^(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{8}-(?:[a-fA-F0-9]{4}-){3}[a-fA-F0-9]{12})$")
 
 
 class CloudflareServiceError(RuntimeError):
@@ -43,16 +44,14 @@ class CloudflareNotFoundError(CloudflareServiceError):
 
 class CloudflareClientProtocol(Protocol):
     async def verify_token(self) -> None: ...
-    async def list_accounts(self) -> list[dict[str, Any]]: ...
-    async def list_zones(self, account_id: str) -> list[dict[str, Any]]: ...
+    async def get_tunnel(
+        self, account_id: str, tunnel_id: str
+    ) -> dict[str, Any] | None: ...
     async def get_zone(self, zone_id: str) -> dict[str, Any]: ...
     async def list_dns_records(
         self, zone_id: str, hostname: str
     ) -> list[dict[str, Any]]: ...
-    async def create_tunnel(self, account_id: str, name: str) -> dict[str, Any]: ...
-    async def find_tunnel_by_name(
-        self, account_id: str, name: str
-    ) -> dict[str, Any] | None: ...
+
     async def configure_tunnel(
         self,
         account_id: str,
@@ -65,6 +64,9 @@ class CloudflareClientProtocol(Protocol):
     ) -> dict[str, Any]: ...
     async def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str: ...
     async def disable_tunnel(self, account_id: str, tunnel_id: str) -> None: ...
+    async def remove_tunnel_route(
+        self, account_id: str, tunnel_id: str, hostname: str
+    ) -> None: ...
     async def get_dns_record(
         self, zone_id: str, record_id: str
     ) -> dict[str, Any] | None: ...
@@ -72,10 +74,7 @@ class CloudflareClientProtocol(Protocol):
         self, account_id: str, tunnel_id: str
     ) -> list[dict[str, Any]]: ...
     async def delete_dns_record(self, zone_id: str, record_id: str) -> None: ...
-    async def cleanup_tunnel_connections(
-        self, account_id: str, tunnel_id: str
-    ) -> None: ...
-    async def delete_tunnel(self, account_id: str, tunnel_id: str) -> None: ...
+
 
 
 class CloudflareService:
@@ -109,6 +108,13 @@ class CloudflareService:
         normalized = value.strip()
         if not _RESOURCE_ID.fullmatch(normalized):
             raise CloudflareValidationError(f"{label} is invalid")
+        return normalized
+
+    @staticmethod
+    def _normalize_tunnel_id(value: str) -> str:
+        normalized = value.strip()
+        if not _TUNNEL_ID.fullmatch(normalized):
+            raise CloudflareValidationError("tunnel ID is invalid")
         return normalized
 
     @staticmethod
@@ -151,58 +157,39 @@ class CloudflareService:
             )
         return normalized
 
-    async def authorize(self, api_token: str) -> dict[str, Any]:
+    async def authorize(
+        self, api_token: str, account_id: str, tunnel_id: str
+    ) -> dict[str, Any]:
         self._require_connector()
         token = api_token.strip()
         if not token:
             raise CloudflareValidationError("Cloudflare API token is required")
+        account_id = self._normalize_resource_id(account_id, "account ID")
+        tunnel_id = self._normalize_tunnel_id(tunnel_id)
         client = self.client_factory(token)
         await client.verify_token()
-        discovered = await self._discover_accounts(client)
+        tunnel = await client.get_tunnel(account_id, tunnel_id)
+        if not isinstance(tunnel, dict) or str(tunnel.get("id", "")) != tunnel_id:
+            raise CloudflareNotFoundError("Cloudflare tunnel was not found")
         authorization_id = random_secrets.token_urlsafe(24)
         self.secrets.set(
             f"{_AUTHORIZATION_PREFIX}{authorization_id}",
             {
                 "api_token": token,
                 "created_at": time.time(),
-                "accounts": discovered,
+                "account_id": account_id,
+                "tunnel_id": tunnel_id,
             },
         )
-        return {"authorization_id": authorization_id, "accounts": discovered}
+        return {"authorization_id": authorization_id}
 
     def get_authorization(self, authorization_id: str) -> dict[str, Any]:
-        owner_id, payload = self._authorization_payload(authorization_id)
-        accounts = payload.get("accounts")
-        if not isinstance(accounts, list):
-            self.secrets.delete(owner_id)
-            raise CloudflareValidationError("Cloudflare authorization is invalid")
-        return {"accounts": accounts}
+        self._authorization_payload(authorization_id)
+        return {}
 
     def cancel_authorization(self, authorization_id: str) -> bool:
         return self.secrets.delete(f"{_AUTHORIZATION_PREFIX}{authorization_id}")
 
-    async def _discover_accounts(
-        self, client: CloudflareClientProtocol
-    ) -> list[dict[str, Any]]:
-        discovered: list[dict[str, Any]] = []
-        for account in await client.list_accounts():
-            account_id = str(account.get("id", ""))
-            if not _RESOURCE_ID.fullmatch(account_id):
-                continue
-            zones = await client.list_zones(account_id)
-            discovered.append(
-                {
-                    "id": account_id,
-                    "name": str(account.get("name", "")),
-                    "zones": [
-                        {"id": str(zone["id"]), "name": str(zone["name"])}
-                        for zone in zones
-                        if _RESOURCE_ID.fullmatch(str(zone.get("id", "")))
-                        and zone.get("name")
-                    ],
-                }
-            )
-        return discovered
 
     def _authorization_payload(
         self, authorization_id: str
@@ -233,6 +220,7 @@ class CloudflareService:
         *,
         authorization_id: str,
         account_id: str,
+        tunnel_id: str,
         zone_id: str,
         hostname: str,
     ) -> ProviderConnection:
@@ -240,6 +228,7 @@ class CloudflareService:
             return await self._provision_locked(
                 authorization_id=authorization_id,
                 account_id=account_id,
+                tunnel_id=tunnel_id,
                 zone_id=zone_id,
                 hostname=hostname,
             )
@@ -249,6 +238,7 @@ class CloudflareService:
         *,
         authorization_id: str,
         account_id: str,
+        tunnel_id: str,
         zone_id: str,
         hostname: str,
     ) -> ProviderConnection:
@@ -258,9 +248,17 @@ class CloudflareService:
         account_id = self._normalize_resource_id(account_id, "account ID")
         zone_id = self._normalize_resource_id(zone_id, "zone ID")
         hostname = self._normalize_hostname(hostname)
+        tunnel_id = self._normalize_tunnel_id(tunnel_id)
         authorization_owner, credential_payload, client = await self._pending_client(
             authorization_id
         )
+        if (
+            credential_payload.get("account_id") != account_id
+            or credential_payload.get("tunnel_id") != tunnel_id
+        ):
+            raise CloudflareValidationError(
+                "account ID and tunnel ID must match the validated token"
+            )
 
         zone = await client.get_zone(zone_id)
         zone_name = self._normalize_hostname(str(zone.get("name", "")))
@@ -279,163 +277,29 @@ class CloudflareService:
                 "A DNS record already exists for this hostname; lnSwitchboard will not replace it"
             )
 
-        tunnel_id: str | None = None
-        dns_record_id: str | None = None
-        dns_attempted = False
-        connection_id: str | None = None
-        tunnel_name = self._tunnel_name(hostname)
-        journal = self.store.create_provisioning_journal(
-            provider="cloudflare",
-            authorization_owner=authorization_owner,
-            account_id=account_id,
-            zone_id=zone_id,
-            hostname=hostname,
-            resource_name=tunnel_name,
+        await client.configure_tunnel(account_id, tunnel_id, hostname, self.origin_url)
+        dns_record_id = await self._create_or_find_dns_record(
+            client, zone_id, hostname, tunnel_id
         )
-        try:
-            tunnel_id = await self._create_or_find_tunnel(
-                client, account_id, tunnel_name
-            )
-            self.store.update_provisioning_journal(
-                journal.id, external_id=tunnel_id, phase="tunnel_created"
-            )
-            await client.configure_tunnel(
-                account_id,
-                tunnel_id,
-                hostname,
-                self.origin_url,
-            )
-            dns_attempted = True
-            dns_record_id = await self._create_or_find_dns_record(
-                client, zone_id, hostname, tunnel_id
-            )
-            self.store.update_provisioning_journal(
-                journal.id,
-                domain_external_id=dns_record_id,
-                phase="dns_created",
-            )
-            connector_token = await client.get_tunnel_token(account_id, tunnel_id)
-            self._write_connector_token(connector_token)
-            self.store.update_provisioning_journal(journal.id, phase="token_written")
-
-            connection = self.store.upsert_connection(
-                provider="cloudflare",
-                external_id=tunnel_id,
-                label="Cloudflare Tunnel",
-                status="provisioning",
-                account_id=account_id,
-                public_metadata={
-                    "zone_id": zone_id,
-                    "zone_name": zone_name,
-                    "tunnel_name": tunnel_name,
-                    "origin": self.origin_url,
-                },
-            )
-            connection_id = connection.id
-            self.store.replace_domains(
-                connection.id,
-                [
-                    {
-                        "hostname": hostname,
-                        "status": "pending",
-                        "external_id": dns_record_id,
-                        "zone_id": zone_id,
-                    }
-                ],
-            )
-            self.secrets.set(
-                connection.id, {"api_token": str(credential_payload["api_token"])}
-            )
-            self.secrets.delete(authorization_owner)
-            self.store.update_provisioning_journal(journal.id, phase="committed")
-            self.store.delete_provisioning_journal(journal.id)
-            refreshed = self.store.get_connection(connection.id)
-            assert refreshed is not None
-            return refreshed
-        except Exception:
-            journal = self.store.get_provisioning_journal(journal.id) or journal
-            if tunnel_id is None:
-                tunnel_id = await self._find_tunnel_id(
-                    client, account_id, journal.resource_name
-                )
-            if tunnel_id is not None and dns_record_id is None:
-                dns_record_id = await self._find_owned_dns_record_id(
-                    client, zone_id, hostname, tunnel_id
-                )
-            try:
-                self._remove_connector_token()
-            except OSError:
-                pass
-            if connection_id is not None:
-                try:
-                    self.secrets.delete(connection_id)
-                except Exception:
-                    pass
-                try:
-                    self.store.delete_connection(connection_id)
-                except Exception:
-                    pass
-            cleanup_failures: list[str] = []
-            if tunnel_id is not None:
-                cleanup_failures = await self._best_effort_cleanup(
-                    client,
-                    account_id=account_id,
-                    tunnel_id=tunnel_id,
-                    zone_id=zone_id,
-                    dns_record_id=dns_record_id,
-                )
-            if cleanup_failures and tunnel_id is not None:
-                self.store.update_provisioning_journal(
-                    journal.id,
-                    external_id=tunnel_id,
-                    domain_external_id=dns_record_id,
-                    phase="cleanup_pending",
-                    last_error=",".join(cleanup_failures),
-                )
-                try:
-                    recovery = self.store.upsert_connection(
-                        provider="cloudflare",
-                        external_id=tunnel_id,
-                        label="Cloudflare Tunnel",
-                        status="error",
-                        account_id=account_id,
-                        public_metadata={
-                            "zone_id": zone_id,
-                            "zone_name": zone_name,
-                            "tunnel_name": tunnel_name,
-                            "origin": self.origin_url,
-                            "cleanup_pending": cleanup_failures,
-                        },
-                        last_error="Provisioning failed and Cloudflare cleanup is incomplete",
-                    )
-                    if dns_record_id:
-                        self.store.replace_domains(
-                            recovery.id,
-                            [
-                                {
-                                    "hostname": hostname,
-                                    "status": "error",
-                                    "external_id": dns_record_id,
-                                    "zone_id": zone_id,
-                                    "last_error": "Cloudflare cleanup is incomplete",
-                                }
-                            ],
-                        )
-                    self.secrets.set(
-                        recovery.id,
-                        {"api_token": str(credential_payload["api_token"])},
-                    )
-                    self.secrets.delete(authorization_owner)
-                except Exception as recovery_error:
-                    raise CloudflareServiceError(
-                        "Provisioning failed and a durable recovery record could not be written"
-                    ) from recovery_error
-                raise CloudflareServiceError(
-                    "Provisioning failed and Cloudflare cleanup is incomplete"
-                )
-            if tunnel_id is not None and not (dns_attempted and dns_record_id is None):
-                self.store.delete_provisioning_journal(journal.id)
-            raise
+        connector_token = await client.get_tunnel_token(account_id, tunnel_id)
+        self._write_connector_token(connector_token)
+        connection = self.store.upsert_connection(
+            provider="cloudflare",
+            external_id=tunnel_id,
+            label="Cloudflare Tunnel",
+            status="provisioning",
+            account_id=account_id,
+            public_metadata={"zone_id": zone_id, "zone_name": zone_name, "origin": self.origin_url},
+        )
+        self.store.replace_domains(
+            connection.id,
+            [{"hostname": hostname, "status": "pending", "external_id": dns_record_id, "zone_id": zone_id}],
+        )
+        self.secrets.set(connection.id, {"api_token": str(credential_payload["api_token"])})
+        self.secrets.delete(authorization_owner)
+        refreshed = self.store.get_connection(connection.id)
+        assert refreshed is not None
+        return refreshed
 
     async def refresh_status(self, connection_id: str) -> ProviderConnection:
         connection = self._require_connection(connection_id)
@@ -498,19 +362,12 @@ class CloudflareService:
                     raise CloudflareConflictError(
                         "The DNS record is no longer owned by lnSwitchboard and was preserved"
                     )
-            await client.disable_tunnel(
-                str(connection.account_id), connection.external_id
+            await client.remove_tunnel_route(
+                str(connection.account_id), connection.external_id, connection.domains[0].hostname if connection.domains else ""
             )
             self._remove_connector_token()
-            if zone_id and dns_record_id:
-                if record is not None:
-                    await client.delete_dns_record(zone_id, dns_record_id)
-            await client.cleanup_tunnel_connections(
-                str(connection.account_id), connection.external_id
-            )
-            await client.delete_tunnel(
-                str(connection.account_id), connection.external_id
-            )
+            if zone_id and dns_record_id and record is not None:
+                await client.delete_dns_record(zone_id, dns_record_id)
         except Exception:
             self.store.upsert_connection(
                 provider="cloudflare",
@@ -600,9 +457,7 @@ class CloudflareService:
                 client = await self._client_from_payload(
                     journal.authorization_owner, payload
                 )
-                tunnel_id = journal.external_id or await self._find_tunnel_id(
-                    client, journal.account_id, journal.resource_name
-                )
+                tunnel_id = journal.external_id
                 dns_record_id = journal.domain_external_id
                 if tunnel_id and dns_record_id is None:
                     dns_record_id = await self._find_owned_dns_record_id(
@@ -635,31 +490,6 @@ class CloudflareService:
                     last_error="recovery_failed",
                 )
 
-    async def _create_or_find_tunnel(
-        self, client: CloudflareClientProtocol, account_id: str, name: str
-    ) -> str:
-        try:
-            tunnel = await client.create_tunnel(account_id, name)
-            tunnel_id = str(tunnel.get("id", ""))
-            if tunnel_id:
-                return tunnel_id
-        except Exception:
-            pass
-        tunnel_id = await self._find_tunnel_id(client, account_id, name)
-        if tunnel_id is None:
-            raise CloudflareServiceError(
-                "Cloudflare tunnel creation outcome could not be reconciled"
-            )
-        return tunnel_id
-
-    async def _find_tunnel_id(
-        self, client: CloudflareClientProtocol, account_id: str, name: str
-    ) -> str | None:
-        tunnel = await client.find_tunnel_by_name(account_id, name)
-        if not isinstance(tunnel, dict):
-            return None
-        tunnel_id = str(tunnel.get("id", ""))
-        return tunnel_id or None
 
     async def _create_or_find_dns_record(
         self,
