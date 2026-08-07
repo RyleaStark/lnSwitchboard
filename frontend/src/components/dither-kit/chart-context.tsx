@@ -18,7 +18,12 @@ import type { Dimensions } from "./use-chart-dimensions"
 /** Which chart root a part is composed under — drives the boundary guards. */
 export type ChartType = "area" | "bar" | "line" | "pie" | "radar"
 
-export type ChartConfig = Record<string, { label?: string; color: DitherColor }>
+export type SeriesAxis = "primary" | "secondary"
+
+export type ChartConfig = Record<
+  string,
+  { label?: string; color: DitherColor; axis?: SeriesAxis }
+>
 
 export type Margins = {
   top: number
@@ -40,12 +45,15 @@ export type SeriesSpec = {
   kind: SeriesKind
   variant: AreaVariant
   strokeVariant: StrokeVariant
+  lineGlowWidth?: number
 }
 
 export type ChartContextValue = {
   chartType: ChartType // which root this part is under
   config: ChartConfig
   configKeys: string[] // series order — drives stacking + legend
+  primaryKeys: string[]
+  secondaryKeys: string[]
   data: Row[]
   dataLength: number
   stackType: StackType
@@ -63,7 +71,9 @@ export type ChartContextValue = {
     seriesIndex: number,
     seriesCount: number
   ) => { x: number; width: number }
-  y: ScaleLinear<number, number> // value → px within the plot
+  y: ScaleLinear<number, number> // primary value → px within the plot
+  ySecondary: ScaleLinear<number, number>
+  yForKey: (key: string) => ScaleLinear<number, number>
   bands: Record<string, [number, number][]> // per-series [y0, y1] per row
   max: number
   min: number // most-negative value (0 when nothing dips below the baseline)
@@ -219,6 +229,14 @@ export function useChartController({
   // Memoized: configKeys is the dep that drives `bands`, `common` and the
   // canvas `targets` memo — a fresh array each render would bust all of them.
   const configKeys = useMemo(() => Object.keys(config), [config])
+  const primaryKeys = useMemo(
+    () => configKeys.filter((key) => config[key]?.axis !== "secondary"),
+    [config, configKeys]
+  )
+  const secondaryKeys = useMemo(
+    () => configKeys.filter((key) => config[key]?.axis === "secondary"),
+    [config, configKeys]
+  )
   const revision = useRevision(data, replayToken)
 
   const [selectedDataKey, setSelectedDataKey] = useState<string | null>(
@@ -239,7 +257,8 @@ export function useChartController({
       return cur &&
         cur.kind === spec.kind &&
         cur.variant === spec.variant &&
-        cur.strokeVariant === spec.strokeVariant
+        cur.strokeVariant === spec.strokeVariant &&
+        cur.lineGlowWidth === spec.lineGlowWidth
         ? prev
         : { ...prev, [spec.dataKey]: spec }
     })
@@ -294,10 +313,19 @@ export function useChartController({
   // Memoized: the priciest derivation in the render path — it walks every
   // row × series to build the stack bands. Hover/cursor state changes must not
   // recompute it, only a real data/series/stack change.
-  const { bands, max, min } = useMemo(
-    () => computeBands(data, configKeys, stackType),
-    [data, configKeys, stackType]
+  const primary = useMemo(
+    () => computeBands(data, primaryKeys, stackType),
+    [data, primaryKeys, stackType]
   )
+  const secondary = useMemo(
+    () => computeBands(data, secondaryKeys, "default"),
+    [data, secondaryKeys]
+  )
+  const bands = useMemo(
+    () => ({ ...primary.bands, ...secondary.bands }),
+    [primary.bands, secondary.bands]
+  )
+  const { max, min } = primary
 
   const isBar = chartType === "bar"
   // The d3 scale factories are memoized so `y` keeps a stable identity: the
@@ -344,6 +372,14 @@ export function useChartController({
     () => buildYScale(min, max, plotHeight),
     [min, max, plotHeight]
   )
+  const ySecondary = useMemo(
+    () => buildYScale(secondary.min, secondary.max, plotHeight),
+    [secondary.min, secondary.max, plotHeight]
+  )
+  const yForKey = useCallback(
+    (key: string) => (config[key]?.axis === "secondary" ? ySecondary : y),
+    [config, y, ySecondary]
+  )
 
   // Stable so `common` and the value stay stable; re-created only on config.
   const seedOf = useCallback(
@@ -372,7 +408,7 @@ export function useChartController({
       let minY = Number.POSITIVE_INFINITY
       for (const key of configKeys) {
         const b = bands[key]?.[hoverIndex]
-        if (b) minY = Math.min(minY, y(b[1]))
+        if (b) minY = Math.min(minY, yForKey(key)(b[1]))
       }
       if (!Number.isFinite(minY)) return floor
       return Math.max(floor, mTop + minY)
@@ -408,7 +444,7 @@ export function useChartController({
     mTop,
     cursorX,
     bands,
-    y,
+    yForKey,
     data,
   ])
 
@@ -422,6 +458,8 @@ export function useChartController({
       chartType,
       config,
       configKeys,
+      primaryKeys,
+      secondaryKeys,
       data,
       dataLength: data.length,
       stackType,
@@ -433,6 +471,8 @@ export function useChartController({
       indexAtX,
       barSlot,
       y,
+      ySecondary,
+      yForKey,
       bands,
       max,
       min,
@@ -465,6 +505,8 @@ export function useChartController({
       chartType,
       config,
       configKeys,
+      primaryKeys,
+      secondaryKeys,
       data,
       stackType,
       stableMargins,
@@ -476,6 +518,8 @@ export function useChartController({
       indexAtX,
       barSlot,
       y,
+      ySecondary,
+      yForKey,
       bands,
       max,
       min,

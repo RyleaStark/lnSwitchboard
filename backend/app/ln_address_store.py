@@ -247,6 +247,9 @@ class LNAddressStore:
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_ln_address_lookup ON ln_addresses(local_part, domain)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ln_address_domain ON ln_addresses(domain)"
+            )
             self._ensure_columns(conn)
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
@@ -328,6 +331,16 @@ class LNAddressStore:
         if row is None:
             return None
         return self._row_to_dict(row)
+
+    async def has_domain(self, domain: str) -> bool:
+        normalized_domain = self._normalize(domain)
+        async with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM ln_addresses WHERE domain = ? LIMIT 1",
+                    (normalized_domain,),
+                ).fetchone()
+        return row is not None
 
     async def add_address(
         self,

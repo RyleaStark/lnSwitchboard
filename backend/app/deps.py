@@ -6,7 +6,11 @@ from functools import lru_cache
 
 from fastapi import Depends, HTTPException, Request, status
 
+from .cloudflare_client import CloudflareClient
+from .cloudflare_service import CloudflareService
 from .config import Settings, get_settings
+from .connection_secret_store import ConnectionSecretStore
+from .connection_store import ConnectionStore
 from .ln_address_store import LNAddressStore
 from .ln_client import LNClient
 from .log_storage import LogEntry, RequestLogStorage
@@ -16,6 +20,8 @@ from .nostr_zaps import NostrZapPublisher
 from .nip05_store import NostrIdentityStore
 from .rate_limiter import RateLimiter
 from .request_utils import get_client_ip, get_proxy_debug_info
+from .tailscale_connector import TailscaleConnector
+from .tailscale_service import TailscaleService
 from .webhook_dispatcher import WebhookDispatcher
 
 
@@ -59,6 +65,44 @@ def _get_nip05_store() -> NostrIdentityStore:
 def _get_ln_address_store() -> LNAddressStore:
     settings = get_settings()
     return LNAddressStore(settings.data_store_path)
+
+
+@lru_cache()
+def _get_connection_store() -> ConnectionStore:
+    return ConnectionStore(get_settings().data_store_path)
+
+
+@lru_cache()
+def _get_connection_secret_store() -> ConnectionSecretStore:
+    settings = get_settings()
+    return ConnectionSecretStore(settings.data_store_path, settings.connection_secret_key_path)
+
+
+@lru_cache()
+def _get_cloudflare_service() -> CloudflareService:
+    settings = get_settings()
+    return CloudflareService(
+        store=_get_connection_store(),
+        secrets=_get_connection_secret_store(),
+        client_factory=CloudflareClient,
+        connector_enabled=settings.cloudflared_connector_enabled,
+        token_path=settings.cloudflared_token_path,
+        origin_url=settings.cloudflared_origin_url,
+        token_gid=settings.cloudflared_token_gid,
+    )
+
+
+@lru_cache()
+def _get_tailscale_service() -> TailscaleService:
+    settings = get_settings()
+    return TailscaleService(
+        connector=TailscaleConnector(
+            control_dir=settings.tailscale_control_dir,
+            status_dir=settings.tailscale_status_dir,
+        ),
+        store=_get_connection_store(),
+        connector_enabled=settings.tailscale_connector_enabled,
+    )
 
 
 @lru_cache()
@@ -129,6 +173,22 @@ async def get_nip05_store_dep() -> NostrIdentityStore:
 
 async def get_ln_address_store_dep() -> LNAddressStore:
     return _get_ln_address_store()
+
+
+async def get_connection_store_dep() -> ConnectionStore:
+    return _get_connection_store()
+
+
+async def get_connection_secret_store_dep() -> ConnectionSecretStore:
+    return _get_connection_secret_store()
+
+
+async def get_cloudflare_service_dep() -> CloudflareService:
+    return _get_cloudflare_service()
+
+
+async def get_tailscale_service_dep() -> TailscaleService:
+    return _get_tailscale_service()
 
 
 async def get_webhook_dispatcher_dep() -> WebhookDispatcher:

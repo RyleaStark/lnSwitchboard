@@ -7,6 +7,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Toaster } from "@/components/ui/sonner"
 
 const AddressesPage = lazy(() => import("@/pages/addresses").then(({ AddressesPage }) => ({ default: AddressesPage })))
+const ConnectionsPage = lazy(() => import("@/pages/connections").then(({ ConnectionsPage }) => ({ default: ConnectionsPage })))
 const DashboardPage = lazy(() => import("@/pages/dashboard").then(({ DashboardPage }) => ({ default: DashboardPage })))
 const IdentitiesPage = lazy(() => import("@/pages/identities").then(({ IdentitiesPage }) => ({ default: IdentitiesPage })))
 const InvoicesPage = lazy(() => import("@/pages/invoices").then(({ InvoicesPage }) => ({ default: InvoicesPage })))
@@ -43,6 +44,8 @@ export default function App() {
               <Route path="logs/" element={<LogsPage />} />
               <Route path="addresses/" element={<AddressesPage />} />
               <Route path="identities/" element={<IdentitiesPage />} />
+              <Route path="connections/cloudflare/" element={<ConnectionsPage />} />
+              <Route path="connections/tailscale/" element={<ConnectionsPage />} />
               <Route path="settings/" element={<SettingsPage />} />
               <Route path="webhooks/" element={<WebhooksPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />

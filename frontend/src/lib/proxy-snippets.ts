@@ -1,6 +1,6 @@
 import type { DeploymentEnv } from "@/lib/api"
 
-export type ProxyEngine = "nginx" | "caddy" | "cloudflare"
+export type ProxyEngine = "nginx" | "caddy" | "custom"
 
 export type ProxyHelpItem = {
   icon: ProxyEngine
@@ -23,7 +23,7 @@ export function proxyHostForDeployment(value?: string | null): string {
   return "127.0.0.1"
 }
 
-export function proxyUpstreamForDeployment(value?: string | null, port = "22121"): string {
+export function proxyUpstreamForDeployment(value?: string | null, port = "21212"): string {
   return `${proxyHostForDeployment(value)}:${port}`
 }
 
@@ -34,46 +34,33 @@ export function buildProxyHelpItems(value?: string | null, publicHost = "your-do
       icon: "nginx",
       label: "NGINX",
       title: "NGINX Reverse Proxy",
-      description: "Expose only the public LNURL and Nostr well-known routes through NGINX.",
-      snippet: `location /.well-known/lnurlp/ {
+      description: "Forward the public hostname to lnSwitchboard's isolated public listener.",
+      snippet: `location / {
   proxy_pass http://${upstream};
   proxy_set_header Host $host;
   proxy_set_header X-Forwarded-Proto $scheme;
   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-}
-
-location = /.well-known/nostr.json {
-  proxy_pass http://${upstream};
-  proxy_set_header Host $host;
-  proxy_set_header X-Forwarded-Proto $scheme;
 }`,
     },
     {
       icon: "caddy",
       label: "Caddy",
       title: "Caddy Reverse Proxy",
-      description: "Expose the public LNURL and Nostr routes with Caddy matchers.",
+      description: "Forward the public hostname to lnSwitchboard's isolated public listener.",
       snippet: `${publicHost} {
-  reverse_proxy /.well-known/lnurlp/* ${upstream}
-  reverse_proxy /.well-known/nostr.json ${upstream}
+  reverse_proxy ${upstream}
 }`,
     },
     {
-      icon: "cloudflare",
-      label: "Cloudflare Tunnel",
-      title: "Cloudflare Tunnel Reverse Proxy",
-      description: "Route only the public well-known paths through a Cloudflare Tunnel ingress rule.",
-      snippet: `tunnel: <tunnel-id>
-credentials-file: /etc/cloudflared/<tunnel-id>.json
-
-ingress:
-  - hostname: ${publicHost}
-    path: /.well-known/lnurlp/*
-    service: http://${upstream}
-  - hostname: ${publicHost}
-    path: /.well-known/nostr.json
-    service: http://${upstream}
-  - service: http_status:404`,
+      icon: "custom",
+      label: "Custom",
+      title: "Custom Reverse Proxy",
+      description: "Use these requirements with any reverse proxy that can reach lnSwitchboard's public listener.",
+      snippet: `Public hostname: ${publicHost}
+Upstream: http://${upstream}
+Preserve the original Host header.
+Forward the original client IP only from a configured trusted proxy.
+Never route public traffic to port 22121.`,
     },
   ]
 }

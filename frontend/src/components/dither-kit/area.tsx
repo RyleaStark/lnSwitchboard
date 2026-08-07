@@ -11,6 +11,7 @@ export type SeriesProps = {
   dataKey: string
   variant?: AreaVariant
   strokeVariant?: StrokeVariant
+  lineGlowWidth?: number
   isClickable?: boolean
   children?: ReactNode
 }
@@ -27,10 +28,11 @@ function CartesianSeries({
   dataKey,
   variant = "gradient",
   strokeVariant = "solid",
+  lineGlowWidth,
   isClickable = false,
   children,
 }: SeriesProps & { part: string; kind: SeriesKind }) {
-  const ctx = useChartPart(part, kind === "line" ? "line" : "area")
+  const ctx = useChartPart(part, kind === "line" ? ["area", "line"] : "area")
   const { registerSeries, unregisterSeries } = ctx
 
   // The Vite client build does not expose Node's `process.env` global.
@@ -41,9 +43,17 @@ function CartesianSeries({
   }
 
   useEffect(() => {
-    registerSeries({ dataKey, kind, variant, strokeVariant })
+    registerSeries({ dataKey, kind, variant, strokeVariant, lineGlowWidth })
     return () => unregisterSeries(dataKey)
-  }, [dataKey, kind, variant, strokeVariant, registerSeries, unregisterSeries])
+  }, [
+    dataKey,
+    kind,
+    variant,
+    strokeVariant,
+    lineGlowWidth,
+    registerSeries,
+    unregisterSeries,
+  ])
 
   const band = ctx.bands[dataKey]
   if (!ctx.ready || !band) return null
@@ -61,11 +71,12 @@ function CartesianSeries({
   let hitPath: string | null = null
   if (isClickable) {
     const parts: string[] = []
+    const y = ctx.yForKey(dataKey)
     band.forEach((b, i) => {
-      parts.push(`${i === 0 ? "M" : "L"}${ctx.xCenter(i)},${ctx.y(b[1])}`)
+      parts.push(`${i === 0 ? "M" : "L"}${ctx.xCenter(i)},${y(b[1])}`)
     })
     for (let i = band.length - 1; i >= 0; i -= 1) {
-      parts.push(`L${ctx.xCenter(i)},${ctx.y(band[i][0])}`)
+      parts.push(`L${ctx.xCenter(i)},${y(band[i][0])}`)
     }
     hitPath = `${parts.join(" ")} Z`
   }

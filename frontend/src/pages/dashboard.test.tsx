@@ -1,11 +1,24 @@
 import { render, screen, within } from "@testing-library/react"
-import userEvent from "@testing-library/user-event"
 
 import { DashboardChart } from "@/pages/dashboard"
 
 class ResizeObserverStub implements ResizeObserver {
+  private readonly callback: ResizeObserverCallback
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback
+  }
+
   disconnect() {}
-  observe() {}
+
+  observe(target: Element) {
+    Object.defineProperties(target, {
+      clientWidth: { configurable: true, value: 640 },
+      clientHeight: { configurable: true, value: 280 },
+    })
+    this.callback([], this)
+  }
+
   unobserve() {}
 }
 
@@ -16,38 +29,65 @@ Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
 })
 
 const activity = [
-  { date: "2026-08-02", sats: 1200, paid: 2, created: 4 },
-  { date: "2026-08-03", sats: 2400, paid: 3, created: 5 },
+  {
+    date: "2026-08-02",
+    sats: 1200,
+    paid: 2,
+    created: 4,
+    pending: 1,
+    settled: 2,
+    expired: 1,
+  },
+  {
+    date: "2026-08-03",
+    sats: 2400,
+    paid: 3,
+    created: 5,
+    pending: 1,
+    settled: 3,
+    expired: 1,
+  },
 ]
 
-describe("dashboard chart metrics", () => {
-  it("switches between routed sats, paid invoices, and created invoices", async () => {
-    const user = userEvent.setup()
+describe("dashboard invoice activity", () => {
+  it("shows every invoice state together on one chart", async () => {
     render(<DashboardChart activity={activity} />)
 
-    const sats = screen.getByRole("tab", { name: "Sats routed" })
-    const paid = screen.getByRole("tab", { name: "Invoices paid" })
-    const created = screen.getByRole("tab", { name: "Invoices created" })
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument()
+    const chart = await screen.findByRole("img", {
+      name: "Invoice states and sats received over the last 14 days",
+    })
+    expect(chart).toHaveAttribute("data-chart-stack-type", "stacked")
+    expect(chart).toHaveAttribute(
+      "data-chart-series",
+      "pending,settled,expired,sats"
+    )
+    expect(chart).toHaveAttribute("data-chart-secondary-series", "sats")
+    expect(chart).toHaveAttribute("data-chart-series-kinds", "sats:line")
+    expect(chart).toHaveAttribute("data-chart-line-glow-widths", "sats:4")
+    const primaryDomain = chart.getAttribute("data-chart-primary-domain")
+    const secondaryDomain = chart.getAttribute("data-chart-secondary-domain")
+    expect(primaryDomain).not.toBeNull()
+    expect(secondaryDomain).not.toBeNull()
+    const primaryMax = Number(primaryDomain?.split(",").at(-1))
+    const secondaryMax = Number(secondaryDomain?.split(",").at(-1))
+    expect(primaryMax).toBeGreaterThanOrEqual(5)
+    expect(primaryMax).toBeLessThan(100)
+    expect(secondaryMax).toBeGreaterThanOrEqual(2400)
 
-    expect(sats).toHaveAttribute("aria-selected", "true")
-    expect(screen.getByRole("tabpanel", { name: "Sats routed" })).toBeVisible()
-    const satsTable = screen.getByRole("table", { name: "Sats routed over the last 14 days" })
-    expect(within(satsTable).getByRole("row", { name: "2026-08-02 1,200 sats" })).toBeInTheDocument()
+    const legend = screen.getByRole("list")
+    expect(within(legend).getByText("Pending")).toBeInTheDocument()
+    expect(within(legend).getByText("Paid")).toBeInTheDocument()
+    expect(within(legend).getByText("Expired")).toBeInTheDocument()
+    expect(within(legend).getByText("Sats received")).toBeInTheDocument()
 
-    await user.click(sats)
-    await user.keyboard("{ArrowRight}")
-    expect(paid).toHaveFocus()
-    expect(paid).toHaveAttribute("aria-selected", "true")
-    expect(screen.getByRole("tabpanel", { name: "Invoices paid" })).toBeVisible()
-    const paidTable = screen.getByRole("table", { name: "Invoices paid over the last 14 days" })
-    const paidRow = within(paidTable).getByRole("row", { name: "2026-08-03 3" })
-    expect(within(paidRow).getByRole("cell", { name: "3" })).toBeInTheDocument()
-
-    await user.click(created)
-    expect(created).toHaveAttribute("aria-selected", "true")
-    expect(screen.getByRole("tabpanel", { name: "Invoices created" })).toBeVisible()
-    const createdTable = screen.getByRole("table", { name: "Invoices created over the last 14 days" })
-    const createdRow = within(createdTable).getByRole("row", { name: "2026-08-03 5" })
-    expect(within(createdRow).getByRole("cell", { name: "5" })).toBeInTheDocument()
+    const table = screen.getByRole("table", {
+      name: "Invoice states and sats received over the last 14 days",
+    })
+    expect(
+      within(table).getByRole("row", {
+        name: "2026-08-03 5 1 3 1 2,400",
+      })
+    ).toBeInTheDocument()
   })
 })

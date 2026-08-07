@@ -44,8 +44,8 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 
 ### 🚀 Umbrel
 1. Open the Umbrel App Store and search for **“lnSwitchboard.”**
-2. Click **Install** and wait for Umbrel to launch the container on port `22121`.
-3. Visit `http://umbrel.local:22121/` (or your Umbrel’s IP) and follow the proxy instructions to point `/.well-known/lnurlp/` at the service.
+2. Click **Install** and wait for Umbrel to launch lnSwitchboard.
+3. Open lnSwitchboard from the Umbrel dashboard. Umbrel's authenticated `app_proxy` reaches the administration listener on port `22121`; public connectors use port `21212` directly on the private app network.
 
 Umbrel keeps lnSwitchboard updated automatically, so you always receive the latest features and security fixes.
 
@@ -71,7 +71,38 @@ Then run:
 docker compose up -d
 ```
 
-Compose binds port `22121` to loopback by default. Set `LNSWITCHBOARD_BIND_ADDRESS` only when the service must listen on another host interface. Once the service is running, point your reverse proxy so that only `/.well-known/lnurlp/*` and `/.well-known/nostr.json` are internet-facing. Keep the dashboard and `/api/*` routes behind a VPN, SSH tunnel, or HTTP auth. The admin API is same-origin by default and deliberately does not grant cross-origin browser access.
+The Compose stack includes a separate, unprivileged `cloudflared` connector. It has no host-published ports, Docker socket, privileged mode, host networking, or additional Linux capabilities. lnSwitchboard writes its tunnel token under `./secrets/cloudflared`; the connector mounts only that subdirectory read-only and can reach only the public application listener at `lnswitchboard:21212` through tunnel configuration managed by the app.
+
+The connector starts from the current released `cloudflare/cloudflared:2026.7.3` image pinned to its immutable multi-platform digest. Its image entrypoint is overridden to allow cloudflared's built-in updater to check every 24 hours. Runtime binary updates survive normal container restarts and host reboots, but recreating the container restores the pinned image and cloudflared checks for updates again. Dependabot also keeps the reviewed version and digest current in this repository.
+
+Before a tunnel has been authorized, the connector may restart with backoff while waiting for `./secrets/cloudflared/tunnel.token`; this is expected. The Connections page distinguishes the installed connector capability from an authenticated, connected tunnel.
+
+The Compose stack also includes a dedicated Tailscale userspace sidecar, pinned to `tailscale/tailscale:v1.98.10` by immutable multi-platform digest. It uses a private daemon-state volume and a separate named control/status volume shared only with lnSwitchboard. The container has a read-only root filesystem, drops every Linux capability, enables `no-new-privileges`, publishes no host ports, and mounts neither `/dev/net/tun` nor the Docker socket.
+
+The runtime starts in Tailscale's `NeedsLogin` state and waits for lnSwitchboard's authenticated lifecycle controller. Authorization is intentionally absent from Compose: no OAuth client, API token, or reusable auth key is accepted through environment variables. Control is restricted to fixed marker operations, and the only user-derived runtime value is a separately validated single-label device name. Normal onboarding deletes authorization output immediately; a five-minute fallback removes it if the application exits before cleanup.
+
+Funnel is hard-coded to public HTTPS port `443` with the local destination `http://127.0.0.1:21212`. Because the sidecar shares only lnSwitchboard's network namespace, this reaches the public application listener and never exposes the administration listener on `22121`. A tailnet must have MagicDNS and HTTPS certificates enabled, and its policy must grant `tag:lnswitchboard` the `funnel` node attribute. The runtime reports missing prerequisites but never modifies tailnet policy.
+
+Open **Connections → Tailscale** through an authenticated HTTPS administration proxy to onboard the node. Direct loopback/RFC1918 administration remains available for the rest of lnSwitchboard, but Tailscale's bearer-like login flow is disabled there. The immediate proxy must terminate HTTPS, be listed in `TRUSTED_PROXY_CIDRS`, strip client-supplied forwarding headers, and inject its authenticated identity only after authenticating the user. The form then asks only for a device name and suggests `lns` by default; it does not ask for a public domain, OAuth credential, API token, or reusable auth key. Device names are normalized to lowercase and must be a single 1–63 character DNS label containing only letters, numbers, and internal hyphens.
+
+lnSwitchboard starts Tailscale's interactive browser login and shows its short-lived authorization link and in-memory QR code only inside the private administration flow. The link is never written to application logs, connection metadata, browser storage, or retained query state. After login, lnSwitchboard reads the daemon-owned DNS name, accepts only a canonical `*.ts.net` hostname covered by `CertDomains`, verifies MagicDNS, HTTPS, the `funnel` node attribute, and port `443`, then enables the fixed Funnel target. Missing prerequisites remain visible for manual correction; lnSwitchboard never edits broad tailnet policy. Cancellation, expiry, failed validation, successful connection, restart recovery, and disconnect all remove transient authorization artifacts.
+
+Open **Connections → Cloudflare** to onboard a hostname. No OAuth client, callback URL, or Cloudflare application registration is required. Follow the link in the page to [create a custom API token](https://dash.cloudflare.com/profile/api-tokens) with only these permissions:
+
+- Account / Cloudflare Tunnel / Edit
+- Account / Account Settings / Read
+- Zone / DNS / Edit
+- Zone / Zone / Read
+
+Restrict the token resources to the Cloudflare account and zone that will host the public name, then paste it through an authenticated HTTPS administration proxy. Cloudflare onboarding is deliberately disabled for direct HTTP/LAN administration: its short-lived authorization cookie remains `Secure`. Do not put the token in `.env`, Compose configuration, URLs, or command-line arguments.
+
+lnSwitchboard validates the token, returns only accessible account and active-zone metadata, and encrypts the token at rest. If the account has no active zone, the UI links to Cloudflare Websites so the user can create and activate one before revalidating the scoped token. Enter the intended exact hostname; lnSwitchboard queries that hostname in the selected zone and refuses an existing DNS record rather than overwriting or adopting it.
+
+The page remains visible but disabled until the connector is installed and an authenticated HTTPS administration proxy is present. lnSwitchboard creates a remotely managed tunnel, reads its ingress configuration, overrides only the selected hostname to the isolated `21212` public listener, preserves unrelated routes and the terminal fallback, writes the configuration, then reads it back to verify the route before creating one proxied CNAME. During disconnect, lnSwitchboard revalidates its DNS ownership marker before removing the record; changed records are preserved.
+
+Compose binds both listeners to loopback by default. Port `22121` serves only the administration UI and API. The application allows direct loopback/RFC1918 LAN clients (plus IPv6 ULA/link-local clients) and returns `403` to WAN peers, but both Cloudflare and Tailscale onboarding endpoints apply the stricter authenticated-HTTPS-proxy requirement described above. Port `21212` serves only LNURL-pay and NIP-05 routes, so a self-hosted nginx or other public reverse proxy can forward directly to that listener. Override `LNSWITCHBOARD_BIND_ADDRESS` or `LNSWITCHBOARD_PUBLIC_BIND_ADDRESS` only when the corresponding listener must bind another host interface.
+
+Requests on port `21212` use the direct `Host` value, or forwarding headers from peers listed in `TRUSTED_PROXY_CIDRS`. The resolved domain must match a configured Lightning Address, Nostr identity, or a pending/active provider domain registered by Cloudflare Tunnel or Tailscale Funnel; otherwise the public listener returns `404`.
 
 Set `TRUSTED_HOSTS` to every hostname that may serve lnSwitchboard (comma-separated; `*.example.com` wildcards are supported). Requests with any other `Host` value are rejected, which protects a loopback deployment from DNS rebinding. Forwarding headers are ignored unless the immediate reverse proxy is explicitly listed in `TRUSTED_PROXY_CIDRS` (comma-separated IPs or CIDR ranges). Configure the narrowest possible proxy network so LNURL callback URLs and client rate limits use the original HTTPS request safely; never trust an entire shared LAN. Outbound webhooks and Nostr zap receipts refuse destinations on private, loopback, link-local, or reserved networks by default; enable `ALLOW_PRIVATE_WEBHOOKS` or `ALLOW_PRIVATE_NOSTR_RELAYS` only when intentionally targeting trusted local services.
 
@@ -83,7 +114,7 @@ The supported toolchain is Python 3.11 or newer and Node.js 22.22.2 or newer. CI
 python3.11 -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt
 cd frontend && npm ci && npm run build && cd ..
-.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 22121 --no-proxy-headers
+.venv/bin/python -m backend.app.server
 ```
 
 Set `LND_TLS_PATH`, `LND_MACAROON_PATH`, and `LND_READONLY_MACAROON_PATH` to existing LND files before launching. lnSwitchboard uses `invoice.macaroon` for invoice creation/lookup/subscription and `readonly.macaroon` for liquidity reads such as `ListChannels`. By default, lnSwitchboard verifies LND's certificate against `LND_HOST` using the trust roots from `LND_TLS_PATH`; set `LND_TLS_SERVER_NAME` only when you intentionally need to verify against a different certificate SAN. If `LND_MACAROON_PATH` is not set, open Settings and paste a hex macaroon or upload a binary `invoice.macaroon`; lnSwitchboard stores the manual fallback as hex at `MACAROON_STORE_PATH`. Environment settings saved through the dashboard are persisted to `.env` and apply after lnSwitchboard restarts.

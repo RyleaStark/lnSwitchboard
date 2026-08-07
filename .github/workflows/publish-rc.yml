@@ -1,0 +1,115 @@
+name: Publish RC image
+
+on:
+  push:
+    branches:
+      - feat/provider-publication-rc1
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Immutable release-candidate version (for example 0.4.0.rc1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-rc-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  GHCR_IMAGE: ghcr.io/ryleastark/lnswitchboard
+  CACHE_SCOPE: lnswitchboard
+
+jobs:
+  publish:
+    name: Publish GHCR release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate candidate version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${REQUESTED_VERSION:-$(tr -d '[:space:]' < VERSION)}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.rc[1-9][0-9]*$ ]] || {
+            echo "::error::version must be an immutable release candidate such as 0.4.0.rc1" >&2
+            exit 1
+          }
+          test "$(tr -d '[:space:]' < VERSION)" = "$VERSION" || {
+            echo "::error::VERSION must exactly match the requested release candidate" >&2
+            exit 1
+          }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: v0.36.0
+          driver-opts: image=moby/buildkit:v0.32.1@sha256:c2ffdf4f39cb9d0fd0f63413d9354721cb83868a3f2f29583c3504a0c43a254b
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to replace an existing candidate
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$GHCR_IMAGE:$VERSION" >/dev/null 2>&1; then
+            echo "::error::GHCR candidate tag already exists and is immutable: $GHCR_IMAGE:$VERSION" >&2
+            exit 1
+          fi
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.GHCR_IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=lnSwitchboard
+            org.opencontainers.image.description=Lightning Network switchboard service release candidate
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and publish GHCR candidate
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          pull: true
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify immutable GHCR candidate manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python3 scripts/verify_image_manifests.py "$VERSION" "$GHCR_IMAGE" --revision "$GITHUB_SHA" --version-only

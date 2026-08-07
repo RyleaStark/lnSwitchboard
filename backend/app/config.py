@@ -114,7 +114,16 @@ class Settings(BaseSettings):
         env_ignore_empty=True,
     )
 
+    service_host: str = _env_field(
+        env=("SERVICE_HOST", "LNSWITCHBOARD_BIND_ADDRESS"),
+        default="127.0.0.1",
+    )
     service_port: int = _env_field(env="SERVICE_PORT", default=22121)
+    public_service_host: str = _env_field(
+        env=("PUBLIC_SERVICE_HOST", "LNSWITCHBOARD_PUBLIC_BIND_ADDRESS"),
+        default="127.0.0.1",
+    )
+    public_service_port: int = _env_field(env="PUBLIC_SERVICE_PORT", default=21212)
     dep_env: str = _env_field(env="DEP_ENV", default="DOCKER")
     lnd_host: str = _env_field(env="LND_HOST", default=...)
     lnd_grpc_port: int = _env_field(env="LND_GRPC_PORT", default=10009)
@@ -141,6 +150,36 @@ class Settings(BaseSettings):
     recent_log_limit: int = _env_field(env="RECENT_LOG_LIMIT", default=50)
     log_retention_days: int = _env_field(env="LOG_RETENTION_DAYS", default=180)
     data_store_path: Path = _env_field(env="DATA_STORE_PATH", default=Path("secrets/lnswitchboard.db"))
+    connection_secret_key_path: Path = _env_field(
+        env="CONNECTION_SECRET_KEY_PATH",
+        default=Path("secrets/connection-secrets.key"),
+    )
+    cloudflared_connector_enabled: bool = _env_field(
+        env="CLOUDFLARED_CONNECTOR_ENABLED",
+        default=False,
+    )
+    cloudflared_token_path: Path = _env_field(
+        env="CLOUDFLARED_TOKEN_PATH",
+        default=Path("secrets/cloudflared/tunnel.token"),
+    )
+    cloudflared_metrics_url: str = _env_field(
+        env="CLOUDFLARED_METRICS_URL",
+        default="http://cloudflared:2000",
+    )
+    cloudflared_origin_url: str = _env_field(
+        env="CLOUDFLARED_ORIGIN_URL",
+        default="http://lnswitchboard:21212",
+    )
+    cloudflared_token_gid: int = _env_field(env="CLOUDFLARED_TOKEN_GID", default=0)
+    tailscale_connector_enabled: bool = _env_field(
+        env="TAILSCALE_CONNECTOR_ENABLED", default=False
+    )
+    tailscale_control_dir: Path = _env_field(
+        env="TAILSCALE_CONTROL_DIR", default=Path("secrets/tailscale/control")
+    )
+    tailscale_status_dir: Path = _env_field(
+        env="TAILSCALE_STATUS_DIR", default=Path("secrets/tailscale/status")
+    )
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     trusted_proxy_cidrs: str = _env_field(env="TRUSTED_PROXY_CIDRS", default="")
     trusted_hosts: str = _env_field(env="TRUSTED_HOSTS", default="localhost,127.0.0.1,[::1]")
@@ -157,7 +196,17 @@ class Settings(BaseSettings):
         default=Path("secrets/nostr_zap_signer.hex"),
     )
 
-    @field_validator("lnd_tls_path", "data_store_path", "macaroon_store_path", "nostr_zap_secret_path", mode="before")
+    @field_validator(
+        "lnd_tls_path",
+        "data_store_path",
+        "connection_secret_key_path",
+        "cloudflared_token_path",
+        "tailscale_control_dir",
+        "tailscale_status_dir",
+        "macaroon_store_path",
+        "nostr_zap_secret_path",
+        mode="before",
+    )
     @classmethod
     def _expand_path(cls, value: Optional[str | Path]) -> Path:
         if value is None:

@@ -2,6 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router"
 import { useQuery } from "@tanstack/react-query"
 import {
   BadgeDollarSignIcon,
+  CableIcon,
   ChevronRightIcon,
   CircleIcon,
   GaugeIcon,
@@ -11,14 +12,16 @@ import {
   InfoIcon,
   ListIcon,
   MenuIcon,
+  NetworkIcon,
   PlugZapIcon,
   SettingsIcon,
   WebhookIcon,
   ZapIcon,
 } from "lucide-react"
-import { useEffect, useMemo } from "react"
+import { type ComponentProps, useEffect, useMemo } from "react"
 import { toast } from "sonner"
 
+import { CloudflareIcon } from "@/components/cloudflare-icon"
 import { CodeBlock, CopyButton } from "@/components/common"
 import { TemplateVariablesDialog } from "@/components/template-variables-dialog"
 import { Badge } from "@/components/ui/badge"
@@ -42,6 +45,7 @@ import {
   SidebarMenuSubItem,
   SidebarProvider,
   SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { api } from "@/lib/api"
@@ -60,6 +64,22 @@ const navItems = [
   { to: "/identities/", label: "Nostr Identities", icon: IdCardIcon },
   { to: "/settings/", label: "Settings", icon: SettingsIcon },
 ]
+
+function SidebarNavLink({ onClick, ...props }: ComponentProps<typeof NavLink>) {
+  const { isMobile, setOpenMobile } = useSidebar()
+
+  return (
+    <NavLink
+      {...props}
+      onClick={(event) => {
+        onClick?.(event)
+        if (!event.defaultPrevented && isMobile) {
+          setOpenMobile(false)
+        }
+      }}
+    />
+  )
+}
 
 export function AppShell() {
   const location = useLocation()
@@ -108,13 +128,13 @@ export function AppShell() {
       <SidebarProvider>
         <Sidebar collapsible="offcanvas">
           <SidebarHeader className="p-4">
-            <NavLink to="/" className="flex items-center gap-3 rounded-md">
+            <SidebarNavLink to="/" className="flex items-center gap-3 rounded-md">
               <img src="/icon.svg" alt="" className="size-10 rounded-md" />
               <span className="flex min-w-0 flex-col">
                 <span className="truncate text-sm font-semibold">lnSwitchboard</span>
                 <span className="truncate text-xs text-muted-foreground">Lightning Address Router</span>
               </span>
-            </NavLink>
+            </SidebarNavLink>
           </SidebarHeader>
           <SidebarContent>
             <SidebarGroup className="pt-0">
@@ -123,13 +143,57 @@ export function AppShell() {
                   {navItems.map((item) => (
                     <SidebarMenuItem key={item.to}>
                       <SidebarMenuButton asChild isActive={isActiveRoute(location.pathname, item.to)} tooltip={item.label}>
-                        <NavLink to={item.to}>
+                        <SidebarNavLink to={item.to}>
                           <item.icon />
                           <span>{item.label}</span>
-                        </NavLink>
+                        </SidebarNavLink>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   ))}
+                  <SidebarMenuItem>
+                    <Collapsible
+                      defaultOpen={location.pathname.startsWith("/connections/")}
+                      className="group/connections"
+                    >
+                      <CollapsibleTrigger asChild>
+                        <SidebarMenuButton
+                          type="button"
+                          isActive={location.pathname.startsWith("/connections/")}
+                          tooltip="Connections"
+                        >
+                          <CableIcon />
+                          <span>Connections</span>
+                          <ChevronRightIcon className="ml-auto transition-transform group-data-[state=open]/connections:rotate-90" />
+                        </SidebarMenuButton>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent>
+                        <SidebarMenuSub>
+                          <SidebarMenuSubItem>
+                            <SidebarMenuSubButton
+                              asChild
+                              isActive={isActiveRoute(location.pathname, "/connections/cloudflare/")}
+                            >
+                              <SidebarNavLink to="/connections/cloudflare/">
+                                <CloudflareIcon />
+                                <span>Cloudflare</span>
+                              </SidebarNavLink>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                          <SidebarMenuSubItem>
+                            <SidebarMenuSubButton
+                              asChild
+                              isActive={isActiveRoute(location.pathname, "/connections/tailscale/")}
+                            >
+                              <SidebarNavLink to="/connections/tailscale/">
+                                <NetworkIcon />
+                                <span>Tailscale</span>
+                              </SidebarNavLink>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                        </SidebarMenuSub>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </SidebarMenuItem>
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
@@ -171,18 +235,18 @@ export function AppShell() {
                   </SidebarMenuItem>
                   <SidebarMenuItem>
                     <SidebarMenuButton asChild isActive={isActiveRoute(location.pathname, "/webhooks/")} tooltip="Webhooks">
-                      <NavLink to="/webhooks/">
+                      <SidebarNavLink to="/webhooks/">
                         <WebhookIcon />
                         <span>Webhooks</span>
-                      </NavLink>
+                      </SidebarNavLink>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
           </SidebarContent>
-          <SidebarFooter className="gap-3 p-4">
-            <div className="flex flex-col gap-2 rounded-md border bg-background/70 p-3 text-xs">
+          <SidebarFooter className="gap-2 p-2">
+            <div className="flex flex-col gap-2 rounded-md border bg-background/70 p-2 text-xs">
               <StatusRow label="API" tone={serviceOk ? "ok" : "pending"} value={serviceOk ? "Online" : "Checking"} />
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -298,13 +362,7 @@ function ProxyEngineIcon({ engine }: { engine: ProxyEngine }) {
     )
   }
 
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path fill="#f38020" d="M9.5 8.2a5 5 0 0 1 9.3 1.7 3.9 3.9 0 0 1-.6 7.8H7.5a4.1 4.1 0 0 1-.6-8.2 5 5 0 0 1 2.6-1.3Z" />
-      <path fill="#faae40" d="M15.6 8.9a4.7 4.7 0 0 1 4.4 3.1 3 3 0 0 1-.7 5.8h-7.7a3.4 3.4 0 0 1-.3-6.8 4.8 4.8 0 0 1 4.3-2.1Z" />
-      <path fill="#ffffff" d="M6.9 17.6h12.5a2.4 2.4 0 0 0 1.7-.7 3.1 3.1 0 0 1-1.8.5H7.5a3 3 0 0 1-2.2-.9 4 4 0 0 0 1.6 1.1Z" opacity="0.85" />
-    </svg>
-  )
+  return <NetworkIcon />
 }
 
 function StatusRow({

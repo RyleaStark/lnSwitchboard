@@ -132,7 +132,10 @@ jobs:
           set -euo pipefail
           container_id="$(docker run --detach --rm \
             --publish 127.0.0.1:22121:22121 \
+            --publish 127.0.0.1:21212:21212 \
             --env LND_HOST=127.0.0.1 \
+            --env TRUSTED_PROXY_CIDRS=172.16.0.0/12 \
+            --env TRUSTED_HOSTS='127.0.0.1,localhost,pay.example' \
             --env DATA_STORE_PATH=/tmp/lnswitchboard.db \
             --env MACAROON_STORE_PATH=/tmp/macaroon.hex \
             --env NOSTR_ZAP_SECRET_PATH=/tmp/nostr-zap-signer.hex \
@@ -142,7 +145,19 @@ jobs:
           for _attempt in {1..30}; do
             health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
             if [[ "$health" == "healthy" ]]; then
-              curl --fail --silent --show-error http://127.0.0.1:22121/api/health
+              curl --fail --silent --show-error --header 'X-Forwarded-For: 192.168.50.10' http://127.0.0.1:22121/api/health
+              test "$(curl --silent --output /dev/null --write-out '%{http_code}' --header 'X-Forwarded-For: 198.51.100.10' http://127.0.0.1:22121/api/health)" = "403"
+              test "$(curl --silent --output /dev/null --write-out '%{http_code}' --header 'X-Forwarded-For: 192.168.50.10' http://127.0.0.1:22121/.well-known/nostr.json)" = "404"
+              test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:21212/api/health)" = "404"
+              test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:21212/.well-known/nostr.json)" = "404"
+              test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+                --header 'X-Forwarded-For: 192.168.50.10' \
+                --header 'Content-Type: application/json' \
+                --data '{"local_part":"alice","domain":"pay.example"}' \
+                http://127.0.0.1:22121/api/lnaddresses)" = "201"
+              test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+                --header 'Host: pay.example' \
+                http://127.0.0.1:21212/.well-known/lnurlp/alice)" = "200"
               exit 0
             fi
             if [[ "$health" == "unhealthy" ]]; then

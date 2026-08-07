@@ -38,13 +38,17 @@ def test_trusted_host_wildcard_allows_only_subdomains(monkeypatch, test_client) 
 
 
 def test_trusted_proxy_cannot_forward_an_untrusted_host(monkeypatch, test_client) -> None:
-    monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+    monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "192.168.50.10/32")
     monkeypatch.setenv("TRUSTED_HOSTS", "testserver")
     get_settings.cache_clear()
     try:
         response = test_client.get(
             "/api/health",
-            headers={"Host": "testserver", "X-Forwarded-Host": "attacker.example"},
+            headers={
+                "Host": "testserver",
+                "X-Forwarded-For": "192.168.50.20",
+                "X-Forwarded-Host": "attacker.example",
+            },
         )
         assert response.status_code == 400
     finally:
@@ -145,6 +149,7 @@ def test_pinned_webhook_connection_preserves_host_and_path() -> None:
         "/identities/",
         "/settings/",
         "/webhooks/",
+        "/connections/cloudflare/",
     ],
 )
 def test_spa_routes_serve_frontend_entrypoint(test_client, path: str) -> None:

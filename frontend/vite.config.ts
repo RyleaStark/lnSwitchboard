@@ -17,7 +17,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": "http://127.0.0.1:22121",
-      "/.well-known": "http://127.0.0.1:22121",
+      "/.well-known": "http://127.0.0.1:21212",
     },
   },
   test: {

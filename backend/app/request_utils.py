@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from fastapi import Request
 
@@ -194,6 +195,13 @@ def get_public_host(request: Request) -> str:
     """Return the host selected by the same precedence as public URL generation."""
 
     return str(_resolve_request_context(request)["host"])
+
+
+def get_public_domain(request: Request) -> str:
+    """Return a normalized hostname from the trusted public host context."""
+
+    host = get_public_host(request).split(",", 1)[0].strip()
+    return (urlsplit(f"//{host}").hostname or "").lower().rstrip(".")
 
 
 def build_public_url(request: Request) -> str:

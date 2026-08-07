@@ -26,7 +26,15 @@ export type SummaryStats = {
   invoices_paid_24h: number
   total_sats_routed: number
   sats_routed_7d: number
-  invoice_activity: Array<{ date: string; sats: number; paid: number; created: number }>
+  invoice_activity: Array<{
+    date: string
+    sats: number
+    paid: number
+    created: number
+    pending: number
+    settled: number
+    expired: number
+  }>
 }
 
 export type RequestLog = {
@@ -234,6 +242,82 @@ export type WebhookDelivery = {
   last_attempt?: WebhookAttempt | null
 }
 
+export type ConnectionProvider = {
+  id: string
+  name: string
+  capability: "available" | "unavailable"
+  reason: string | null
+}
+
+export type ConnectedDomain = {
+  hostname: string
+  status: "pending" | "active" | "error"
+  external_id: string | null
+  zone_id: string | null
+  last_error: string | null
+}
+
+export type ProviderConnection = {
+  id: string
+  provider: string
+  external_id: string
+  label: string
+  status: "disconnected" | "authorizing" | "provisioning" | "connected" | "degraded" | "error"
+  account_id: string | null
+  public_metadata: Record<string, JsonValue>
+  last_error: string | null
+  created_at: string
+  updated_at: string
+  domains: ConnectedDomain[]
+}
+
+export type ConnectionsResponse = {
+  providers: ConnectionProvider[]
+  connections: ProviderConnection[]
+}
+
+export type CloudflareSetup = {
+  available: boolean
+  origin: string
+  required_permissions: string[]
+  authorization_method: "api_token"
+}
+
+export type CloudflareAuthorization = {
+  accounts: Array<{
+    id: string
+    name: string
+    zones: Array<{ id: string; name: string }>
+  }>
+}
+
+export type CloudflareProvisionPayload = {
+  account_id: string
+  zone_id: string
+  hostname: string
+}
+
+export type TailscaleSetup = {
+  available: boolean
+  authorization_method: "web_login"
+  default_device_name: string
+  device_name_max_length: number
+  public_origin: string
+  public_port: 443
+  required_tag: string
+  prerequisites: string[]
+}
+
+export type TailscaleLogin = {
+  state: "needs_login" | "prerequisites_required" | "connected" | "expired"
+  device_name: string
+  auth_url?: string | null
+  expires_in_seconds?: number
+  hostname?: string
+  missing_prerequisites?: string[]
+  connection?: ProviderConnection
+}
+
 export class ApiError extends Error {
   status: number
   detail: unknown
@@ -368,5 +452,53 @@ export const api = {
     request<{ updated: string[]; restart_required: boolean }>("api/settings/env", {
       method: "PUT",
       body: JSON.stringify({ values }),
+    }),
+  connections: () => request<ConnectionsResponse>("api/connections"),
+  cloudflareSetup: () => request<CloudflareSetup>("api/connections/cloudflare/setup"),
+  authorizeCloudflare: (apiToken: string) =>
+    request<CloudflareAuthorization>("api/connections/cloudflare/authorize", {
+      method: "POST",
+      body: JSON.stringify({ api_token: apiToken }),
+    }),
+  cloudflareAuthorization: () =>
+    request<CloudflareAuthorization>("api/connections/cloudflare/authorization"),
+  cancelCloudflareAuthorization: () =>
+    request<{ cancelled: boolean }>("api/connections/cloudflare/authorization", {
+      method: "DELETE",
+    }),
+  provisionCloudflare: (payload: CloudflareProvisionPayload) =>
+    request<ProviderConnection>("api/connections/cloudflare/provision", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  refreshCloudflareStatus: (connectionId: string) =>
+    request<ProviderConnection>(`api/connections/cloudflare/${connectionId}/status`, {
+      method: "POST",
+    }),
+  disconnectCloudflare: (connectionId: string) =>
+    request<{ disconnected: boolean }>(`api/connections/cloudflare/${connectionId}`, {
+      method: "DELETE",
+    }),
+  tailscaleSetup: () => request<TailscaleSetup>("api/connections/tailscale/setup"),
+  beginTailscaleLogin: (deviceName: string) =>
+    request<TailscaleLogin>("api/connections/tailscale/login", {
+      method: "POST",
+      body: JSON.stringify({ device_name: deviceName }),
+      cache: "no-store",
+    }),
+  tailscaleLoginStatus: () =>
+    request<TailscaleLogin>("api/connections/tailscale/login", { cache: "no-store" }),
+  cancelTailscaleLogin: () =>
+    request<{ cancelled: boolean }>("api/connections/tailscale/login", {
+      method: "DELETE",
+      cache: "no-store",
+    }),
+  refreshTailscaleStatus: (connectionId: string) =>
+    request<ProviderConnection>(`api/connections/tailscale/${connectionId}/status`, {
+      method: "POST",
+    }),
+  disconnectTailscale: (connectionId: string) =>
+    request<{ disconnected: boolean }>(`api/connections/tailscale/${connectionId}`, {
+      method: "DELETE",
     }),
 }

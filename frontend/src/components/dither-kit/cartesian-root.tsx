@@ -177,6 +177,19 @@ export function CartesianRoot<TData extends Row>({
               className="absolute inset-0 overflow-visible"
               role="img"
               aria-label={ariaLabel}
+              data-chart-stack-type={ctx.stackType}
+              data-chart-series={ctx.configKeys.join(",")}
+              data-chart-secondary-series={ctx.secondaryKeys.join(",")}
+              data-chart-primary-domain={ctx.y.domain().join(",")}
+              data-chart-secondary-domain={ctx.ySecondary.domain().join(",")}
+              data-chart-series-kinds={ctx.configKeys
+                .filter((key) => ctx.seriesSpecs[key]?.kind === "line")
+                .map((key) => `${key}:line`)
+                .join(",")}
+              data-chart-line-glow-widths={ctx.configKeys
+                .filter((key) => ctx.seriesSpecs[key]?.lineGlowWidth !== undefined)
+                .map((key) => `${key}:${ctx.seriesSpecs[key]?.lineGlowWidth}`)
+                .join(",")}
             >
               <g transform={`translate(${margins.left},${margins.top})`}>
                 {svgChildren}

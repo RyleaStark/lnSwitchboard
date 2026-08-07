@@ -1,0 +1,77 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { render, screen, waitFor } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
+import { MemoryRouter, Route, Routes } from "react-router"
+
+import { AppShell } from "@/components/app-shell"
+
+class ResizeObserverStub implements ResizeObserver {
+  disconnect() {}
+  observe() {}
+  unobserve() {}
+}
+
+vi.stubGlobal("ResizeObserver", ResizeObserverStub)
+
+vi.mock("@/lib/api", () => ({
+  api: {
+    authStatus: vi.fn().mockResolvedValue({ configured: true }),
+    health: vi.fn().mockResolvedValue({ status: "ok" }),
+    lndStatus: vi.fn().mockResolvedValue({ connected: true, tls_status: "valid" }),
+    version: vi.fn().mockResolvedValue({ version: "test" }),
+  },
+}))
+
+function renderAppShell() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/"]}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div>Dashboard page</div>} />
+            <Route path="invoices/" element={<div>Invoices page</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>
+  )
+}
+
+describe("AppShell mobile navigation", () => {
+  beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 500,
+    })
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        addEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+        matches: true,
+        media: query,
+        onchange: null,
+        removeEventListener: vi.fn(),
+      })),
+    })
+  })
+
+  it("closes the drawer after selecting a navigation destination", async () => {
+    const user = userEvent.setup()
+    renderAppShell()
+
+    await user.click(screen.getByRole("button", { name: "Open navigation" }))
+    expect(screen.getByRole("dialog", { name: "Sidebar" })).toBeVisible()
+
+    await user.click(screen.getByRole("link", { name: "Invoices" }))
+
+    expect(await screen.findByText("Invoices page")).toBeVisible()
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Sidebar" })).not.toBeInTheDocument()
+    })
+  })
+})

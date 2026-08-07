@@ -26,7 +26,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     GRPC_SSL_CIPHER_SUITES=HIGH+ECDSA \
     DEP_ENV=DOCKER \
-    SERVICE_PORT=22121
+    SERVICE_HOST=0.0.0.0 \
+    SERVICE_PORT=22121 \
+    PUBLIC_SERVICE_HOST=0.0.0.0 \
+    PUBLIC_SERVICE_PORT=21212
 
 WORKDIR /app
 
@@ -37,9 +40,9 @@ RUN chmod +x /usr/local/bin/lnswitchboard-diagnose-lnd
 COPY --from=frontend-builder /build/frontend/static ./frontend/static
 COPY VERSION ./VERSION
 
-EXPOSE 22121
+EXPOSE 22121 21212
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:22121/api/health', timeout=2).read()"]
 
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "22121", "--no-proxy-headers"]
+CMD ["python", "-m", "backend.app.server"]
