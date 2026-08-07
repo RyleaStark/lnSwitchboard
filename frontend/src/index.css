@@ -91,6 +91,14 @@
   border-color: var(--border);
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: clip;
+}
+
 body {
   min-width: 320px;
   min-height: 100svh;
@@ -102,6 +110,14 @@ body {
 #root {
   min-height: 100svh;
   background: var(--background);
+}
+
+@media (max-width: 767px) {
+  input:not([type="checkbox"]):not([type="radio"]),
+  textarea,
+  select {
+    font-size: 16px;
+  }
 }
 
 button,
