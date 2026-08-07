@@ -402,7 +402,7 @@ function TailscaleConnectionsPage() {
               <h2 className="font-heading text-xl font-semibold tracking-tight">Tailscale Funnel</h2>
             </div>
             <p className="max-w-2xl text-sm text-pretty text-muted-foreground">
-              Uses a short-lived browser login. Public HTTPS traffic reaches only port 21212; the Tailscale hostname is discovered after login.
+              Use Tailscale Funnel to make your Lightning Addresses available on the web. Connect your Tailscale account, then share the hostname it gives you.
             </p>
           </div>
           <div className="shrink-0">
@@ -621,10 +621,9 @@ function ConnectedTailscale({
                 label="Copy hostname"
                 copiedLabel="Hostname copied"
               />
-              <Badge variant={domain.status === "error" ? "destructive" : "outline"}>{domain.status}</Badge>
             </div>
           </div>
-          <p className="mt-2 text-xs text-muted-foreground">Authoritative Tailscale hostname • Funnel HTTPS 443 → lnSwitchboard 21212</p>
+          <p className="mt-2 text-sm text-muted-foreground">Your Lightning Addresses are available at this hostname.</p>
           {domain.last_error ? (
             <p role="alert" className="mt-2 text-xs text-destructive">{domain.last_error}</p>
           ) : null}
