@@ -44,6 +44,8 @@ class CloudflareNotFoundError(CloudflareServiceError):
 
 class CloudflareClientProtocol(Protocol):
     async def verify_token(self) -> None: ...
+    async def list_accounts(self) -> list[dict[str, Any]]: ...
+    async def list_zones(self, account_id: str) -> list[dict[str, Any]]: ...
     async def get_tunnel(
         self, account_id: str, tunnel_id: str
     ) -> dict[str, Any] | None: ...
@@ -171,6 +173,27 @@ class CloudflareService:
         tunnel = await client.get_tunnel(account_id, tunnel_id)
         if not isinstance(tunnel, dict) or str(tunnel.get("id", "")) != tunnel_id:
             raise CloudflareNotFoundError("Cloudflare tunnel was not found")
+        accounts = await client.list_accounts()
+        selected_account = next(
+            (item for item in accounts if str(item.get("id", "")) == account_id),
+            None,
+        )
+        if not isinstance(selected_account, dict):
+            raise CloudflareValidationError(
+                "The API token cannot access the selected Cloudflare account"
+            )
+        zones = await client.list_zones(account_id)
+        authorized_accounts = [
+            {
+                "id": account_id,
+                "name": str(selected_account.get("name", "Cloudflare account")),
+                "zones": [
+                    {"id": str(zone.get("id", "")), "name": str(zone.get("name", ""))}
+                    for zone in zones
+                    if str(zone.get("id", "")) and str(zone.get("name", ""))
+                ],
+            }
+        ]
         authorization_id = random_secrets.token_urlsafe(24)
         self.secrets.set(
             f"{_AUTHORIZATION_PREFIX}{authorization_id}",
@@ -181,7 +204,7 @@ class CloudflareService:
                 "tunnel_id": tunnel_id,
             },
         )
-        return {"authorization_id": authorization_id}
+        return {"authorization_id": authorization_id, "accounts": authorized_accounts}
 
     def get_authorization(self, authorization_id: str) -> dict[str, Any]:
         self._authorization_payload(authorization_id)

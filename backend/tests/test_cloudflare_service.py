@@ -35,6 +35,14 @@ class FakeCloudflareClient:
     async def verify_token(self) -> None:
         await self._call("verify_token")
 
+    async def list_accounts(self) -> list[dict[str, Any]]:
+        await self._call("list_accounts")
+        return [{"id": ACCOUNT_ID, "name": "Example account"}]
+
+    async def list_zones(self, account_id: str) -> list[dict[str, Any]]:
+        await self._call("list_zones", account_id)
+        return [{"id": ZONE_ID, "name": "example.com"}]
+
     async def get_tunnel(self, account_id: str, tunnel_id: str) -> dict[str, Any] | None:
         await self._call("get_tunnel", (account_id, tunnel_id))
         return {"id": tunnel_id, "name": "operator-managed-tunnel"}
@@ -99,7 +107,7 @@ async def test_existing_tunnel_onboarding_validates_operator_ids_and_never_creat
     assert token_path.read_text() == CONNECTOR_TOKEN
     assert secrets.get(connection.id) == {"api_token": API_TOKEN}
     assert store.list_provisioning_journals("cloudflare") == []
-    assert [name for name, _ in client.calls] == ["verify_token", "get_tunnel", "get_zone", "list_dns_records", "configure_tunnel", "create_dns_record", "get_tunnel_token"]
+    assert [name for name, _ in client.calls] == ["verify_token", "get_tunnel", "list_accounts", "list_zones", "get_zone", "list_dns_records", "configure_tunnel", "create_dns_record", "get_tunnel_token"]
 
 
 @pytest.mark.anyio

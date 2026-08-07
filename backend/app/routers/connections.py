@@ -324,7 +324,8 @@ async def authorize_cloudflare(
         samesite="lax",
         path="/api/connections/cloudflare",
     )
-    return {}
+    accounts = authorization.get("accounts")
+    return {"accounts": accounts if isinstance(accounts, list) else []}
 
 
 @router.get(
