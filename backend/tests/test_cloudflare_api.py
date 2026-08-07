@@ -3,6 +3,7 @@ from __future__ import annotations
 from backend.app import deps
 from backend.app.cloudflare_service import CloudflareUnavailableError
 from backend.app.main import admin_app
+from backend.app.routers.connections import require_authenticated_cloudflare_admin
 
 
 class FakeCloudflareService:
@@ -86,6 +87,7 @@ def test_cloudflare_authorize_and_provision_never_return_credentials(
 ) -> None:
     service = FakeCloudflareService()
     admin_app.dependency_overrides[deps.get_cloudflare_service_dep] = lambda: service
+    admin_app.dependency_overrides[require_authenticated_cloudflare_admin] = lambda: None
     api_token = "do-not-return-api-token"
     try:
         authorized = test_client.post(
@@ -103,6 +105,7 @@ def test_cloudflare_authorize_and_provision_never_return_credentials(
         )
     finally:
         admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
+        admin_app.dependency_overrides.pop(require_authenticated_cloudflare_admin, None)
 
     assert authorized.status_code == 200
     assert service.authorized_token == api_token
@@ -125,6 +128,7 @@ def test_cloudflare_unavailable_maps_to_conflict_without_secret_echo(
 ) -> None:
     service = UnavailableCloudflareService()
     admin_app.dependency_overrides[deps.get_cloudflare_service_dep] = lambda: service
+    admin_app.dependency_overrides[require_authenticated_cloudflare_admin] = lambda: None
     try:
         response = test_client.post(
             "/api/connections/cloudflare/authorize",
@@ -132,6 +136,7 @@ def test_cloudflare_unavailable_maps_to_conflict_without_secret_echo(
         )
     finally:
         admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
+        admin_app.dependency_overrides.pop(require_authenticated_cloudflare_admin, None)
 
     assert response.status_code == 409
     assert response.json() == {"detail": "Cloudflare connector is not installed"}
@@ -140,18 +145,33 @@ def test_cloudflare_unavailable_maps_to_conflict_without_secret_echo(
 
 def test_malformed_authorization_never_echoes_secret_input(test_client) -> None:
     malformed_secret = "super-secret-malformed"
-
-    wrong_type = test_client.post(
-        "/api/connections/cloudflare/authorize",
-        json={"api_token": [malformed_secret]},
-    )
-    oversized = test_client.post(
-        "/api/connections/cloudflare/authorize",
-        json={"api_token": malformed_secret * 300},
-    )
+    admin_app.dependency_overrides[require_authenticated_cloudflare_admin] = lambda: None
+    try:
+        wrong_type = test_client.post(
+            "/api/connections/cloudflare/authorize",
+            json={"api_token": [malformed_secret]},
+        )
+        oversized = test_client.post(
+            "/api/connections/cloudflare/authorize",
+            json={"api_token": malformed_secret * 300},
+        )
+    finally:
+        admin_app.dependency_overrides.pop(require_authenticated_cloudflare_admin, None)
 
     assert wrong_type.status_code == 422
     assert oversized.status_code == 422
     assert malformed_secret not in wrong_type.text
     assert malformed_secret not in oversized.text
     assert wrong_type.json() == {"detail": "Invalid Cloudflare authorization request"}
+
+
+def test_cloudflare_authorization_rejects_direct_http_administration(test_client) -> None:
+    response = test_client.post(
+        "/api/connections/cloudflare/authorize",
+        json={"api_token": "token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Cloudflare onboarding requires an authenticated HTTPS admin proxy"
+    }

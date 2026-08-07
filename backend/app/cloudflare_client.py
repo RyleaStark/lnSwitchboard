@@ -162,18 +162,66 @@ class CloudflareClient:
         hostname: str,
         origin_url: str,
     ) -> None:
+        current = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+        )
+        if not isinstance(current, dict) or not isinstance(current.get("config"), dict):
+            raise CloudflareAPIError(502)
+        config = dict(current["config"])
+        ingress = self._override_ingress_route(
+            config.get("ingress"), hostname, origin_url
+        )
+        config["ingress"] = ingress
         await self._request(
             "PUT",
             f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
-            json={
-                "config": {
-                    "ingress": [
-                        {"hostname": hostname, "service": origin_url},
-                        {"service": "http_status:404"},
-                    ]
-                }
-            },
+            json={"config": config},
         )
+        verified = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+        )
+        verified_config = verified.get("config") if isinstance(verified, dict) else None
+        verified_ingress = (
+            verified_config.get("ingress") if isinstance(verified_config, dict) else None
+        )
+        if not isinstance(verified_ingress, list) or not any(
+            isinstance(route, dict)
+            and route.get("hostname") == hostname
+            and route.get("service") == origin_url
+            for route in verified_ingress
+        ):
+            raise CloudflareAPIError(502)
+
+    @staticmethod
+    def _override_ingress_route(
+        ingress: Any, hostname: str, origin_url: str
+    ) -> list[dict[str, Any]]:
+        if ingress is None:
+            ingress = []
+        if not isinstance(ingress, list):
+            raise CloudflareAPIError(502)
+
+        routes: list[dict[str, Any]] = []
+        fallback: dict[str, Any] | None = None
+        for index, route in enumerate(ingress):
+            if not isinstance(route, dict):
+                raise CloudflareAPIError(502)
+            copied = dict(route)
+            route_hostname = copied.get("hostname")
+            if route_hostname is None:
+                if index != len(ingress) - 1 or fallback is not None:
+                    raise CloudflareAPIError(502)
+                fallback = copied
+                continue
+            if not isinstance(route_hostname, str):
+                raise CloudflareAPIError(502)
+            if route_hostname.strip().lower().rstrip(".") == hostname:
+                continue
+            routes.append(copied)
+
+        routes.append({"hostname": hostname, "service": origin_url})
+        routes.append(fallback or {"service": "http_status:404"})
+        return routes
 
     async def disable_tunnel(self, account_id: str, tunnel_id: str) -> None:
         await self._request(

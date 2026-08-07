@@ -65,15 +65,15 @@ function CloudflareConnectionsPage() {
   const cloudflareConnection = connections.data?.connections.find(
     (connection) => connection.provider === "cloudflare",
   )
+  const provider = connections.data?.providers.find((item) => item.id === "cloudflare")
+  const available = setup.data?.available === true && provider?.capability === "available"
   const pendingAuthorization = useQuery({
     queryKey: ["cloudflare-authorization"],
     queryFn: api.cloudflareAuthorization,
-    enabled: setup.data?.available === true && !cloudflareConnection,
+    enabled: available && !cloudflareConnection,
     retry: false,
   })
   const authorization = pendingAuthorization.data ?? null
-  const provider = connections.data?.providers.find((item) => item.id === "cloudflare")
-  const available = setup.data?.available === true && provider?.capability === "available"
   const authorizationMissing =
     pendingAuthorization.error instanceof ApiError && pendingAuthorization.error.status === 404
 
@@ -198,7 +198,9 @@ function CloudflareConnectionsPage() {
               <Badge variant="outline">Ready to connect</Badge>
             ) : (
               <Badge variant="secondary">
-                Connector not installed
+                {provider?.reason === "authenticated_https_admin_required"
+                  ? "Authenticated HTTPS required"
+                  : "Connector not installed"}
               </Badge>
             )}
           </CardAction>
@@ -897,6 +899,15 @@ function ProvisionForm({
           </Select>
         </Field>
       </div>
+      {account && account.zones.length === 0 ? (
+        <FieldDescription>
+          This account has no active zones. Create and activate a zone in{" "}
+          <a className="underline" href="https://dash.cloudflare.com/?to=/:account/websites" target="_blank" rel="noreferrer">
+            Cloudflare Websites
+          </a>{" "}
+          then validate a fresh scoped token to discover it here.
+        </FieldDescription>
+      ) : null}
       <Field>
         <FieldLabel htmlFor="cloudflare-hostname">Public hostname</FieldLabel>
         <Input
@@ -910,7 +921,7 @@ function ProvisionForm({
           onChange={(event) => onHostnameChange(event.target.value)}
         />
         <FieldDescription>
-          Existing DNS records are never overwritten. A conflict stops onboarding without changing the record.
+          lnSwitchboard checks this exact hostname in the selected zone before it creates an owned DNS record. Existing records are never overwritten.
         </FieldDescription>
       </Field>
       <div className="flex flex-wrap gap-2">

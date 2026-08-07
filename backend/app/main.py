@@ -17,6 +17,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from .deps import (
     get_cloudflare_service_dep,
+    get_connection_store_dep,
     get_ln_address_store_dep,
     get_ln_client_dep,
     get_log_storage_dep,
@@ -25,6 +26,7 @@ from .deps import (
     get_webhook_dispatcher_dep,
 )
 from .invoice_worker import InvoiceFullRefreshWorker, InvoiceSubscriptionWorker
+from .connection_store import ConnectionStore
 from .ln_address_store import LNAddressStore
 from .logging_utils import configure_logging
 from .macaroon_store import MacaroonNotConfiguredError
@@ -231,8 +233,15 @@ def _add_request_security(target_app: FastAPI) -> None:
                 if name.lower() not in FORWARDED_HEADERS
             ]
         trusted_hosts = parse_trusted_hosts(settings.trusted_hosts)
-        if not _host_is_trusted(request.headers.get("host", ""), trusted_hosts) or not _host_is_trusted(
-            get_public_host(request), trusted_hosts
+        request_host = request.headers.get("host", "")
+        public_host = get_public_host(request)
+        connection_store = await get_connection_store_dep()
+        if not (
+            _host_is_trusted(request_host, trusted_hosts)
+            or connection_store.has_public_domain(request_host)
+        ) or not (
+            _host_is_trusted(public_host, trusted_hosts)
+            or connection_store.has_public_domain(public_host)
         ):
             return PlainTextResponse("Invalid host header", status_code=400)
         return await call_next(request)
@@ -277,13 +286,15 @@ async def require_configured_public_domain(
     request: Request,
     address_store: LNAddressStore = Depends(get_ln_address_store_dep),
     identity_store: NostrIdentityStore = Depends(get_nip05_store_dep),
+    connection_store: ConnectionStore = Depends(get_connection_store_dep),
 ) -> None:
-    """Require the resolved public domain to exist in either public registry."""
+    """Require the resolved public domain to exist in a public registry."""
 
     domain = get_public_domain(request)
     if domain and (
         await address_store.has_domain(domain)
         or await identity_store.has_domain(domain)
+        or connection_store.has_public_domain(domain)
     ):
         return
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")

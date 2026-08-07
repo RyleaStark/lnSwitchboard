@@ -309,6 +309,28 @@ class ConnectionStore:
             for row in rows
         ]
 
+    def has_public_domain(self, hostname: str) -> bool:
+        """Whether a provider has durably registered this hostname for serving.
+
+        A route may be ready before its connector reports healthy, so a pending
+        domain remains eligible. Error domains are intentionally withdrawn.
+        """
+
+        normalized = hostname.strip().lower().rstrip(".")
+        if not normalized:
+            return False
+        with sqlite_connection(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM connected_domains
+                WHERE hostname = ? AND status IN ('pending', 'active')
+                LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+        return row is not None
+
     def create_provisioning_journal(
         self,
         *,

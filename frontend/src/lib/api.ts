@@ -484,10 +484,15 @@ export const api = {
     request<TailscaleLogin>("api/connections/tailscale/login", {
       method: "POST",
       body: JSON.stringify({ device_name: deviceName }),
+      cache: "no-store",
     }),
-  tailscaleLoginStatus: () => request<TailscaleLogin>("api/connections/tailscale/login"),
+  tailscaleLoginStatus: () =>
+    request<TailscaleLogin>("api/connections/tailscale/login", { cache: "no-store" }),
   cancelTailscaleLogin: () =>
-    request<{ cancelled: boolean }>("api/connections/tailscale/login", { method: "DELETE" }),
+    request<{ cancelled: boolean }>("api/connections/tailscale/login", {
+      method: "DELETE",
+      cache: "no-store",
+    }),
   refreshTailscaleStatus: (connectionId: string) =>
     request<ProviderConnection>(`api/connections/tailscale/${connectionId}/status`, {
       method: "POST",

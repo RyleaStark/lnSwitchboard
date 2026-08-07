@@ -18,13 +18,17 @@ def anyio_backend() -> str:
 @pytest.mark.anyio
 async def test_client_builds_remote_tunnel_dns_and_public_only_ingress() -> None:
     requests: list[httpx.Request] = []
+    tunnel_config = {"config": {"ingress": []}}
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.path.endswith("/cfd_tunnel"):
             result = {"id": "tunnel-id", "name": "tunnel"}
-        elif request.url.path.endswith("/configurations"):
-            result = {}
+        elif request.url.path.endswith("/configurations") and request.method == "GET":
+            result = tunnel_config
+        elif request.url.path.endswith("/configurations") and request.method == "PUT":
+            tunnel_config.update(json.loads(request.content))
+            result = tunnel_config
         elif request.url.path.endswith("/dns_records"):
             result = {"id": "dns-id"}
         else:
@@ -49,7 +53,7 @@ async def test_client_builds_remote_tunnel_dns_and_public_only_ingress() -> None
     )
     tunnel_body = json.loads(requests[0].content)
     assert tunnel_body == {"name": "tunnel", "config_src": "cloudflare"}
-    config_body = json.loads(requests[1].content)
+    config_body = json.loads(requests[2].content)
     assert config_body == {
         "config": {
             "ingress": [
@@ -58,10 +62,26 @@ async def test_client_builds_remote_tunnel_dns_and_public_only_ingress() -> None
             ]
         }
     }
-    assert "22121" not in requests[1].content.decode()
-    dns_body = json.loads(requests[2].content)
+    assert "22121" not in requests[2].content.decode()
+    dns_body = json.loads(requests[4].content)
     assert dns_body["content"] == "tunnel-id.cfargotunnel.com"
     assert dns_body["proxied"] is True
+
+
+def test_tunnel_ingress_override_preserves_unrelated_routes() -> None:
+    ingress = [
+        {"hostname": "other.example.com", "service": "http://other:8080"},
+        {"hostname": "pay.example.com", "service": "http://old:21212"},
+        {"service": "http_status:404"},
+    ]
+
+    assert CloudflareClient._override_ingress_route(
+        ingress, "pay.example.com", "http://app:21212"
+    ) == [
+        {"hostname": "other.example.com", "service": "http://other:8080"},
+        {"hostname": "pay.example.com", "service": "http://app:21212"},
+        {"service": "http_status:404"},
+    ]
 
 
 @pytest.mark.anyio

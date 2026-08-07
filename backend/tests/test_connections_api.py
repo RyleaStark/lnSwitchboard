@@ -75,6 +75,6 @@ def test_connections_api_reports_installed_connector(monkeypatch, test_client) -
     assert response.json()["providers"][0] == {
         "id": "cloudflare",
         "name": "Cloudflare",
-        "capability": "available",
-        "reason": None,
+        "capability": "unavailable",
+        "reason": "authenticated_https_admin_required",
     }

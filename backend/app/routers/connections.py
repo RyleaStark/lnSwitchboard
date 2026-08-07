@@ -45,6 +45,12 @@ _REQUIRED_PERMISSIONS = [
     "Zone / Zone / Read",
 ]
 _SENSITIVE_METADATA_KEY_PARTS = ("authorization", "credential", "secret", "token")
+_PRIVATE_NO_STORE = "no-store, private"
+
+
+def _set_private_no_store(response: Response) -> None:
+    response.headers["Cache-Control"] = _PRIVATE_NO_STORE
+    response.headers["Pragma"] = "no-cache"
 
 
 def _serialize_connection(connection: ProviderConnection) -> dict[str, object]:
@@ -79,6 +85,17 @@ async def require_authenticated_tailscale_admin(request: Request) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Tailscale onboarding requires an authenticated HTTPS admin proxy",
+        )
+
+
+async def require_authenticated_cloudflare_admin(request: Request) -> None:
+    if not (
+        getattr(request.state, "authenticated_admin_proxy", False)
+        and getattr(request.state, "authenticated_admin_https", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cloudflare onboarding requires an authenticated HTTPS admin proxy",
         )
 
 
@@ -143,7 +160,11 @@ async def list_connections(
     store: ConnectionStore = Depends(get_connection_store_dep),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
-    connector_available = settings.cloudflared_connector_enabled
+    cloudflare_authenticated = bool(
+        getattr(request.state, "authenticated_admin_proxy", False)
+        and getattr(request.state, "authenticated_admin_https", False)
+    )
+    connector_available = settings.cloudflared_connector_enabled and cloudflare_authenticated
     tailscale_authenticated = bool(
         getattr(request.state, "authenticated_admin_proxy", False)
         and getattr(request.state, "authenticated_admin_https", False)
@@ -162,7 +183,15 @@ async def list_connections(
                 "id": "cloudflare",
                 "name": "Cloudflare",
                 "capability": "available" if connector_available else "unavailable",
-                "reason": None if connector_available else "connector_not_installed",
+                "reason": (
+                    None
+                    if connector_available
+                    else (
+                        "connector_not_installed"
+                        if not settings.cloudflared_connector_enabled
+                        else "authenticated_https_admin_required"
+                    )
+                ),
             },
             {
                 "id": "tailscale",
@@ -196,6 +225,7 @@ async def begin_tailscale_login(
     response: Response,
     service: TailscaleService = Depends(get_tailscale_service_dep),
 ) -> dict[str, object]:
+    _set_private_no_store(response)
     flow_id, result = await _tailscale_call(
         lambda: service.begin_login(payload.device_name)
     )
@@ -220,6 +250,7 @@ async def tailscale_login_status(
     flow_id: str | None = Cookie(default=None, alias=TAILSCALE_LOGIN_COOKIE),
     service: TailscaleService = Depends(get_tailscale_service_dep),
 ) -> dict[str, object]:
+    _set_private_no_store(response)
     if not flow_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -246,6 +277,7 @@ async def cancel_tailscale_login(
     flow_id: str | None = Cookie(default=None, alias=TAILSCALE_LOGIN_COOKIE),
     service: TailscaleService = Depends(get_tailscale_service_dep),
 ) -> dict[str, bool]:
+    _set_private_no_store(response)
     if not flow_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -298,7 +330,10 @@ async def cloudflare_setup(
     }
 
 
-@router.post("/cloudflare/authorize")
+@router.post(
+    "/cloudflare/authorize",
+    dependencies=[Depends(require_authenticated_cloudflare_admin)],
+)
 async def authorize_cloudflare(
     request: Request,
     response: Response,
@@ -330,7 +365,10 @@ async def authorize_cloudflare(
     return {"accounts": authorization["accounts"]}
 
 
-@router.get("/cloudflare/authorization")
+@router.get(
+    "/cloudflare/authorization",
+    dependencies=[Depends(require_authenticated_cloudflare_admin)],
+)
 async def get_cloudflare_authorization(
     request: Request,
     service: CloudflareService = Depends(get_cloudflare_service_dep),
@@ -345,7 +383,10 @@ async def get_cloudflare_authorization(
     return await _cloudflare_call(operation)
 
 
-@router.delete("/cloudflare/authorization")
+@router.delete(
+    "/cloudflare/authorization",
+    dependencies=[Depends(require_authenticated_cloudflare_admin)],
+)
 async def cancel_cloudflare_authorization(
     request: Request,
     response: Response,
@@ -365,7 +406,11 @@ async def cancel_cloudflare_authorization(
     return {"cancelled": cancelled}
 
 
-@router.post("/cloudflare/provision", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/cloudflare/provision",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_authenticated_cloudflare_admin)],
+)
 async def provision_cloudflare(
     request: CloudflareProvisionRequest,
     raw_request: Request,
@@ -393,7 +438,10 @@ async def provision_cloudflare(
     return _serialize_connection(connection)
 
 
-@router.post("/cloudflare/{connection_id}/status")
+@router.post(
+    "/cloudflare/{connection_id}/status",
+    dependencies=[Depends(require_authenticated_cloudflare_admin)],
+)
 async def refresh_cloudflare_status(
     connection_id: str,
     service: CloudflareService = Depends(get_cloudflare_service_dep),
@@ -402,7 +450,10 @@ async def refresh_cloudflare_status(
     return _serialize_connection(connection)
 
 
-@router.delete("/cloudflare/{connection_id}")
+@router.delete(
+    "/cloudflare/{connection_id}",
+    dependencies=[Depends(require_authenticated_cloudflare_admin)],
+)
 async def disconnect_cloudflare(
     connection_id: str,
     service: CloudflareService = Depends(get_cloudflare_service_dep),

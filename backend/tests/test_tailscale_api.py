@@ -104,6 +104,7 @@ def test_tailscale_setup_and_begin_login_use_lns_default_and_private_cookie(
     assert "SameSite=lax" in cookie
     assert "Path=/api/connections/tailscale" in cookie
     assert "Max-Age=300" in cookie
+    assert login.headers["cache-control"] == "no-store, private"
 
 
 def test_tailscale_login_status_requires_private_flow_cookie(test_client) -> None:
@@ -121,6 +122,7 @@ def test_tailscale_login_status_requires_private_flow_cookie(test_client) -> Non
     assert missing.status_code == 404
     assert found.status_code == 200
     assert found.json()["state"] == "needs_login"
+    assert found.headers["cache-control"] == "no-store, private"
     assert service.flow_ids == ["private-flow-id"]
 
 

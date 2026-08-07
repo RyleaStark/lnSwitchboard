@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
-from backend.app import config, main, server
+from backend.app import config, deps, main, server
 
 
 class AppClient:
@@ -299,6 +299,42 @@ def test_lightning_address_domain_allows_public_listener(
 
     assert response.status_code == 200
     assert response.json()["callback"].startswith("http://pay.example/")
+
+
+def test_registered_provider_domain_serves_lnurl_and_nostr_public_endpoints(
+    listener_clients: tuple[AppClient, AppClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRUSTED_HOSTS", "testserver,localhost")
+    config.get_settings.cache_clear()
+    _admin, public = listener_clients
+    store = deps._get_connection_store()
+    connection = store.upsert_connection(
+        provider="tailscale",
+        external_id="tailscale-node-id",
+        label="Tailscale Funnel",
+        status="connected",
+        public_metadata={},
+    )
+    store.replace_domains(
+        connection.id,
+        [{"hostname": "lns.tailnet.ts.net", "status": "active"}],
+    )
+
+    lnurl = public.get(
+        "/.well-known/lnurlp/alice",
+        headers={"Forwarded": "for=198.51.100.10;proto=https;host=lns.tailnet.ts.net"},
+    )
+    nostr = public.get(
+        "/.well-known/nostr.json",
+        headers={"Forwarded": "for=198.51.100.10;proto=https;host=lns.tailnet.ts.net"},
+    )
+
+    assert lnurl.status_code == 200
+    assert lnurl.json()["callback"].startswith(
+        "https://lns.tailnet.ts.net/.well-known/lnurlp/alice"
+    )
+    assert nostr.status_code == 200
 
 
 def test_trusted_forwarded_header_domain_allows_public_listener(
