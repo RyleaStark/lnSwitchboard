@@ -45,6 +45,9 @@ export function LogsPage() {
       await queryClient.invalidateQueries({ queryKey: ["logs"] })
       await queryClient.invalidateQueries({ queryKey: ["summary"] })
     },
+    onError: (error: Error) => {
+      toast.error(error.message || "Unable to clear logs")
+    },
   })
   const items = logs.data?.items ?? []
 
@@ -57,7 +60,7 @@ export function LogsPage() {
         action={
           <AlertDialog>
             <AlertDialogTrigger asChild>
-              <Button variant="destructive" disabled={clearLogs.isPending}>
+              <Button variant="destructive" disabled={clearLogs.isPending || logs.isLoading || logs.isError || items.length === 0}>
                 <Trash2Icon data-icon="inline-start" />
                 Clear logs
               </Button>
@@ -79,7 +82,7 @@ export function LogsPage() {
         <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <CardTitle>Request activity</CardTitle>
-            <CardDescription>{paginationLabel(logs.data, query, "log")}</CardDescription>
+            <CardDescription>{logs.isError ? "Couldn’t load logs" : paginationLabel(logs.data, query, "log")}</CardDescription>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
             <div className="relative">
@@ -94,12 +97,12 @@ export function LogsPage() {
                 placeholder="Search logs"
               />
             </div>
-            <Pager page={page} totalPages={logs.data?.total_pages ?? 0} setPage={setPage} />
+            {!logs.isError ? <Pager page={page} totalPages={logs.data?.total_pages ?? 0} setPage={setPage} /> : null}
           </div>
         </CardHeader>
         <CardContent>
           {logs.isLoading ? <LoadingRows /> : null}
-          {logs.isError ? <PageError message="Unable to load logs." /> : null}
+          {logs.isError ? <PageError message="Unable to load logs." onRetry={() => void logs.refetch()} retrying={logs.isFetching} /> : null}
           {!logs.isLoading && !logs.isError && items.length === 0 ? (
             <EmptyPanel title={query ? "No matching logs" : "No activity yet"} description="LNURL interactions will appear here as wallets call this switchboard." />
           ) : null}

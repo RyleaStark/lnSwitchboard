@@ -190,7 +190,7 @@ test("keeps connected management controls active when onboarding capability is u
   renderPage()
 
   const heading = await screen.findByRole("heading", { name: "Cloudflare Tunnel" })
-  expect(heading.closest('[data-slot="card"]')).not.toHaveAttribute("aria-disabled")
+  expect(heading.closest('[data-slot="card"]')).toBeNull()
   expect(screen.getByRole("button", { name: "Refresh status" })).toBeEnabled()
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled()
 })

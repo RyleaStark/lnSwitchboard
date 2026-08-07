@@ -202,7 +202,7 @@ export function AppShell() {
               <SidebarGroupContent>
                 <SidebarMenu>
                   <SidebarMenuItem>
-                    <Collapsible defaultOpen className="group/collapsible">
+                    <Collapsible className="group/collapsible">
                       <CollapsibleTrigger asChild>
                         <SidebarMenuButton type="button" tooltip="Reverse Proxy Setup">
                           <HelpCircleIcon />
@@ -432,47 +432,45 @@ function ProductFooter({
   className?: string
 }) {
   return (
-    <div className={cn("flex min-w-0 flex-col gap-2 rounded-md border bg-background/50 p-3 text-xs", className)}>
-      <div className="flex min-w-0 items-center justify-between gap-2">
-        <span className="truncate font-medium text-foreground">lnSwitchboard</span>
-        <Badge variant="outline" className="font-mono text-[10px]">
+    <div className={cn("flex min-w-0 flex-col gap-1.5 text-xs text-muted-foreground", className)}>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="font-medium text-foreground">lnSwitchboard</span>
+        <Badge variant="outline" className="h-5 px-1.5 font-mono text-[10px] font-normal text-muted-foreground">
           {versionLabel}
         </Badge>
-      </div>
-      <div className="text-[11px] leading-4 text-muted-foreground">
-        &copy; 2026{" "}
-        <a
-          href="https://github.com/RyleaStark/lnSwitchboard"
-          target="_blank"
-          rel="noreferrer"
-          className="underline-offset-2 hover:underline"
-        >
-          Rylea Stark
-        </a>
+        <span className="text-[11px]">
+          &copy; 2026{" "}
+          <a
+            href="https://github.com/RyleaStark/lnSwitchboard"
+            target="_blank"
+            rel="noreferrer"
+            className="underline-offset-2 hover:text-foreground hover:underline"
+          >
+            Rylea Stark
+          </a>
+        </span>
       </div>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             type="button"
-            variant={compact ? "ghost" : "outline"}
+            variant="ghost"
             size="sm"
             className={cn(
-              "min-w-0 justify-start text-xs",
-              compact
-                ? "mt-1 h-8 w-full gap-1.5 px-2 text-muted-foreground"
-                : "h-8 w-full",
+              "h-6 w-fit gap-1.5 px-0 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground",
+              compact && "text-[11px]",
             )}
             onClick={async () => {
               await copyText(TIP_ADDRESS)
               toast.success("Tip address copied")
             }}
           >
-            <ZapIcon data-icon="inline-start" />
-            <span className="min-w-0 truncate font-mono">{TIP_ADDRESS}</span>
+            <ZapIcon data-icon="inline-start" className="size-3.5" />
+            <span className="font-mono">{TIP_ADDRESS}</span>
           </Button>
         </TooltipTrigger>
         <TooltipContent side={compact ? "right" : "top"}>
-          <span>Thank you for tipping 🧡</span>
+          <span>Copy tip address</span>
         </TooltipContent>
       </Tooltip>
     </div>

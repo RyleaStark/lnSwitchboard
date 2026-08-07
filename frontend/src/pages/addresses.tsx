@@ -296,7 +296,7 @@ export function AddressesPage() {
         </CardHeader>
         <CardContent>
           {addresses.isLoading ? <LoadingRows /> : null}
-          {addresses.isError ? <PageError message="Unable to load LN addresses." /> : null}
+          {addresses.isError ? <PageError message="Unable to load LN addresses." onRetry={() => void addresses.refetch()} retrying={addresses.isFetching} /> : null}
           {!addresses.isLoading && !addresses.isError && rows.length === 0 ? (
             <EmptyPanel title={search ? "No matching addresses" : "No LN addresses yet"} description="Add a handle override to customize LNURL behavior for a local-part and domain." />
           ) : null}
@@ -710,8 +710,8 @@ function WebhookAutomationFields({
     <div className="grid gap-4 rounded-md border bg-muted/20 p-4 md:grid-cols-2">
       <Field>
         <FieldLabel htmlFor={`${prefix}-webhook-secret`}>Webhook signing secret</FieldLabel>
-        <Input id={`${prefix}-webhook-secret`} value={secret} onChange={(event) => onChange({ webhook_secret: event.target.value })} placeholder="Leave blank for unsigned" />
-        <FieldDescription>When set, deliveries include HMAC signature headers.</FieldDescription>
+        <Input id={`${prefix}-webhook-secret`} type="password" autoComplete="off" value={secret} onChange={(event) => onChange({ webhook_secret: event.target.value })} placeholder="Leave blank for unsigned" />
+        <FieldDescription>Masked by default. When set, deliveries include HMAC signature headers.</FieldDescription>
       </Field>
       <Field>
         <FieldLabel htmlFor={`${prefix}-webhook-tags`}>Only +tags</FieldLabel>

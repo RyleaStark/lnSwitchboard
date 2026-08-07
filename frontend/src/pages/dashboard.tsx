@@ -36,7 +36,7 @@ export function DashboardPage() {
         description="Track request volume, paid invoice flow, routed sats, and advertised domains without opening a terminal."
       />
       {summary.isLoading ? <LoadingRows rows={3} /> : null}
-      {summary.isError ? <PageError message="Unable to load dashboard metrics." /> : null}
+      {summary.isError ? <PageError message="Unable to load dashboard metrics." onRetry={() => void summary.refetch()} retrying={summary.isFetching} /> : null}
       {summary.data ? (
         <div className="flex flex-col gap-5">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ExternalLinkIcon, NetworkIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XIcon } from "lucide-react"
+import { ExternalLinkIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XIcon } from "lucide-react"
 import QRCode from "qrcode"
 import { useLocation } from "react-router"
 
@@ -8,6 +8,7 @@ import { toast } from "sonner"
 
 import { CloudflareIcon } from "@/components/cloudflare-icon"
 import { CopyButton } from "@/components/common"
+import { TailscaleIcon } from "@/components/tailscale-icon"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,11 +24,9 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
-  CardAction,
-  CardContent,
   CardDescription,
-
   CardHeader,
+
   CardTitle,
 } from "@/components/ui/card"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
@@ -145,31 +144,21 @@ function CloudflareConnectionsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <header className="flex items-start gap-3">
-        <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-[#f38020]/10 ring-1 ring-[#f38020]/20">
-          <CloudflareIcon className="size-7" />
-        </div>
-        <div className="min-w-0">
-          <h1 className="font-heading text-2xl font-semibold tracking-tight text-balance">Connections</h1>
-          <p className="mt-1 max-w-2xl text-sm leading-normal text-pretty text-muted-foreground">
-            Connect managed edge services to lnSwitchboard&apos;s isolated public listener. Administration stays on your private network.
-          </p>
-        </div>
-      </header>
-
-      <Card
+      <section
         aria-disabled={onboardingDisabled || undefined}
         className={onboardingDisabled ? "opacity-75" : undefined}
       >
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <CloudflareIcon className="size-5" />
-            <CardTitle><h2>Cloudflare Tunnel</h2></CardTitle>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <CloudflareIcon className="size-5" />
+              <h2 className="font-heading text-xl font-semibold tracking-tight">Cloudflare Tunnel</h2>
+            </div>
+            <p className="max-w-2xl text-sm text-pretty text-muted-foreground">
+              Configures your existing remotely managed tunnel and a proxied DNS record for one public hostname. Tunnel traffic reaches only port 21212.
+            </p>
           </div>
-          <CardDescription className="max-w-2xl text-pretty">
-            Configures your existing remotely managed tunnel and a proxied DNS record for one public hostname. Tunnel traffic reaches only port 21212.
-          </CardDescription>
-          <CardAction>
+          <div className="shrink-0">
             {cloudflareConnection ? (
               <ConnectionStatusBadge status={cloudflareConnection.status} />
             ) : available ? (
@@ -179,10 +168,10 @@ function CloudflareConnectionsPage() {
                 Connector not installed
               </Badge>
             )}
-          </CardAction>
-        </CardHeader>
+          </div>
+        </div>
 
-        <CardContent>
+        <div className="mt-6">
           {cloudflareConnection ? (
             <ConnectedCloudflare
               connection={cloudflareConnection}
@@ -228,8 +217,8 @@ function CloudflareConnectionsPage() {
               onSubmit={() => void authorize()}
             />
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
     </div>
   )
 }
@@ -405,28 +394,18 @@ function TailscaleConnectionsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <header className="flex items-start gap-3">
-        <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-foreground/5 ring-1 ring-foreground/10">
-          <NetworkIcon className="size-6" />
-        </div>
-        <div className="min-w-0">
-          <h1 className="font-heading text-2xl font-semibold tracking-tight text-balance">Connections</h1>
-          <p className="mt-1 max-w-2xl text-sm leading-normal text-pretty text-muted-foreground">
-            Authorize a dedicated Tailscale node, then expose only lnSwitchboard&apos;s isolated public listener through Funnel.
-          </p>
-        </div>
-      </header>
-
-      <Card aria-disabled={!available ? true : undefined}>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <NetworkIcon className="size-5" />
-            <CardTitle><h2>Tailscale Funnel</h2></CardTitle>
+      <section aria-disabled={!available ? true : undefined}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <TailscaleIcon className="size-5" />
+              <h2 className="font-heading text-xl font-semibold tracking-tight">Tailscale Funnel</h2>
+            </div>
+            <p className="max-w-2xl text-sm text-pretty text-muted-foreground">
+              Uses a short-lived browser login. Public HTTPS traffic reaches only port 21212; the Tailscale hostname is discovered after login.
+            </p>
           </div>
-          <CardDescription className="max-w-2xl text-pretty">
-            Uses a short-lived browser login. Public HTTPS traffic reaches only port 21212; the Tailscale hostname is discovered after login.
-          </CardDescription>
-          <CardAction>
+          <div className="shrink-0">
             {!available ? (
               <Badge variant="secondary">
                 Connector not installed
@@ -436,9 +415,9 @@ function TailscaleConnectionsPage() {
             ) : (
               <Badge variant="outline">Ready to connect</Badge>
             )}
-          </CardAction>
-        </CardHeader>
-        <CardContent>
+          </div>
+        </div>
+        <div className="mt-6">
           {connection ? (
             <ConnectedTailscale
               connection={connection}
@@ -503,8 +482,8 @@ function TailscaleConnectionsPage() {
               ) : null}
             </FieldGroup>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
     </div>
   )
 }

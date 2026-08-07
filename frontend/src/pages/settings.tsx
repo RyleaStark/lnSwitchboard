@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRoundIcon, RadioTowerIcon, SaveIcon, ServerCogIcon } from "lucide-react"
+import { EyeIcon, EyeOffIcon, KeyRoundIcon, RadioTowerIcon, SaveIcon, ServerCogIcon } from "lucide-react"
 import { toast } from "sonner"
 
 import { LoadingRows, PageError, PageHeader } from "@/components/common"
@@ -29,9 +29,11 @@ export function SettingsPage() {
   const queryClient = useQueryClient()
   const [activeTab, setActiveTab] = useState<SettingsTab>("auth")
   const [macaroon, setMacaroon] = useState("")
+  const [showMacaroon, setShowMacaroon] = useState(false)
   const [macaroonOpen, setMacaroonOpen] = useState(false)
   const [macaroonError, setMacaroonError] = useState("")
   const [zapPrivateKey, setZapPrivateKey] = useState("")
+  const [showZapPrivateKey, setShowZapPrivateKey] = useState(false)
   const [zapSignerError, setZapSignerError] = useState("")
   const [draftValues, setDraftValues] = useState<Record<string, string>>({})
   const auth = useQuery({ queryKey: ["auth-status"], queryFn: api.authStatus, refetchInterval: 10_000 })
@@ -106,8 +108,8 @@ export function SettingsPage() {
         description="Rotate the invoice macaroon and edit safe environment settings."
       />
       <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as SettingsTab)} className="flex flex-col gap-6">
-        <div className="flex">
-          <TabsList variant="line" className="h-11 w-fit justify-start gap-2 p-0">
+        <div className="max-w-full overflow-x-auto pb-1">
+          <TabsList variant="line" className="h-11 w-max min-w-full justify-start gap-2 p-0">
             {settingsTabs.map((item) => (
               <TabsTrigger
                 key={item.value}
@@ -160,8 +162,13 @@ export function SettingsPage() {
                   <FieldGroup>
                     <Field data-invalid={Boolean(macaroonError)}>
                       <FieldLabel htmlFor="macaroon">Invoice macaroon</FieldLabel>
-                      <Textarea id="macaroon" rows={6} value={macaroon} onChange={(event) => setMacaroon(event.target.value)} aria-invalid={Boolean(macaroonError)} />
-                      <FieldDescription>Paste a hex-encoded invoice macaroon, or upload LND's binary invoice.macaroon below.</FieldDescription>
+                      <div className="relative">
+                        <Input id="macaroon" type={showMacaroon ? "text" : "password"} value={macaroon} onChange={(event) => setMacaroon(event.target.value)} aria-invalid={Boolean(macaroonError)} autoComplete="off" className="pr-10 font-mono" />
+                        <Button type="button" variant="ghost" size="icon-sm" className="absolute top-1/2 right-1 -translate-y-1/2" onClick={() => setShowMacaroon((value) => !value)} aria-label={showMacaroon ? "Hide macaroon" : "Show macaroon"}>
+                          {showMacaroon ? <EyeOffIcon /> : <EyeIcon />}
+                        </Button>
+                      </div>
+                      <FieldDescription>Masked by default. Paste a hex-encoded invoice macaroon, or upload LND&apos;s binary invoice.macaroon below.</FieldDescription>
                       <FieldError>{macaroonError}</FieldError>
                     </Field>
                     <Field>
@@ -203,7 +210,7 @@ export function SettingsPage() {
             </CardHeader>
             <CardContent className="flex flex-col gap-5">
               {zapSigner.isLoading ? <LoadingRows rows={1} /> : null}
-              {zapSigner.isError ? <PageError message="Unable to load zap signer status." /> : null}
+              {zapSigner.isError ? <PageError message="Unable to load zap signer status." onRetry={() => void zapSigner.refetch()} retrying={zapSigner.isFetching} /> : null}
               {zapSigner.data ? (
                 <div className="rounded-md border bg-muted/20 p-4 text-sm">
                   <div className="font-medium">Receipt public key</div>
@@ -218,8 +225,13 @@ export function SettingsPage() {
               <FieldGroup>
                 <Field>
                   <FieldLabel htmlFor="zap-private-key">Import private key</FieldLabel>
-                  <Textarea id="zap-private-key" rows={3} value={zapPrivateKey} onChange={(event) => setZapPrivateKey(event.target.value)} />
-                  <FieldDescription>Paste a 32-byte hex Nostr private key. It is written locally and never returned by the API.</FieldDescription>
+                  <div className="relative">
+                    <Input id="zap-private-key" type={showZapPrivateKey ? "text" : "password"} value={zapPrivateKey} onChange={(event) => setZapPrivateKey(event.target.value)} autoComplete="off" className="pr-10 font-mono" />
+                    <Button type="button" variant="ghost" size="icon-sm" className="absolute top-1/2 right-1 -translate-y-1/2" onClick={() => setShowZapPrivateKey((value) => !value)} aria-label={showZapPrivateKey ? "Hide private key" : "Show private key"}>
+                      {showZapPrivateKey ? <EyeOffIcon /> : <EyeIcon />}
+                    </Button>
+                  </div>
+                  <FieldDescription>Masked by default. Paste a 32-byte hex Nostr private key; it is written locally and never returned by the API.</FieldDescription>
                 </Field>
                 <FieldError>{zapSignerError}</FieldError>
                 <div className="flex flex-wrap justify-end gap-2">
@@ -248,7 +260,7 @@ export function SettingsPage() {
             </CardHeader>
             <CardContent className="flex flex-col gap-6">
               {env.isLoading ? <LoadingRows /> : null}
-              {env.isError ? <PageError message="Unable to load environment settings." /> : null}
+              {env.isError ? <PageError message="Unable to load environment settings." onRetry={() => void env.refetch()} retrying={env.isFetching} /> : null}
               {Object.entries(grouped).map(([category, fields]) => (
                 <section key={category} className="flex flex-col gap-3">
                   <div>
