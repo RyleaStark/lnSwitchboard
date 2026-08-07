@@ -299,11 +299,11 @@ export function AppShell() {
               <NavLink to="/settings/">Settings</NavLink>
             </Button>
           </header>
-          <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-5 md:px-8 md:py-8">
+          <main className="mx-auto flex w-full max-w-7xl flex-none flex-col gap-6 px-4 py-5 md:px-8 md:py-8">
             <Outlet />
           </main>
-          <footer className="mx-auto flex w-full max-w-7xl px-4 pb-6 md:hidden">
-            <ProductFooter versionLabel={versionLabel} />
+          <footer className="mx-auto flex w-full max-w-7xl justify-center px-4 pb-6 text-center md:hidden">
+            <ProductFooter versionLabel={versionLabel} className="items-center" />
           </footer>
         </SidebarInset>
       </SidebarProvider>
@@ -458,7 +458,7 @@ function ProductFooter({
             variant="ghost"
             size="sm"
             className={cn(
-              "h-6 w-fit gap-1.5 px-0 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground",
+              "h-6 w-fit gap-1.5 px-2 pr-3 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground",
               compact && "text-[11px]",
             )}
             onClick={async () => {
