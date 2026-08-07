@@ -201,6 +201,13 @@ jobs:
             exit 1
           fi
 
+          if [[ "$current" =~ \.rc[0-9]+$ ]]; then
+            echo "version=$current" >> "$GITHUB_OUTPUT"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "RC VERSION detected; stable publication is intentionally skipped."
+            exit 0
+          fi
+
           before="$BEFORE_SHA"
           if [[ -z "$before" || "$before" =~ ^0+$ ]]; then
             before="$(git rev-parse HEAD^ 2>/dev/null || true)"
@@ -217,12 +224,6 @@ jobs:
           if [[ ! "$previous" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Previous VERSION value '$previous' is not a stable semantic version." >&2
             exit 1
-          fi
-
-          if [[ "$current" =~ \.rc[0-9]+$ ]]; then
-            echo "bumped=false" >> "$GITHUB_OUTPUT"
-            echo "RC VERSION detected; stable publication is intentionally skipped."
-            exit 0
           fi
 
           if [[ "$previous" == "$current" ]]; then
