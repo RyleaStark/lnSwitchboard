@@ -13,8 +13,10 @@ from urllib.parse import urlsplit, urlunsplit
 from fastapi import APIRouter, Depends, Query, Request
 
 from ..config import Settings, parse_payer_data_config
+from ..connection_store import ConnectionStore
 from ..deps import (
     enforce_rate_limit,
+    get_connection_store_dep,
     get_ln_address_store_dep,
     get_ln_client_dep,
     get_log_storage_dep,
@@ -501,6 +503,7 @@ async def lnurl_pay(
     macaroon_store: MacaroonStore = Depends(get_macaroon_store_dep),
     identity_store: NostrIdentityStore = Depends(get_nip05_store_dep),
     nostr_signer_store: NostrSignerStore = Depends(get_nostr_signer_store_dep),
+    connection_store: ConnectionStore = Depends(get_connection_store_dep),
 ) -> Dict[str, Any]:
     raw_username = username.strip()
     parsed_username = _parse_lnurl_local_part(username)
@@ -516,6 +519,10 @@ async def lnurl_pay(
     proxy_info = get_proxy_debug_info(request)
     callback_http_url = build_public_url(request)
     domain = _extract_domain(callback_http_url)
+    if connection_store.has_public_domain(domain):
+        # Funnel terminates TLS before proxying to this listener over HTTP.
+        # Registered provider domains are therefore always public HTTPS origins.
+        callback_http_url = _force_https(callback_http_url)
     ln_address = f"{raw_username}@{domain}"
     override = await _lookup_address_override(
         address_store,

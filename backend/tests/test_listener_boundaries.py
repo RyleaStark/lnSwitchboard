@@ -325,13 +325,21 @@ def test_registered_provider_domain_serves_lnurl_and_nostr_public_endpoints(
         "/.well-known/lnurlp/alice",
         headers={"Forwarded": "for=198.51.100.10;proto=https;host=lns.tailnet.ts.net"},
     )
+    direct_funnel_lnurl = public.get(
+        "/.well-known/lnurlp/alice",
+        headers={"Host": "lns.tailnet.ts.net"},
+    )
     nostr = public.get(
         "/.well-known/nostr.json",
         headers={"Forwarded": "for=198.51.100.10;proto=https;host=lns.tailnet.ts.net"},
     )
 
     assert lnurl.status_code == 200
+    assert direct_funnel_lnurl.status_code == 200
     assert lnurl.json()["callback"].startswith(
+        "https://lns.tailnet.ts.net/.well-known/lnurlp/alice"
+    )
+    assert direct_funnel_lnurl.json()["callback"].startswith(
         "https://lns.tailnet.ts.net/.well-known/lnurlp/alice"
     )
     assert nostr.status_code == 200
