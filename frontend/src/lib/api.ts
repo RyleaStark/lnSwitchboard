@@ -294,6 +294,11 @@ export type CloudflareProvisionPayload = {
   hostname: string
 }
 
+export type CloudflareZone = {
+  id: string
+  name: string
+}
+
 export type TailscaleSetup = {
   available: boolean
   authorization_method: "web_login"
@@ -466,6 +471,20 @@ export const api = {
     request<ProviderConnection>("api/connections/cloudflare/provision", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  availableCloudflareDomains: (connectionId: string) =>
+    request<{ zones: CloudflareZone[] }>(
+      `api/connections/cloudflare/${connectionId}/domains/available`,
+      { cache: "no-store" },
+    ),
+  addCloudflareDomain: ({ connectionId, zoneId, hostname }: { connectionId: string; zoneId: string; hostname: string }) =>
+    request<ProviderConnection>(`api/connections/cloudflare/${connectionId}/domains`, {
+      method: "POST",
+      body: JSON.stringify({ zone_id: zoneId, hostname }),
+    }),
+  removeCloudflareDomain: ({ connectionId, hostname }: { connectionId: string; hostname: string }) =>
+    request<ProviderConnection>(`api/connections/cloudflare/${connectionId}/domains/${encodeURIComponent(hostname)}`, {
+      method: "DELETE",
     }),
   refreshCloudflareStatus: (connectionId: string) =>
     request<ProviderConnection>(`api/connections/cloudflare/${connectionId}/status`, {

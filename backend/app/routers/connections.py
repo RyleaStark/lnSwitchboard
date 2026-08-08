@@ -71,6 +71,13 @@ class CloudflareProvisionRequest(BaseModel):
     hostname: str
 
 
+class CloudflareDomainRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    zone_id: str
+    hostname: str
+
+
 class TailscaleLoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -121,6 +128,11 @@ async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Resu
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
         ) from exc
     except CloudflareAPIError as exc:
+        if exc.status_code == status.HTTP_409_CONFLICT:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cloudflare configuration changed; retry the operation",
+            ) from exc
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
@@ -395,6 +407,52 @@ async def provision_cloudflare(
         secure=False,
         httponly=True,
         samesite="lax",
+    )
+    return _serialize_connection(connection)
+
+
+@router.get(
+    "/cloudflare/{connection_id}/domains/available",
+)
+async def available_cloudflare_domains(
+    connection_id: str,
+    response: Response,
+    service: CloudflareService = Depends(get_cloudflare_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    zones = await _cloudflare_call(lambda: service.available_zones(connection_id))
+    return {"zones": zones}
+
+
+@router.post(
+    "/cloudflare/{connection_id}/domains",
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_cloudflare_domain(
+    connection_id: str,
+    request: CloudflareDomainRequest,
+    response: Response,
+    service: CloudflareService = Depends(get_cloudflare_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    connection = await _cloudflare_call(
+        lambda: service.add_domain(connection_id, request.zone_id, request.hostname)
+    )
+    return _serialize_connection(connection)
+
+
+@router.delete(
+    "/cloudflare/{connection_id}/domains/{hostname}",
+)
+async def remove_cloudflare_domain(
+    connection_id: str,
+    hostname: str,
+    response: Response,
+    service: CloudflareService = Depends(get_cloudflare_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    connection = await _cloudflare_call(
+        lambda: service.remove_domain(connection_id, hostname)
     )
     return _serialize_connection(connection)
 

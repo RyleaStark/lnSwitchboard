@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import httpx
@@ -21,6 +22,10 @@ class CloudflareAPIError(RuntimeError):
         super().__init__(
             f"Cloudflare rejected the request with HTTP {status_code}{suffix}"
         )
+
+
+class CloudflareRollbackError(CloudflareAPIError):
+    """A remote mutation whose rollback could not be safely completed."""
 
 
 class CloudflareClient:
@@ -169,7 +174,7 @@ class CloudflareClient:
         tunnel_id: str,
         hostname: str,
         origin_url: str,
-    ) -> None:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         current = await self._request(
             "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
         )
@@ -179,41 +184,109 @@ class CloudflareClient:
         if current_config is None:
             # Cloudflare represents a valid, not-yet-configured remote tunnel
             # as result.config=null until its first configuration PUT.
-            config: dict[str, Any] = {}
+            config: dict[str, Any] = {
+                "ingress": [{"service": "http_status:404"}]
+            }
         elif isinstance(current_config, dict):
-            config = dict(current_config)
+            config = copy.deepcopy(current_config)
         else:
             raise CloudflareAPIError(502)
+        original_config = copy.deepcopy(config)
         ingress = self._override_ingress_routes(
             config.get("ingress"), hostname, origin_url
         )
         config["ingress"] = ingress
+        # Cloudflare exposes a configuration version on GET but its PUT endpoint
+        # has no ETag, If-Match, version parameter, or other conditional-write
+        # primitive. Re-read immediately before the whole-config PUT and fail
+        # closed if an operator changed the snapshot while we prepared it.
+        latest = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+        )
+        latest_config = latest.get("config") if isinstance(latest, dict) else None
+        if latest_config != current_config:
+            raise CloudflareAPIError(409)
+        try:
+            await self._request(
+                "PUT",
+                f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
+                json={"config": config},
+            )
+            verified = await self._request(
+                "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+            )
+            verified_config = (
+                verified.get("config") if isinstance(verified, dict) else None
+            )
+            if verified_config != config:
+                raise CloudflareAPIError(502)
+            verified_ingress = (
+                verified_config.get("ingress")
+                if isinstance(verified_config, dict)
+                else None
+            )
+            if not isinstance(verified_ingress, list):
+                raise CloudflareAPIError(502)
+            required_paths = {
+                r"^/\.well-known/lnurlp/.*$",
+                r"^/\.well-known/nostr\.json$",
+            }
+            configured_routes = [
+                route
+                for route in verified_ingress
+                if isinstance(route, dict)
+                and str(route.get("hostname", "")).lower().rstrip(".") == hostname
+                and route.get("path") in required_paths
+            ]
+            if (
+                len(configured_routes) != len(required_paths)
+                or {route.get("path") for route in configured_routes} != required_paths
+                or any(
+                    route.get("service") != origin_url for route in configured_routes
+                )
+            ):
+                raise CloudflareAPIError(502)
+        except Exception as exc:
+            try:
+                await self.restore_tunnel_configuration(
+                    account_id, tunnel_id, original_config, config
+                )
+            except Exception as rollback_exc:
+                raise CloudflareRollbackError(502) from rollback_exc
+            raise exc
+        return original_config, copy.deepcopy(config)
+
+    async def restore_tunnel_configuration(
+        self,
+        account_id: str,
+        tunnel_id: str,
+        original_config: dict[str, Any],
+        written_config: dict[str, Any],
+    ) -> None:
+        current = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+        )
+        current_config = current.get("config") if isinstance(current, dict) else None
+        if current_config == original_config:
+            return
+        if current_config != written_config:
+            raise CloudflareAPIError(409)
+        latest = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+        )
+        latest_config = latest.get("config") if isinstance(latest, dict) else None
+        if latest_config != current_config:
+            raise CloudflareAPIError(409)
         await self._request(
             "PUT",
             f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
-            json={"config": config},
+            json={"config": original_config},
         )
         verified = await self._request(
             "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
         )
         verified_config = verified.get("config") if isinstance(verified, dict) else None
-        verified_ingress = (
-            verified_config.get("ingress") if isinstance(verified_config, dict) else None
-        )
-        if not isinstance(verified_ingress, list):
-            raise CloudflareAPIError(502)
-        required_paths = {
-            r"^/\.well-known/lnurlp/.*$",
-            r"^/\.well-known/nostr\.json$",
-        }
-        configured_paths = {
-            route.get("path")
-            for route in verified_ingress
-            if isinstance(route, dict)
-            and route.get("hostname") == hostname
-            and route.get("service") == origin_url
-        }
-        if not required_paths.issubset(configured_paths):
+        if verified_config != original_config:
             raise CloudflareAPIError(502)
 
     @staticmethod
@@ -249,18 +322,87 @@ class CloudflareClient:
                 route_hostname.strip().lower().rstrip(".") == hostname
                 and route_path in managed_paths
             ):
-                continue
+                # Cloudflare ingress entries have no ownership marker. Never
+                # overwrite or adopt an operator-created exact route, even when
+                # its service currently matches ours.
+                raise CloudflareAPIError(409)
             routes.append(copied)
 
-        routes.extend(
+        managed_routes = [
             {"hostname": hostname, "path": path, "service": origin_url}
             for path in sorted(managed_paths)
+        ]
+        # Exact well-known routes must precede broader hostname rules because
+        # Cloudflare evaluates ingress in order using first-match semantics.
+        return managed_routes + routes + [fallback or {"service": "http_status:404"}]
+
+    async def verify_tunnel_route(
+        self,
+        account_id: str,
+        tunnel_id: str,
+        hostname: str,
+        origin_url: str,
+    ) -> bool:
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
         )
-        routes.append(fallback or {"service": "http_status:404"})
-        return routes
+        config = result.get("config") if isinstance(result, dict) else None
+        ingress = config.get("ingress") if isinstance(config, dict) else None
+        if not isinstance(ingress, list) or any(
+            not isinstance(route, dict) for route in ingress
+        ):
+            return False
+
+        normalized = hostname.lower().rstrip(".")
+        managed_paths = {
+            r"^/\.well-known/lnurlp/.*$",
+            r"^/\.well-known/nostr\.json$",
+        }
+        managed_indexes: dict[str, int] = {}
+        for path in managed_paths:
+            matches = [
+                (index, route)
+                for index, route in enumerate(ingress)
+                if str(route.get("hostname", "")).lower().rstrip(".")
+                == normalized
+                and route.get("path") == path
+            ]
+            if len(matches) != 1 or matches[0][1].get("service") != origin_url:
+                return False
+            managed_indexes[path] = matches[0][0]
+
+        for path, managed_index in managed_indexes.items():
+            for route in ingress[:managed_index]:
+                route_hostname = str(route.get("hostname", "")).lower().rstrip(".")
+                if not self._ingress_hostname_could_match(route_hostname, normalized):
+                    continue
+                if (
+                    route_hostname == normalized
+                    and route.get("path") in managed_paths
+                    and route.get("path") != path
+                    and route.get("service") == origin_url
+                ):
+                    continue
+                return False
+        return True
+
+    @staticmethod
+    def _ingress_hostname_could_match(candidate: str, hostname: str) -> bool:
+        if candidate in {"", "*"}:
+            return True
+        if candidate == hostname:
+            return True
+        if candidate.startswith("*."):
+            suffix = candidate[1:]
+            return hostname.endswith(suffix) and hostname != suffix[1:]
+        return False
 
     async def remove_tunnel_route(
-        self, account_id: str, tunnel_id: str, hostname: str
+        self,
+        account_id: str,
+        tunnel_id: str,
+        hostname: str,
+        origin_url: str,
     ) -> None:
         current = await self._request(
             "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
@@ -271,25 +413,63 @@ class CloudflareClient:
         ingress = config.get("ingress")
         if not isinstance(ingress, list):
             raise CloudflareAPIError(502)
+        if any(not isinstance(route, dict) for route in ingress):
+            raise CloudflareAPIError(502)
         managed_paths = {
             r"^/\.well-known/lnurlp/.*$",
             r"^/\.well-known/nostr\.json$",
         }
         normalized = hostname.lower().rstrip(".")
+        conflicting_routes = [
+            route
+            for route in ingress
+            if str(route.get("hostname", "")).lower().rstrip(".") == normalized
+            and route.get("path") in managed_paths
+            and route.get("service") != origin_url
+        ]
+        if conflicting_routes:
+            raise CloudflareAPIError(409)
         retained = [
             dict(route) for route in ingress
             if isinstance(route, dict)
             and not (
                 str(route.get("hostname", "")).lower().rstrip(".") == normalized
                 and route.get("path") in managed_paths
+                and route.get("service") == origin_url
             )
         ]
         if len(retained) == len(ingress):
             return
+        latest = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+        )
+        latest_config = latest.get("config") if isinstance(latest, dict) else None
+        if latest_config != config:
+            raise CloudflareAPIError(409)
         await self._request(
             "PUT", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
             json={"config": {**config, "ingress": retained}},
         )
+        verified = await self._request(
+            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+        )
+        verified_config = verified.get("config") if isinstance(verified, dict) else None
+        intended_config = {**config, "ingress": retained}
+        if verified_config != intended_config:
+            raise CloudflareAPIError(502)
+        verified_ingress = (
+            verified_config.get("ingress") if isinstance(verified_config, dict) else None
+        )
+        if not isinstance(verified_ingress, list) or any(
+            not isinstance(route, dict) for route in verified_ingress
+        ):
+            raise CloudflareAPIError(502)
+        if any(
+            str(route.get("hostname", "")).lower().rstrip(".") == normalized
+            and route.get("path") in managed_paths
+            for route in verified_ingress
+        ):
+            raise CloudflareAPIError(502)
 
     async def disable_tunnel(self, account_id: str, tunnel_id: str) -> None:
         await self._request(

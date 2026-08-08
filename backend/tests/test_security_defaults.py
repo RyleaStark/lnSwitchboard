@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from ..app import deps
 from ..app.config import Settings, get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from ..app.outbound_security import UnsafeOutboundTarget, ensure_public_endpoint, post_to_pinned_endpoint
 
@@ -22,6 +23,57 @@ def test_admin_api_does_not_allow_cross_origin_reads(test_client) -> None:
 
 def test_untrusted_host_header_is_rejected(test_client) -> None:
     response = test_client.get("/api/health", headers={"Host": "attacker.example"})
+
+    assert response.status_code == 400
+    assert response.text == "Invalid host header"
+
+
+@pytest.mark.parametrize(
+    "host_header",
+    [
+        "evil@testserver",
+        "testserver/path",
+        "testserver?query",
+        "testserver#fragment",
+        "testserver:bad",
+        "testserver,attacker.example",
+        "test server",
+        "testserver..",
+        "testserver...",
+    ],
+)
+def test_malformed_authority_cannot_match_a_trusted_host(test_client, host_header: str) -> None:
+    response = test_client.get("/api/health", headers={"Host": host_header})
+
+    assert response.status_code == 400
+    assert response.text == "Invalid host header"
+
+
+@pytest.mark.parametrize(
+    "host_header",
+    [
+        " pay.example.com ",
+        "evil@pay.example.com",
+        "pay.example.com/path",
+        "pay.example.com..",
+    ],
+)
+def test_malformed_authority_cannot_match_a_registered_domain(
+    test_client, host_header: str
+) -> None:
+    store = deps._get_connection_store()
+    connection = store.upsert_connection(
+        provider="cloudflare",
+        external_id="dynamic-host-test",
+        label="Cloudflare Tunnel",
+        status="connected",
+    )
+    store.replace_domains(
+        connection.id,
+        [{"hostname": "pay.example.com", "status": "active"}],
+    )
+
+    response = test_client.get("/api/health", headers={"Host": host_header})
 
     assert response.status_code == 400
     assert response.text == "Invalid host header"

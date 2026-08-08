@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ExternalLinkIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XIcon } from "lucide-react"
+import { ExternalLinkIcon, PlusIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XIcon } from "lucide-react"
 import QRCode from "qrcode"
 import { useLocation } from "react-router"
 
@@ -32,7 +32,7 @@ import {
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ApiError, api, type ProviderConnection, type TailscaleLogin } from "@/lib/api"
+import { ApiError, api, type CloudflareZone, type ProviderConnection, type TailscaleLogin } from "@/lib/api"
 
 export function ConnectionsPage() {
   const location = useLocation()
@@ -49,6 +49,7 @@ function CloudflareConnectionsPage() {
   const [accountId, setAccountId] = useState("")
   const [tunnelId, setTunnelId] = useState("")
   const [zoneId, setZoneId] = useState("")
+  const [hostname, setHostname] = useState("")
   const [apiToken, setApiToken] = useState("")
   const [authorizing, setAuthorizing] = useState(false)
 
@@ -66,6 +67,12 @@ function CloudflareConnectionsPage() {
     retry: false,
   })
   const authorization = pendingAuthorization.data ?? null
+  const availableDomains = useQuery({
+    queryKey: ["cloudflare-available-domains", cloudflareConnection?.id],
+    queryFn: () => api.availableCloudflareDomains(cloudflareConnection!.id),
+    enabled: available && Boolean(cloudflareConnection),
+    retry: false,
+  })
   const authorizationMissing =
     pendingAuthorization.error instanceof ApiError && pendingAuthorization.error.status === 404
 
@@ -78,6 +85,7 @@ function CloudflareConnectionsPage() {
       const selectedAccount = authorization.accounts.find((account) => account.id === accountId.trim())
       if (!selectedAccount?.zones.length) throw new Error("This token can access the tunnel but has no active DNS zones. Add Zone / Zone / Read and Zone / DNS / Edit for a zone, then try again.")
       setZoneId(selectedAccount.zones[0].id)
+      setHostname(selectedAccount.zones[0].name)
       queryClient.setQueryData(["cloudflare-authorization"], authorization)
       toast.success("Tunnel and DNS access confirmed")
     } catch (error) {
@@ -121,6 +129,34 @@ function CloudflareConnectionsPage() {
       toast.success("Cloudflare Tunnel disconnected")
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Disconnect failed"),
+  })
+
+  const addDomain = useMutation({
+    mutationFn: (payload: { connectionId: string; zoneId: string; hostname: string }) =>
+      api.addCloudflareDomain(payload),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["connections"] }),
+        queryClient.invalidateQueries({ queryKey: ["cloudflare-available-domains"] }),
+      ])
+      toast.success("Cloudflare domain added")
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Unable to add domain"),
+  })
+
+  const removeDomain = useMutation({
+    mutationFn: (payload: { connectionId: string; hostname: string }) =>
+      api.removeCloudflareDomain(payload),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["connections"] }),
+        queryClient.invalidateQueries({ queryKey: ["cloudflare-available-domains"] }),
+      ])
+      toast.success("Cloudflare domain removed")
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Unable to remove domain"),
   })
 
   if (
@@ -174,10 +210,31 @@ function CloudflareConnectionsPage() {
           {cloudflareConnection ? (
             <ConnectedCloudflare
               connection={cloudflareConnection}
+              availableZones={availableDomains.data?.zones ?? []}
               refreshing={refreshStatus.isPending}
               disconnecting={disconnect.isPending}
-              actionsDisabled={refreshStatus.isPending || disconnect.isPending}
+              addingDomain={addDomain.isPending}
+              removingDomain={removeDomain.isPending}
+              actionsDisabled={
+                refreshStatus.isPending ||
+                disconnect.isPending ||
+                addDomain.isPending ||
+                removeDomain.isPending
+              }
               onRefresh={() => refreshStatus.mutate(cloudflareConnection.id)}
+              onAddDomain={(selectedZoneId, selectedHostname) =>
+                addDomain.mutate({
+                  connectionId: cloudflareConnection.id,
+                  zoneId: selectedZoneId,
+                  hostname: selectedHostname,
+                })
+              }
+              onRemoveDomain={(selectedHostname) =>
+                removeDomain.mutate({
+                  connectionId: cloudflareConnection.id,
+                  hostname: selectedHostname,
+                })
+              }
               onDisconnect={() => disconnect.mutate(cloudflareConnection.id)}
             />
           ) : authorization ? (
@@ -186,8 +243,16 @@ function CloudflareConnectionsPage() {
               tunnelId={tunnelId}
               zones={authorization.accounts.find((account) => account.id === accountId)?.zones ?? []}
               zoneId={zoneId}
+              hostname={hostname}
               pending={provision.isPending}
-              onZoneChange={setZoneId}
+              onZoneChange={(nextZoneId) => {
+                setZoneId(nextZoneId)
+                const nextZone = authorization.accounts
+                  .find((account) => account.id === accountId)
+                  ?.zones.find((zone) => zone.id === nextZoneId)
+                if (nextZone) setHostname(nextZone.name)
+              }}
+              onHostnameChange={setHostname}
               onBack={() => cancelAuthorization.mutate()}
               onSubmit={() => {
                 const zone = authorization.accounts
@@ -198,7 +263,7 @@ function CloudflareConnectionsPage() {
                   account_id: accountId,
                   tunnel_id: tunnelId,
                   zone_id: zoneId,
-                  hostname: zone.name,
+                  hostname,
                 })
               }}
             />
@@ -790,8 +855,10 @@ function ProvisionForm({
   tunnelId,
   zones,
   zoneId,
+  hostname,
   pending,
   onZoneChange,
+  onHostnameChange,
   onBack,
   onSubmit,
 }: {
@@ -799,12 +866,18 @@ function ProvisionForm({
   tunnelId: string
   zones: Array<{ id: string; name: string }>
   zoneId: string
+  hostname: string
   pending: boolean
   onZoneChange: (value: string) => void
+  onHostnameChange: (value: string) => void
   onBack: () => void
   onSubmit: () => void
 }) {
   const selectedZone = zones.find((zone) => zone.id === zoneId)
+  const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, "")
+  const hostnameAuthorized = Boolean(selectedZone) && (
+    normalizedHostname === selectedZone!.name || normalizedHostname.endsWith(`.${selectedZone!.name}`)
+  )
   return (
     <FieldGroup className="max-w-2xl">
       <Field><FieldLabel>Cloudflare account ID</FieldLabel><Input value={accountId} disabled /></Field>
@@ -814,48 +887,166 @@ function ProvisionForm({
         <select id="cloudflare-zone" value={zoneId} disabled={pending} onChange={(event) => onZoneChange(event.target.value)} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none md:text-sm">
           {zones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
         </select>
-        <FieldDescription>Lightning Addresses use this zone’s apex. lnSwitchboard adds only the two required Zero Trust Public Hostname paths: LNURL-pay and NIP-05. An apex already routed through the selected tunnel is reused, not replaced.</FieldDescription>
+        <FieldDescription>Select the Cloudflare zone that authorizes the hostname below.</FieldDescription>
       </Field>
-      {selectedZone ? <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">Public hostname: <span className="font-medium text-foreground">{selectedZone.name}</span></p> : null}
-      <div className="flex flex-wrap gap-2"><Button type="button" disabled={!selectedZone || pending} onClick={onSubmit}>{pending ? "Configuring tunnel…" : "Configure existing tunnel"}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onBack}>Back</Button></div>
+      <Field data-invalid={!hostnameAuthorized || undefined}>
+        <FieldLabel htmlFor="cloudflare-hostname">Hostname</FieldLabel>
+        <Input id="cloudflare-hostname" value={hostname} disabled={pending} aria-invalid={!hostnameAuthorized} autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={(event) => onHostnameChange(event.target.value)} />
+        <FieldDescription>Use the zone apex or a subdomain, such as pay.{selectedZone?.name ?? "example.com"}. Only the LNURL-pay and NIP-05 paths are published.</FieldDescription>
+        {!hostnameAuthorized ? <p role="alert" className="text-sm text-destructive">Hostname must be the selected zone or one of its subdomains.</p> : null}
+      </Field>
+      <div className="flex flex-wrap gap-2"><Button type="button" disabled={!selectedZone || !hostnameAuthorized || pending} onClick={onSubmit}>{pending ? "Configuring tunnel…" : "Configure existing tunnel"}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onBack}>Back</Button></div>
     </FieldGroup>
   )
 }
 
 function ConnectedCloudflare({
   connection,
+  availableZones,
   refreshing,
   disconnecting,
+  addingDomain,
+  removingDomain,
   actionsDisabled,
   onRefresh,
+  onAddDomain,
+  onRemoveDomain,
   onDisconnect,
 }: {
   connection: ProviderConnection
+  availableZones: CloudflareZone[]
   refreshing: boolean
   disconnecting: boolean
+  addingDomain: boolean
+  removingDomain: boolean
   actionsDisabled: boolean
   onRefresh: () => void
+  onAddDomain: (zoneId: string, hostname: string) => void
+  onRemoveDomain: (hostname: string) => void
   onDisconnect: () => void
 }) {
+  const [showAddDomain, setShowAddDomain] = useState(false)
+  const [selectedZoneId, setSelectedZoneId] = useState("")
+  const [selectedHostname, setSelectedHostname] = useState("")
+  const selectedZone = availableZones.find((zone) => zone.id === selectedZoneId)
+  const normalizedHostname = selectedHostname.trim().toLowerCase().replace(/\.$/, "")
+  const hostnameAuthorized = Boolean(selectedZone) && (
+    normalizedHostname === selectedZone!.name || normalizedHostname.endsWith(`.${selectedZone!.name}`)
+  )
+
+  const beginAddingDomain = () => {
+    const firstZone = availableZones[0]
+    setSelectedZoneId(firstZone?.id ?? "")
+    setSelectedHostname(firstZone?.name ?? "")
+    setShowAddDomain(true)
+  }
+
   return (
     <div className="flex flex-col gap-5">
       <div className="grid gap-3 sm:grid-cols-2">
         {connection.domains.map((domain) => (
           <div key={domain.hostname} className="rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
             <div className="flex items-center justify-between gap-3">
-              <span className="truncate font-medium">{domain.hostname}</span>
-              <Badge variant={domain.status === "error" ? "destructive" : "outline"}>{domain.status}</Badge>
+              <span className="min-w-0 truncate font-medium" title={domain.hostname}>{domain.hostname}</span>
+              <div className="flex shrink-0 items-center gap-2">
+                <Badge variant={domain.status === "error" ? "destructive" : "outline"}>{domain.status}</Badge>
+                {connection.domains.length > 1 && domain.zone_id ? (
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        aria-label={`Remove ${domain.hostname}`}
+                        disabled={actionsDisabled}
+                      >
+                        <Trash2Icon />
+                        Remove
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Remove {domain.hostname}?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          lnSwitchboard will remove only this hostname’s LNURL-pay and NIP-05 tunnel paths. DNS created by lnSwitchboard will be removed; adopted DNS will be preserved. Your other domains and the shared tunnel stay connected.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                          variant="destructive"
+                          disabled={removingDomain}
+                          onClick={() => onRemoveDomain(domain.hostname)}
+                        >
+                          Remove domain
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                ) : null}
+              </div>
             </div>
-            <p className="mt-2 text-xs text-muted-foreground">DNS and tunnel configuration managed by lnSwitchboard</p>
+            <p className="mt-2 text-xs text-muted-foreground">Your Lightning Addresses are available at this hostname.</p>
+            {domain.last_error ? <p role="alert" className="mt-2 text-xs text-destructive">{domain.last_error}</p> : null}
           </div>
         ))}
       </div>
+      {showAddDomain && availableZones.length > 0 ? (
+        <FieldGroup className="max-w-2xl rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
+          <Field>
+            <FieldLabel htmlFor="cloudflare-additional-domain">Additional domain</FieldLabel>
+            <select
+              id="cloudflare-additional-domain"
+              value={selectedZoneId}
+              disabled={addingDomain}
+              onChange={(event) => {
+                const nextZoneId = event.target.value
+                setSelectedZoneId(nextZoneId)
+                const nextZone = availableZones.find((zone) => zone.id === nextZoneId)
+                if (nextZone) setSelectedHostname(nextZone.name)
+              }}
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none md:text-sm"
+            >
+              {availableZones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
+            </select>
+            <FieldDescription>
+              Select the Cloudflare zone that authorizes the hostname below.
+            </FieldDescription>
+          </Field>
+          <Field data-invalid={!hostnameAuthorized || undefined}>
+            <FieldLabel htmlFor="cloudflare-additional-hostname">Hostname</FieldLabel>
+            <Input id="cloudflare-additional-hostname" value={selectedHostname} disabled={addingDomain} aria-invalid={!hostnameAuthorized} autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={(event) => setSelectedHostname(event.target.value)} />
+            <FieldDescription>Use the zone apex or a subdomain, such as pay.{selectedZone?.name ?? "example.com"}.</FieldDescription>
+            {!hostnameAuthorized ? <p role="alert" className="text-sm text-destructive">Hostname must be the selected zone or one of its subdomains.</p> : null}
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              disabled={!selectedZoneId || !hostnameAuthorized || addingDomain}
+              onClick={() => {
+                onAddDomain(selectedZoneId, normalizedHostname)
+                setShowAddDomain(false)
+              }}
+            >
+              {addingDomain ? "Adding domain…" : "Add selected domain"}
+            </Button>
+            <Button type="button" variant="ghost" disabled={addingDomain} onClick={() => setShowAddDomain(false)}>
+              Cancel
+            </Button>
+          </div>
+        </FieldGroup>
+      ) : null}
       {connection.last_error ? (
         <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {connection.last_error}
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">
+        {availableZones.length > 0 && !showAddDomain ? (
+          <Button type="button" disabled={actionsDisabled} onClick={beginAddingDomain}>
+            <PlusIcon />
+            Add Domain
+          </Button>
+        ) : null}
         <Button variant="outline" disabled={actionsDisabled} onClick={onRefresh}>
           <RefreshCwIcon className={refreshing ? "animate-spin" : undefined} />
           {refreshing ? "Checking…" : "Refresh status"}
@@ -871,7 +1062,7 @@ function ConnectedCloudflare({
             <AlertDialogHeader>
               <AlertDialogTitle>Disconnect Cloudflare Tunnel?</AlertDialogTitle>
               <AlertDialogDescription>
-                lnSwitchboard will remove its public ingress route and owned DNS record. The existing tunnel itself is preserved; DNS records that no longer match are also preserved.
+                lnSwitchboard will remove every managed public ingress route and owned DNS record. The existing tunnel itself is preserved; adopted or changed DNS records are also preserved.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

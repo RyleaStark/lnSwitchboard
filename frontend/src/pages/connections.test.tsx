@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router"
 
-import { ApiError, api } from "@/lib/api"
+import { ApiError, api, type ProviderConnection } from "@/lib/api"
 import { ConnectionsPage } from "@/pages/connections"
 
 import { vi } from "vitest"
@@ -17,6 +17,9 @@ vi.mock("@/lib/api", async (importOriginal) => ({
     cloudflareAuthorization: vi.fn(),
     cancelCloudflareAuthorization: vi.fn(),
     provisionCloudflare: vi.fn(),
+    availableCloudflareDomains: vi.fn(),
+    addCloudflareDomain: vi.fn(),
+    removeCloudflareDomain: vi.fn(),
     refreshCloudflareStatus: vi.fn(),
     disconnectCloudflare: vi.fn(),
     tailscaleSetup: vi.fn(),
@@ -74,6 +77,30 @@ function renderPage(path = "/connections/cloudflare/") {
   return { client, ...rendered }
 }
 
+function cloudflareConnection(domains: ProviderConnection["domains"] = [
+  {
+    hostname: "example.com",
+    status: "active",
+    zone_id: "b".repeat(32),
+    external_id: "dns-id",
+    last_error: null,
+  },
+]): ProviderConnection {
+  return {
+    id: "connection-id",
+    provider: "cloudflare",
+    external_id: "tunnel-id",
+    label: "Cloudflare Tunnel",
+    status: "connected",
+    account_id: "a".repeat(32),
+    public_metadata: { origin: "http://lnswitchboard:21212" },
+    last_error: null,
+    created_at: "2026-08-04T00:00:00Z",
+    updated_at: "2026-08-04T00:00:00Z",
+    domains,
+  }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(api.connections).mockResolvedValue({
@@ -84,6 +111,7 @@ beforeEach(() => {
     connections: [],
   })
   vi.mocked(api.cloudflareSetup).mockResolvedValue(setup)
+  vi.mocked(api.availableCloudflareDomains).mockResolvedValue({ zones: [] })
   vi.mocked(api.tailscaleSetup).mockResolvedValue(tailscaleSetup)
   vi.mocked(api.tailscaleLoginStatus).mockRejectedValue(
     new ApiError(404, "Login not found", "Login not found"),
@@ -193,7 +221,87 @@ test("keeps connected management controls active when onboarding capability is u
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled()
 })
 
-test("selects an authorized zone and provisions its apex on the existing tunnel", async () => {
+test("offers unused authorized zones and adds another Cloudflare domain", async () => {
+  const user = userEvent.setup()
+  const existing = cloudflareConnection()
+  const added = cloudflareConnection([
+    ...existing.domains,
+    {
+      hostname: "example.net",
+      status: "pending",
+      zone_id: "d".repeat(32),
+      external_id: "dns-id-2",
+      last_error: null,
+    },
+  ])
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "cloudflare", name: "Cloudflare", capability: "available", reason: null },
+    ],
+    connections: [existing],
+  })
+  vi.mocked(api.availableCloudflareDomains).mockResolvedValue({
+    zones: [{ id: "d".repeat(32), name: "example.net" }],
+  })
+  vi.mocked(api.addCloudflareDomain).mockResolvedValue(added)
+
+  renderPage()
+
+  expect(await screen.findByText("Your Lightning Addresses are available at this hostname.")).toBeVisible()
+  await user.click(await screen.findByRole("button", { name: "Add Domain" }))
+  expect(screen.getByLabelText("Additional domain")).toHaveValue("d".repeat(32))
+  expect(screen.getByLabelText("Hostname")).toHaveValue("example.net")
+  await user.clear(screen.getByLabelText("Hostname"))
+  await user.type(screen.getByLabelText("Hostname"), "pay.example.net")
+  await user.click(screen.getByRole("button", { name: "Add selected domain" }))
+
+  await waitFor(() =>
+    expect(api.addCloudflareDomain).toHaveBeenCalledWith({
+      connectionId: "connection-id",
+      zoneId: "d".repeat(32),
+      hostname: "pay.example.net",
+    }),
+  )
+})
+
+
+test("removes one domain without disconnecting the Cloudflare tunnel", async () => {
+  const user = userEvent.setup()
+  const connected = cloudflareConnection([
+    ...cloudflareConnection().domains,
+    {
+      hostname: "example.net",
+      status: "active",
+      zone_id: "d".repeat(32),
+      external_id: "dns-id-2",
+      last_error: null,
+    },
+  ])
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "cloudflare", name: "Cloudflare", capability: "available", reason: null },
+    ],
+    connections: [connected],
+  })
+  vi.mocked(api.removeCloudflareDomain).mockResolvedValue(cloudflareConnection())
+
+  renderPage()
+
+  await screen.findByText("example.net")
+  await user.click(screen.getByRole("button", { name: "Remove example.net" }))
+  await user.click(screen.getByRole("button", { name: "Remove domain" }))
+
+  await waitFor(() =>
+    expect(api.removeCloudflareDomain).toHaveBeenCalledWith({
+      connectionId: "connection-id",
+      hostname: "example.net",
+    }),
+  )
+  expect(api.disconnectCloudflare).not.toHaveBeenCalled()
+})
+
+
+test("selects an authorized zone and provisions an apex or subdomain on the existing tunnel", async () => {
   const user = userEvent.setup()
   vi.mocked(api.authorizeCloudflare).mockResolvedValue({ accounts: [{ id: "a".repeat(32), name: "Example account", zones: [{ id: "b".repeat(32), name: "example.com" }] }] })
   vi.mocked(api.provisionCloudflare).mockResolvedValue({
@@ -226,7 +334,9 @@ test("selects an authorized zone and provisions its apex on the existing tunnel"
   await user.click(screen.getByRole("button", { name: "Connect tunnel" }))
   await screen.findByRole("button", { name: "Configure existing tunnel" })
   expect(screen.getByLabelText("Primary domain")).toHaveValue("b".repeat(32))
-  expect(screen.queryByLabelText("Public hostname")).not.toBeInTheDocument()
+  expect(screen.getByLabelText("Hostname")).toHaveValue("example.com")
+  await user.clear(screen.getByLabelText("Hostname"))
+  await user.type(screen.getByLabelText("Hostname"), "pay.example.com")
   await user.click(screen.getByRole("button", { name: "Configure existing tunnel" }))
 
   await waitFor(() => {
@@ -234,7 +344,7 @@ test("selects an authorized zone and provisions its apex on the existing tunnel"
       account_id: "a".repeat(32),
       tunnel_id: "1".repeat(32),
       zone_id: "b".repeat(32),
-      hostname: "example.com",
+      hostname: "pay.example.com",
     })
   })
   expect(api.cloudflareAuthorization).toHaveBeenCalled()

@@ -85,6 +85,13 @@ class ConnectionSecretStore:
             raise ValueError("stored connection credential must be an object")
         return payload
 
+    def list_owner_ids(self) -> list[str]:
+        with sqlite_connection(self.database_path) as connection:
+            rows = connection.execute(
+                "SELECT owner_id FROM connection_secrets ORDER BY owner_id"
+            ).fetchall()
+        return [str(row["owner_id"]) for row in rows]
+
     def delete(self, owner_id: str) -> bool:
         with sqlite_connection(self.database_path) as connection:
             cursor = connection.execute("DELETE FROM connection_secrets WHERE owner_id = ?", (owner_id,))
