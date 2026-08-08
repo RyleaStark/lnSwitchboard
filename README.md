@@ -93,6 +93,7 @@ The project OAuth application is a public client (`token_endpoint_auth_method: n
 - `zone.read` — Zone Read
 - `dns.read`, `dns.write` — DNS Read/Write
 - `workers-scripts.read`, `workers-scripts.write`, `workers-scripts.bind` — Worker source and the `vpc_network` binding
+- `connectivity-directory.bind` — authorize the Worker VPC binding to Cloudflare's connectivity directory
 - `workers-routes.read`, `workers-routes.write` — path-specific Workers Routes
 - `teams-connector-warp.read`, `teams-connector-warp.write` — Mesh/WARP connector lifecycle
 - `teams.read`, `teams.write` — Cloudflare One device and Gateway prerequisites

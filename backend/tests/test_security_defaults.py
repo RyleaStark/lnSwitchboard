@@ -169,6 +169,7 @@ def test_default_cloudflare_oauth_scope_matches_registered_capabilities(
         "workers-scripts.read",
         "workers-scripts.write",
         "workers-scripts.bind",
+        "connectivity-directory.bind",
         "workers-routes.read",
         "workers-routes.write",
         "teams-connector-warp.read",

@@ -191,6 +191,7 @@ class Settings(BaseSettings):
         default=(
             "offline_access account-settings.read zone.read dns.read dns.write "
             "workers-scripts.read workers-scripts.write workers-scripts.bind "
+            "connectivity-directory.bind "
             "workers-routes.read workers-routes.write "
             "teams-connector-warp.read teams-connector-warp.write "
             "teams.read teams.write access.read access.write"
