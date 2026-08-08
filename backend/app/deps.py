@@ -19,7 +19,7 @@ from .nostr_signer_store import NostrSignerStore
 from .nostr_zaps import NostrZapPublisher
 from .nip05_store import NostrIdentityStore
 from .rate_limiter import RateLimiter
-from .request_utils import get_client_ip, get_proxy_debug_info
+from .request_utils import get_client_ip
 from .tailscale_connector import TailscaleConnector
 from .tailscale_service import TailscaleService
 from .webhook_dispatcher import WebhookDispatcher
@@ -216,7 +216,9 @@ async def enforce_rate_limit(
             domain=domain,
             status="blocked",
             message="rate limit exceeded",
-            details={"proxy": get_proxy_debug_info(request)},
+            # Deliberately slim: blocked floods must not let an attacker grow
+            # request-log rows with per-request proxy debug payloads.
+            details={},
         )
         await storage.append(entry)
         raise HTTPException(
