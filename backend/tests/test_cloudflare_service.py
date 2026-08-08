@@ -606,6 +606,8 @@ async def test_mesh_provision_creates_node_worker_routes_and_dns(service_parts) 
     assert connection.public_metadata["hostname_route_id"] == ROUTE_ID
     assert connection.public_metadata["worker_version"] == LNS_WORKER_VERSION
     assert token_path.read_text() == f"MESH_NODE_TOKEN={NODE_TOKEN}\n"
+    assert token_path.stat().st_mode & 0o777 == 0o640
+    assert token_path.stat().st_gid == os.getgid()
     assert secrets.get(connection.id) == {"api_token": API_TOKEN}
     assert store.list_provisioning_journals("cloudflare") == []
     assert call_names(client) == [

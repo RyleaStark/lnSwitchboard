@@ -1926,11 +1926,17 @@ class CloudflareService:
         try:
             os.fchown(descriptor, -1, self.token_gid)
             os.fchmod(descriptor, 0o640)
-            os.write(descriptor, content.encode("utf-8"))
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary, self.token_path)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(content.encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.token_path)
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+            raise
 
     def _remove_node_token(self) -> None:
         try:
