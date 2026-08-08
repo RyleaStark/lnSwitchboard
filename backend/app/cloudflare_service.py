@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from .connection_secret_store import ConnectionSecretStore
 from .connection_store import ConnectionStore, ProviderConnection
+from .cloudflare_client import CloudflareAPIError
 
 _AUTHORIZATION_PREFIX = "cloudflare-authorization:"
 _AUTHORIZATION_ID = re.compile(r"^[A-Za-z0-9_-]{32}$")
@@ -115,8 +116,14 @@ class CloudflareService:
     @staticmethod
     def _normalize_tunnel_id(value: str) -> str:
         normalized = value.strip()
+        if normalized.startswith("eyJ"):
+            raise CloudflareValidationError(
+                "A Cloudflared connector token was provided. Use the existing tunnel UUID instead."
+            )
         if not _TUNNEL_ID.fullmatch(normalized):
-            raise CloudflareValidationError("tunnel ID is invalid")
+            raise CloudflareValidationError(
+                "Tunnel ID must be the existing tunnel UUID, not a connector token."
+            )
         return normalized
 
     @staticmethod
@@ -173,20 +180,26 @@ class CloudflareService:
         tunnel = await client.get_tunnel(account_id, tunnel_id)
         if not isinstance(tunnel, dict) or str(tunnel.get("id", "")) != tunnel_id:
             raise CloudflareNotFoundError("Cloudflare tunnel was not found")
-        accounts = await client.list_accounts()
+        try:
+            accounts = await client.list_accounts()
+        except CloudflareAPIError:
+            # A selected tunnel lookup has already proven access to this account.
+            # Listing every account is optional discovery and can be denied to a
+            # correctly scoped user token.
+            accounts = []
         selected_account = next(
             (item for item in accounts if str(item.get("id", "")) == account_id),
             None,
         )
-        if not isinstance(selected_account, dict):
-            raise CloudflareValidationError(
-                "The API token cannot access the selected Cloudflare account"
-            )
         zones = await client.list_zones(account_id)
         authorized_accounts = [
             {
                 "id": account_id,
-                "name": str(selected_account.get("name", "Cloudflare account")),
+                "name": (
+                    str(selected_account.get("name", "Cloudflare account"))
+                    if isinstance(selected_account, dict)
+                    else "Selected Cloudflare account"
+                ),
                 "zones": [
                     {"id": str(zone.get("id", "")), "name": str(zone.get("name", ""))}
                     for zone in zones

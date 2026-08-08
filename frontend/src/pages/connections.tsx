@@ -714,6 +714,9 @@ function AuthorizationForm({
         <Field className="max-w-xl">
           <FieldLabel htmlFor="cloudflare-tunnel-id">Existing tunnel ID</FieldLabel>
           <Input id="cloudflare-tunnel-id" value={tunnelId} disabled={!available || pending} autoComplete="off" onChange={(event) => onTunnelChange(event.target.value)} />
+          <FieldDescription>
+            Enter the tunnel UUID from Cloudflare Zero Trust. Do not paste a Cloudflared connector token here; lnSwitchboard retrieves and stores that credential privately after authorization.
+          </FieldDescription>
         </Field>
         <h3 className="pt-2 font-medium">2. Authorize DNS access</h3>
         <Field className="max-w-xl">

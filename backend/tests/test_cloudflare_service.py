@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from backend.app.cloudflare_client import CloudflareAPIError
 from backend.app.cloudflare_service import (
     CloudflareConflictError,
     CloudflareNotFoundError,
@@ -118,6 +119,27 @@ async def test_existing_tunnel_onboarding_refuses_unknown_tunnel(service_parts, 
     monkeypatch.setattr(client, "get_tunnel", missing)
     with pytest.raises(CloudflareNotFoundError):
         await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
+
+
+@pytest.mark.anyio
+async def test_existing_tunnel_authorizes_when_account_enumeration_is_forbidden(
+    service_parts, monkeypatch
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+
+    async def forbidden_accounts() -> list[dict[str, Any]]:
+        raise CloudflareAPIError(403)
+
+    monkeypatch.setattr(client, "list_accounts", forbidden_accounts)
+    authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
+
+    assert authorization["accounts"] == [
+        {
+            "id": ACCOUNT_ID,
+            "name": "Selected Cloudflare account",
+            "zones": [{"id": ZONE_ID, "name": "example.com"}],
+        }
+    ]
 
 
 @pytest.mark.anyio
