@@ -11,6 +11,7 @@ import pytest
 from backend.app.cloudflare_client import (
     CloudflareAPIError,
     CloudflareClient,
+    CloudflareWorkersRouteProvisionError,
 )
 from backend.app.cloudflare_worker_source import (
     INTERNAL_HOSTNAME,
@@ -281,13 +282,46 @@ async def test_ensure_workers_routes_refuses_identical_pattern_on_foreign_script
         await client.ensure_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
 
     assert captured.value.status_code == 409
-    # The non-conflicting lnurlp pattern may be created, but the conflicting
-    # nostr.json pattern is never overwritten.
-    assert all(
-        json.loads(request.content)["pattern"]
-        != "pay.example.com/.well-known/nostr.json"
-        for request in posts
-    )
+    # Preflight both exact patterns before the first mutation, so an existing
+    # conflict cannot leave the other route partially provisioned.
+    assert posts == []
+
+
+@pytest.mark.anyio
+async def test_ensure_workers_routes_reports_exact_partial_ownership() -> None:
+    patterns = CloudflareClient.workers_route_patterns("pay.example.com")
+    routes: list[dict[str, Any]] = []
+    posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        if request.method == "POST":
+            posts += 1
+            payload = json.loads(request.content)
+            if posts == 1:
+                route = {"id": "created-first", **payload}
+                routes.append(route)
+                return _envelope({"id": route["id"]})
+            routes.append(
+                {
+                    "id": "foreign-second",
+                    "pattern": payload["pattern"],
+                    "script": "operator-worker",
+                }
+            )
+            return httpx.Response(
+                409,
+                json={"success": False, "errors": [{"code": 10020}], "result": None},
+            )
+        return _envelope(list(routes))
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+
+    with pytest.raises(CloudflareWorkersRouteProvisionError) as captured:
+        await client.ensure_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+
+    assert captured.value.status_code == 409
+    assert captured.value.created_routes == (("created-first", patterns[0]),)
 
 
 @pytest.mark.anyio

@@ -22,8 +22,7 @@ from ..cloudflare_oauth import (
     CloudflareOAuthReauthRequiredError,
     CloudflareOAuthStateError,
 )
-from ..connection_secret_store import ConnectionSecretStore
-from ..connection_store import ConnectionStore
+from ..cloudflare_service import CloudflareConflictError, CloudflareService
 from .. import deps as app_deps
 
 router = APIRouter(prefix="/api/cloudflare/oauth", tags=["cloudflare-oauth"])
@@ -162,59 +161,17 @@ async def delete_oauth_grant(
     grant_id: str,
     response: Response,
     manager: CloudflareOAuthManager = Depends(get_cloudflare_oauth_manager_dep),
-    connection_store: ConnectionStore = Depends(app_deps.get_connection_store_dep),
-    connection_secrets: ConnectionSecretStore = Depends(
-        app_deps.get_connection_secret_store_dep
-    ),
+    service: CloudflareService = Depends(app_deps.get_cloudflare_service_dep),
 ) -> Response:
     _set_private_no_store(response)
-    connection_ids = {
-        connection.id
-        for connection in connection_store.list_connections()
-        if connection.provider == "cloudflare"
-    }
-    for connection in connection_store.list_connections():
-        if connection.provider != "cloudflare":
-            continue
-        try:
-            credential = connection_secrets.get(connection.id) or {}
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Cloudflare connection credentials could not be verified",
-                headers=_NO_STORE_HEADERS,
-            ) from exc
-        if credential.get("grant_id") == grant_id:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "Cloudflare OAuth grant is in use by a connection; "
-                    "reconnect or disconnect it first"
-                ),
-                headers=_NO_STORE_HEADERS,
-            )
-    for owner_id in connection_secrets.list_owner_ids():
-        if owner_id in connection_ids:
-            continue
-        try:
-            credential = connection_secrets.get(owner_id) or {}
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Cloudflare authorization references could not be verified",
-                headers=_NO_STORE_HEADERS,
-            ) from exc
-        if credential.get("grant_id") == grant_id:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "Cloudflare OAuth grant is in use by pending authorization; "
-                    "finish or restart onboarding first"
-                ),
-                headers=_NO_STORE_HEADERS,
-            )
     try:
-        revoked = await manager.revoke(grant_id)
+        revoked = await service.revoke_grant_if_unused(grant_id, manager.revoke)
+    except CloudflareConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+            headers=_NO_STORE_HEADERS,
+        ) from exc
     except CloudflareOAuthGrantNotFoundError:
         revoked = False
     if not revoked:

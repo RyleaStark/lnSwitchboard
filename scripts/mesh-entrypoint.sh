@@ -5,8 +5,9 @@
 # but lnSwitchboard provisions the node token AFTER the stack starts (there is
 # no Docker socket access by design). Mirror the cloudflared --token-file
 # pattern: exit until the app writes the token file, letting the compose
-# restart policy re-enter until provisioning completes, then exec the real
-# entrypoint with the token exported from the mounted file.
+# restart policy re-enter until provisioning completes. Once started, supervise
+# the real entrypoint so deleting or replacing the token file revokes the local
+# connector even when only the lnSwitchboard application process restarts.
 set -eu
 
 TOKEN_FILE="${MESH_NODE_TOKEN_FILE:-/run/lnswitchboard/node.env}"
@@ -23,4 +24,31 @@ if [ -z "$TOKEN" ]; then
 fi
 
 export MESH_NODE_TOKEN="$TOKEN"
-exec /entrypoint "$@"
+
+terminate_child() {
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+}
+
+/entrypoint "$@" &
+CHILD_PID=$!
+trap 'terminate_child; exit 143' HUP INT TERM
+
+while kill -0 "$CHILD_PID" 2>/dev/null; do
+    sleep 2
+    CURRENT_TOKEN="$(
+        { sed -n 's/^MESH_NODE_TOKEN=//p' "$TOKEN_FILE" 2>/dev/null || true; } |
+            tr -d '[:space:]'
+    )"
+    if [ "$CURRENT_TOKEN" != "$TOKEN" ]; then
+        echo "mesh node authorization was withdrawn; stopping connector" >&2
+        terminate_child
+        exit 1
+    fi
+done
+
+set +e
+wait "$CHILD_PID"
+STATUS=$?
+set -e
+exit "$STATUS"

@@ -9,7 +9,10 @@ from typing import Any
 
 import pytest
 
-from backend.app.cloudflare_client import CloudflareAPIError
+from backend.app.cloudflare_client import (
+    CloudflareAPIError,
+    CloudflareWorkersRouteProvisionError,
+)
 from backend.app.cloudflare_service import (
     PREREQ_METADATA_KEY,
     CloudflareConflictError,
@@ -500,6 +503,60 @@ async def test_oauth_grant_account_discovery_does_not_create_authorization(
 
 
 @pytest.mark.anyio
+async def test_grant_revocation_serializes_reference_creation(tmp_path: Path) -> None:
+    store = ConnectionStore(tmp_path / "connections.db")
+    secrets = ConnectionSecretStore(
+        tmp_path / "connections.db", tmp_path / "secrets.key"
+    )
+    client = FakeCloudflareClient()
+    revoke_entered = asyncio.Event()
+    allow_revoke = asyncio.Event()
+    grant_active = True
+
+    async def resolver(_grant_id: str) -> str:
+        if not grant_active:
+            raise CloudflareServiceError("grant unavailable")
+        return "access-token"
+
+    async def revoker(_grant_id: str) -> bool:
+        nonlocal grant_active
+        revoke_entered.set()
+        await allow_revoke.wait()
+        grant_active = False
+        return True
+
+    service = CloudflareService(
+        store=store,
+        secrets=secrets,
+        client_factory=lambda _token: client,
+        connector_enabled=True,
+        token_path=tmp_path / "mesh" / "node.env",
+        origin_url="http://app:21212",
+        token_gid=os.getgid(),
+        access_token_resolver=resolver,
+    )
+
+    revoke_task = asyncio.create_task(
+        service.revoke_grant_if_unused("race-grant", revoker)
+    )
+    await revoke_entered.wait()
+    authorize_task = asyncio.create_task(
+        service.authorize_grant("race-grant", ACCOUNT_ID)
+    )
+    await asyncio.sleep(0)
+    assert not authorize_task.done()
+
+    allow_revoke.set()
+    assert await revoke_task is True
+    with pytest.raises(CloudflareServiceError, match="grant unavailable"):
+        await authorize_task
+    assert not any(
+        owner.startswith("cloudflare-authorization:")
+        for owner in secrets.list_owner_ids()
+    )
+
+
+@pytest.mark.anyio
 async def test_oauth_reauthorization_replaces_grant_without_remote_mutation(
     tmp_path: Path,
 ) -> None:
@@ -530,7 +587,10 @@ async def test_oauth_reauthorization_replaces_grant_without_remote_mutation(
         account_id=ACCOUNT_ID,
         public_metadata={},
     )
-    secrets.set(connection.id, {"grant_id": "expired-grant"})
+    secrets.set(
+        connection.id,
+        {"grant_id": "expired-grant", "mesh_ingress_key": "existing-ingress-key"},
+    )
     authorization_id = "a" * 32
     authorization_owner = f"cloudflare-authorization:{authorization_id}"
     secrets.set(
@@ -545,7 +605,10 @@ async def test_oauth_reauthorization_replaces_grant_without_remote_mutation(
     result = await service.reauthorize(connection.id, authorization_id)
 
     assert result.id == connection.id
-    assert secrets.get(connection.id) == {"grant_id": "replacement-grant"}
+    assert secrets.get(connection.id) == {
+        "grant_id": "replacement-grant",
+        "mesh_ingress_key": "existing-ingress-key",
+    }
     assert secrets.get(authorization_owner) is None
     assert client.calls == [("verify_token", None)]
 
@@ -714,6 +777,69 @@ async def test_recovery_revokes_mesh_token_for_incomplete_connection(
     assert recovered.last_error == (
         "Interrupted Cloudflare provisioning was revoked; disconnect and retry"
     )
+
+
+@pytest.mark.anyio
+async def test_recovery_retries_failed_interrupted_node_revocation(
+    service_parts,
+) -> None:
+    service, store, secrets, client, token_path = service_parts
+    connection = store.upsert_connection(
+        provider="cloudflare",
+        external_id="lnswitchboard-interrupted-retry",
+        label="Cloudflare Mesh",
+        status="provisioning",
+        account_id=ACCOUNT_ID,
+        public_metadata={"mesh_node_id": NODE_ID},
+    )
+    secrets.set(
+        connection.id,
+        {"api_token": API_TOKEN, "mesh_ingress_key": "mesh-key"},
+    )
+    client.mesh_nodes[NODE_ID] = {
+        "id": NODE_ID,
+        "name": connection.external_id,
+    }
+    client.delete_node_error = CloudflareAPIError(503)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(f"MESH_NODE_TOKEN={NODE_TOKEN}\n")
+
+    with pytest.raises(
+        CloudflareServiceError,
+        match="Interrupted Cloudflare provisioning cleanup failed",
+    ):
+        await service.recover_incomplete_provisioning()
+
+    assert not token_path.exists()
+    pending = store.get_connection(connection.id)
+    assert pending is not None
+    assert pending.status == "error"
+    assert pending.public_metadata["interrupted_cleanup_pending"] is True
+    assert NODE_ID in client.mesh_nodes
+
+    client.delete_node_error = None
+    await service.recover_incomplete_provisioning()
+
+    recovered = store.get_connection(connection.id)
+    assert recovered is not None
+    assert "interrupted_cleanup_pending" not in recovered.public_metadata
+    assert NODE_ID not in client.mesh_nodes
+
+
+@pytest.mark.anyio
+async def test_recovery_preserves_committed_provisioning(service_parts) -> None:
+    service, store, _secrets, client, token_path = service_parts
+    connection = await authorize_and_provision(service)
+    client.calls.clear()
+
+    await service.recover_incomplete_provisioning()
+
+    recovered = store.get_connection(connection.id)
+    assert recovered is not None
+    assert recovered.status == "provisioning"
+    assert recovered.public_metadata["provisioning_committed"] is True
+    assert token_path.exists()
+    assert "delete_mesh_node" not in call_names(client)
 
 
 @pytest.mark.anyio
@@ -1311,6 +1437,36 @@ async def test_failed_provision_preserves_adopted_worker_route(
 
 
 @pytest.mark.anyio
+async def test_failed_provision_rolls_back_exact_partially_created_worker_route(
+    service_parts, monkeypatch
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    pattern = "example.com/.well-known/lnurlp/*"
+
+    async def fail_after_first_route(
+        zone_id: str, hostname: str, script_name: str
+    ) -> list[tuple[str, str]]:
+        route = {
+            "id": "created-first",
+            "zone_id": zone_id,
+            "pattern": pattern,
+            "script": script_name,
+        }
+        client.workers_routes.append(route)
+        raise CloudflareWorkersRouteProvisionError(
+            CloudflareAPIError(409), [("created-first", pattern)]
+        )
+
+    monkeypatch.setattr(client, "ensure_workers_routes", fail_after_first_route)
+
+    with pytest.raises(CloudflareWorkersRouteProvisionError):
+        await authorize_and_provision(service)
+
+    assert client.workers_routes == []
+    assert "remove_workers_routes" in call_names(client)
+
+
+@pytest.mark.anyio
 async def test_failed_provision_never_deletes_adopted_hostname_route(
     service_parts, monkeypatch
 ) -> None:
@@ -1334,6 +1490,38 @@ async def test_failed_provision_never_deletes_adopted_hostname_route(
         await authorize_and_provision(service)
 
     assert client.hostname_routes[0]["id"] == ROUTE_ID
+    assert "delete_hostname_route" not in call_names(client)
+
+
+@pytest.mark.anyio
+async def test_failed_provision_revalidates_created_hostname_route_before_delete(
+    service_parts, monkeypatch
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.ensure_routes_error = CloudflareAPIError(500)
+    original_get = client.get_hostname_route
+
+    async def retarget_before_rollback(
+        account_id: str, route_id: str
+    ) -> dict[str, Any] | None:
+        for route in client.hostname_routes:
+            if route["id"] == route_id:
+                route["tunnel_id"] = "operator-node"
+        return await original_get(account_id, route_id)
+
+    monkeypatch.setattr(client, "get_hostname_route", retarget_before_rollback)
+
+    with pytest.raises(CloudflareAPIError):
+        await authorize_and_provision(service)
+
+    assert client.hostname_routes == [
+        {
+            "id": ROUTE_ID,
+            "hostname": INTERNAL_HOSTNAME,
+            "tunnel_id": "operator-node",
+            "comment": MANAGED_COMMENT,
+        }
+    ]
     assert "delete_hostname_route" not in call_names(client)
 
 

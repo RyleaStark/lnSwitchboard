@@ -235,8 +235,9 @@ async def lifespan(app: FastAPI):
         try:
             cloudflare_service = await get_cloudflare_service_dep()
             await cloudflare_service.recover_incomplete_provisioning()
-        except Exception as exc:  # pragma: no cover - network runtime
-            LOGGER.warning("Unable to recover incomplete Cloudflare provisioning: %s", exc)
+        except Exception:  # pragma: no cover - network runtime
+            LOGGER.error("Unable to recover incomplete Cloudflare provisioning")
+            raise
         else:
             (await get_cloudflare_oauth_manager_dep()).purge_expired_flows()
 
@@ -456,10 +457,12 @@ public_app = FastAPI(
 async def sanitize_cloudflare_oauth_validation(
     request: Request, exc: RequestValidationError
 ):
-    if request.url.path.startswith("/api/cloudflare/oauth"):
+    if request.url.path.startswith(
+        ("/api/cloudflare/oauth", "/api/connections/cloudflare")
+    ):
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            content={"detail": "Invalid Cloudflare OAuth request"},
+            content={"detail": "Invalid Cloudflare request"},
         )
     return await request_validation_exception_handler(request, exc)
 

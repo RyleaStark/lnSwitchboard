@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlsplit
 
-from .cloudflare_client import PLACEHOLDER_DNS_CONTENT, CloudflareAPIError
+from .cloudflare_client import (
+    PLACEHOLDER_DNS_CONTENT,
+    CloudflareAPIError,
+    CloudflareWorkersRouteProvisionError,
+)
 from .cloudflare_worker_source import (
     INTERNAL_HOSTNAME,
     LNS_WORKER_VERSION,
@@ -42,6 +46,8 @@ DEFAULT_CGNAT_EXCLUSION = "100.64.0.0/10"
 MESH_INCLUDE_DESCRIPTION = "Cloudflare Mesh device IPs (managed by lnSwitchboard)"
 WARP_ENROLLMENT_APP_NAME = "Warp device enrollment"
 PREREQ_METADATA_KEY = "cloudflare_one_prerequisites"
+PROVISIONING_COMMITTED_KEY = "provisioning_committed"
+INTERRUPTED_CLEANUP_PENDING_KEY = "interrupted_cleanup_pending"
 _PREREQ_PASSED = "passed"
 _PREREQ_CONFIGURED = "configured"
 _PREREQ_MANUAL = "needs-manual-action"
@@ -269,19 +275,22 @@ class CloudflareService:
 
     async def authorize_grant(self, grant_id: str, account_id: str) -> dict[str, Any]:
         """Authorize via an OAuth grant instead of a pasted API token."""
-        self._require_connector()
-        grant_id = grant_id.strip()
-        if not grant_id:
-            raise CloudflareValidationError("Cloudflare authorization grant is required")
-        if self.access_token_resolver is None:
-            raise CloudflareServiceError("Cloudflare OAuth access is unavailable")
-        access_token = await self.access_token_resolver(grant_id)
-        account_id = self._normalize_resource_id(account_id, "account ID")
-        client = self.client_factory(access_token)
-        authorized_accounts = await self._verify_and_list(client, account_id)
-        return self._store_authorization(
-            {"grant_id": grant_id, "account_id": account_id}, authorized_accounts
-        )
+        async with self._provision_lock:
+            self._require_connector()
+            grant_id = grant_id.strip()
+            if not grant_id:
+                raise CloudflareValidationError(
+                    "Cloudflare authorization grant is required"
+                )
+            if self.access_token_resolver is None:
+                raise CloudflareServiceError("Cloudflare OAuth access is unavailable")
+            access_token = await self.access_token_resolver(grant_id)
+            account_id = self._normalize_resource_id(account_id, "account ID")
+            client = self.client_factory(access_token)
+            authorized_accounts = await self._verify_and_list(client, account_id)
+            return self._store_authorization(
+                {"grant_id": grant_id, "account_id": account_id}, authorized_accounts
+            )
 
     async def discover_grant_accounts(self, grant_id: str) -> list[dict[str, str]]:
         """List the accounts selected during OAuth consent without storing a capability."""
@@ -359,6 +368,47 @@ class CloudflareService:
     def cancel_authorization(self, authorization_id: str) -> bool:
         return self.secrets.delete(f"{_AUTHORIZATION_PREFIX}{authorization_id}")
 
+    async def revoke_grant_if_unused(
+        self,
+        grant_id: str,
+        revoker: Callable[[str], Awaitable[bool]],
+    ) -> bool:
+        """Recheck durable grant references and revoke under one lifecycle lock."""
+
+        async with self._provision_lock:
+            connection_ids = {
+                connection.id
+                for connection in self.store.list_connections()
+                if connection.provider == "cloudflare"
+            }
+            for connection_id in connection_ids:
+                try:
+                    credential = self.secrets.get(connection_id) or {}
+                except ValueError as exc:
+                    raise CloudflareConflictError(
+                        "Cloudflare connection credentials could not be verified"
+                    ) from exc
+                if credential.get("grant_id") == grant_id:
+                    raise CloudflareConflictError(
+                        "Cloudflare OAuth grant is in use by a connection; "
+                        "reconnect or disconnect it first"
+                    )
+            for owner_id in self.secrets.list_owner_ids():
+                if owner_id in connection_ids:
+                    continue
+                try:
+                    credential = self.secrets.get(owner_id) or {}
+                except ValueError as exc:
+                    raise CloudflareConflictError(
+                        "Cloudflare authorization references could not be verified"
+                    ) from exc
+                if credential.get("grant_id") == grant_id:
+                    raise CloudflareConflictError(
+                        "Cloudflare OAuth grant is in use by pending authorization; "
+                        "finish or restart onboarding first"
+                    )
+            return await revoker(grant_id)
+
     async def reauthorize(
         self, connection_id: str, authorization_id: str
     ) -> ProviderConnection:
@@ -386,7 +436,15 @@ class CloudflareService:
                 raise CloudflareServiceError(
                     "Cloudflare connection credentials are unavailable"
                 )
-            self.secrets.set(connection.id, {"grant_id": grant_id})
+            mesh_ingress_key = previous.get("mesh_ingress_key")
+            if not isinstance(mesh_ingress_key, str) or not mesh_ingress_key:
+                raise CloudflareServiceError(
+                    "Cloudflare connection credentials are unavailable"
+                )
+            self.secrets.set(
+                connection.id,
+                {"grant_id": grant_id, "mesh_ingress_key": mesh_ingress_key},
+            )
             if not self.secrets.delete(authorization_owner):
                 self.secrets.set(connection.id, previous)
                 raise CloudflareServiceError(
@@ -911,9 +969,13 @@ class CloudflareService:
                 connection, metadata, hostname, zone_id, dns_record_id
             )
 
-            progress["routes_created"] = await client.ensure_workers_routes(
-                zone_id, hostname, WORKER_SCRIPT_NAME
-            )
+            try:
+                progress["routes_created"] = await client.ensure_workers_routes(
+                    zone_id, hostname, WORKER_SCRIPT_NAME
+                )
+            except CloudflareWorkersRouteProvisionError as exc:
+                progress["routes_created"] = list(exc.created_routes)
+                raise
 
             if not dns_adopted and dns_record_id is not None:
                 record = await client.get_dns_record(zone_id, dns_record_id)
@@ -925,6 +987,10 @@ class CloudflareService:
                 zone_id, hostname, WORKER_SCRIPT_NAME
             ):
                 raise CloudflareAPIError(502)
+            metadata[PROVISIONING_COMMITTED_KEY] = True
+            connection = self._persist_provisioning(
+                connection, metadata, hostname, zone_id, dns_record_id
+            )
             self.secrets.delete(authorization_owner)
         except Exception as exc:
             cleanup_errors = await self._rollback_failed_provision(
@@ -1020,9 +1086,15 @@ class CloudflareService:
             and progress["hostname_route_created"]
         ):
             try:
-                await client.delete_hostname_route(
-                    account_id, progress["hostname_route_id"]
-                )
+                route_id = str(progress["hostname_route_id"])
+                node_id = progress["node_id"]
+                current_route = await client.get_hostname_route(account_id, route_id)
+                if current_route is not None and self._hostname_route_is_owned(
+                    current_route,
+                    route_id=route_id,
+                    node_id=(str(node_id) if node_id is not None else None),
+                ):
+                    await client.delete_hostname_route(account_id, route_id)
             except Exception as exc:
                 errors.append(type(exc).__name__)
         if progress["node_attempted"]:
@@ -1356,9 +1428,13 @@ class CloudflareService:
                     ],
                 )
                 connection = self._require_connection(connection.id)
-                routes_created = await client.ensure_workers_routes(
-                    zone_id, hostname, WORKER_SCRIPT_NAME
-                )
+                try:
+                    routes_created = await client.ensure_workers_routes(
+                        zone_id, hostname, WORKER_SCRIPT_NAME
+                    )
+                except CloudflareWorkersRouteProvisionError as exc:
+                    routes_created = list(exc.created_routes)
+                    raise
             except Exception as exc:
                 cleanup_errors: list[str] = []
                 for route_id, pattern in reversed(routes_created):
@@ -1864,6 +1940,12 @@ class CloudflareService:
 
         self.purge_expired_authorizations()
         live_connections = self.store.list_connections()
+        legacy_journals = self.store.list_provisioning_journals("cloudflare")
+        legacy_connection_ids = {
+            journal.external_id
+            for journal in legacy_journals
+            if isinstance(journal.external_id, str) and journal.external_id
+        }
         live_connection_ids = {item.id for item in live_connections}
         for owner_id in self.secrets.list_owner_ids():
             if owner_id.startswith(_AUTHORIZATION_PREFIX):
@@ -1878,47 +1960,86 @@ class CloudflareService:
         # sidecar authenticated as a partially provisioned connector. Remove
         # the local token before the sidecar health dependency can start it,
         # then revoke only the exact node whose durable ID and name still match.
+        cleanup_failed = False
         for connection in live_connections:
-            if connection.provider != "cloudflare" or connection.status != "provisioning":
+            metadata = dict(connection.public_metadata)
+            interrupted = (
+                connection.status == "provisioning"
+                or metadata.get(INTERRUPTED_CLEANUP_PENDING_KEY) is True
+            )
+            if connection.provider != "cloudflare" or not interrupted:
+                continue
+            if connection.external_id in legacy_connection_ids:
+                self._remove_node_token()
+                continue
+            if metadata.get(PROVISIONING_COMMITTED_KEY) is True:
                 continue
             self._remove_node_token()
-            node_id = connection.public_metadata.get("mesh_node_id")
+            node_id = metadata.get("mesh_node_id")
             credential = self.secrets.get(connection.id)
             last_error = (
                 "Interrupted Cloudflare provisioning could not be reconciled; "
                 "disconnect and retry"
             )
-            if isinstance(node_id, str) and node_id and credential is not None:
-                try:
-                    client = await self._client_from_payload(connection.id, credential)
+            revoked = False
+            try:
+                if credential is None:
+                    raise CloudflareServiceError(
+                        "Cloudflare authorization is unavailable"
+                    )
+                client = await self._client_from_payload(connection.id, credential)
+                if not isinstance(node_id, str) or not node_id:
+                    found = await client.find_mesh_node_by_name(
+                        str(connection.account_id), connection.external_id
+                    )
+                    node_id = (
+                        str(found.get("id", ""))
+                        if isinstance(found, dict)
+                        and str(found.get("name", "")) == connection.external_id
+                        else None
+                    )
+                if isinstance(node_id, str) and node_id:
                     node = await client.get_mesh_node(
                         str(connection.account_id), node_id
                     )
-                    if (
-                        isinstance(node, dict)
-                        and str(node.get("id", "")) == node_id
-                        and str(node.get("name", "")) == connection.external_id
-                    ):
+                    if node is not None:
+                        if not (
+                            isinstance(node, dict)
+                            and str(node.get("id", "")) == node_id
+                            and str(node.get("name", "")) == connection.external_id
+                        ):
+                            raise CloudflareConflictError(
+                                "Interrupted Cloudflare Mesh node changed ownership"
+                            )
                         await client.delete_mesh_node(
                             str(connection.account_id), node_id
                         )
-                        last_error = (
-                            "Interrupted Cloudflare provisioning was revoked; "
-                            "disconnect and retry"
-                        )
-                except (CloudflareAPIError, CloudflareServiceError):
-                    pass
+                revoked = True
+            except (CloudflareAPIError, CloudflareServiceError):
+                cleanup_failed = True
+            if revoked:
+                metadata.pop(INTERRUPTED_CLEANUP_PENDING_KEY, None)
+                last_error = (
+                    "Interrupted Cloudflare provisioning was revoked; "
+                    "disconnect and retry"
+                )
+            else:
+                metadata[INTERRUPTED_CLEANUP_PENDING_KEY] = True
             self.store.upsert_connection(
                 provider="cloudflare",
                 external_id=connection.external_id,
                 label=connection.label,
                 status="error",
                 account_id=connection.account_id,
-                public_metadata=connection.public_metadata,
+                public_metadata=metadata,
                 last_error=last_error,
             )
+        if cleanup_failed:
+            raise CloudflareServiceError(
+                "Interrupted Cloudflare provisioning cleanup failed"
+            )
 
-        for journal in self.store.list_provisioning_journals("cloudflare"):
+        for journal in legacy_journals:
             if journal.phase == "committed":
                 self.store.delete_provisioning_journal(journal.id)
                 continue

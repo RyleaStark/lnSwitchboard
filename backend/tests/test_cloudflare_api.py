@@ -167,6 +167,23 @@ def test_cloudflare_oauth_validation_never_reflects_code_and_is_private(
     assert response.headers["pragma"] == "no-cache"
 
 
+def test_cloudflare_grant_validation_never_reflects_grant_and_is_private(
+    test_client,
+) -> None:
+    sentinel = "oauth-grant-must-not-be-reflected-" * 100
+
+    response = test_client.post(
+        "/api/connections/cloudflare/authorize",
+        json={"grant_id": sentinel, "account_id": ACCOUNT_ID},
+    )
+
+    assert response.status_code == 422
+    assert sentinel not in response.text
+    assert response.json() == {"detail": "Invalid Cloudflare request"}
+    assert response.headers["cache-control"] == "no-store, private"
+    assert response.headers["pragma"] == "no-cache"
+
+
 def test_cloudflare_oauth_landing_route_is_served_by_the_spa(test_client) -> None:
     response = test_client.get(
         "/connections/cloudflare/?cloudflare=connected",

@@ -54,6 +54,18 @@ class CloudflareRollbackError(CloudflareAPIError):
     """A remote mutation whose rollback could not be safely completed."""
 
 
+class CloudflareWorkersRouteProvisionError(CloudflareAPIError):
+    """Workers Route provisioning failed after creating known route IDs."""
+
+    def __init__(
+        self,
+        cause: CloudflareAPIError,
+        created_routes: list[tuple[str, str]],
+    ) -> None:
+        super().__init__(cause.status_code, cause.error_codes, cause.messages)
+        self.created_routes = tuple(created_routes)
+
+
 class CloudflareClient:
     def __init__(
         self,
@@ -472,12 +484,10 @@ class CloudflareClient:
         attached to OUR script is adopted (idempotent retry).
         """
         existing = await self.list_workers_routes(zone_id)
-        created: list[tuple[str, str]] = []
+        missing: list[str] = []
         for pattern in self.workers_route_patterns(hostname):
             matches = [
-                route
-                for route in existing
-                if route.get("pattern") == pattern
+                route for route in existing if route.get("pattern") == pattern
             ]
             if any(route.get("script") == script_name for route in matches):
                 continue
@@ -488,12 +498,16 @@ class CloudflareClient:
                         f"Workers route {pattern} is already attached to another script"
                     ],
                 )
+            missing.append(pattern)
+
+        created: list[tuple[str, str]] = []
+        for pattern in missing:
             try:
                 route_id = await self._create_workers_route(
                     zone_id, pattern, script_name
                 )
                 created.append((route_id, pattern))
-            except CloudflareAPIError:
+            except CloudflareAPIError as exc:
                 # The create may have succeeded despite a lost/errored
                 # response; reconcile by re-listing before surfacing failure.
                 refreshed = await self.list_workers_routes(zone_id)
@@ -502,6 +516,10 @@ class CloudflareClient:
                     and route.get("script") == script_name
                     for route in refreshed
                 ):
+                    if created:
+                        raise CloudflareWorkersRouteProvisionError(
+                            exc, created
+                        ) from exc
                     raise
                 # An errored response is not sufficient proof that this
                 # operation created the route, so rollback must preserve it.

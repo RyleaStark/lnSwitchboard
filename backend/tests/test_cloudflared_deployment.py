@@ -60,3 +60,13 @@ def test_cloudflare_onboarding_uses_oauth_configuration() -> None:
     assert "cloudflare_oauth_client_id" in config
     assert "cloudflare_oauth_authorize_url" in config
     assert "cloudflare_oauth_token_url" in config
+
+
+def test_mesh_entrypoint_stops_connector_when_token_file_changes() -> None:
+    script = (ROOT / "scripts" / "mesh-entrypoint.sh").read_text(encoding="utf-8")
+
+    assert '/entrypoint "$@" &' in script
+    assert 'CURRENT_TOKEN="$(' in script
+    assert 'if [ "$CURRENT_TOKEN" != "$TOKEN" ]' in script
+    assert 'kill -TERM "$CHILD_PID"' in script
+    assert 'exec /entrypoint "$@"' not in script

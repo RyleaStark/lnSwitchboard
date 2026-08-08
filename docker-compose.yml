@@ -1,6 +1,6 @@
 services:
   lnswitchboard:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc13}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc14}
     container_name: lnswitchboard
     restart: unless-stopped
     environment:

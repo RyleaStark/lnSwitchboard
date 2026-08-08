@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -41,6 +42,17 @@ def test_rc_publication_requires_successful_exact_sha_ci_before_write_access() -
     assert "refs/heads/main" in gate_script
     assert publish["needs"] == "verify-ci"
     assert publish["permissions"]["packages"] == "write"
+
+
+def test_rc_registry_vacancy_probe_authenticates_with_the_fetched_token() -> None:
+    workflow = _workflow()
+    publish_script = "\n".join(
+        step.get("run", "") for step in workflow["jobs"]["publish"]["steps"]
+    )
+
+    assert re.search(
+        r'-H "Authorization: Bearer \$\{?TOKEN\}?"', publish_script
+    )
 
 
 def test_compose_application_image_matches_version_file() -> None:
