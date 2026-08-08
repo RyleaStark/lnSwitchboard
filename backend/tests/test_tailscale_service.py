@@ -362,6 +362,7 @@ def test_poll_login_registers_only_authoritative_hostname_after_prerequisites(
     assert connection["public_metadata"] == {
         "device_name": "lns",
         "origin": "http://127.0.0.1:21212",
+        "key_expiry_enabled": False,
     }
     assert connection["domains"][0]["hostname"] == "lns.example.ts.net"
     assert ("enable", None) in connector.calls
