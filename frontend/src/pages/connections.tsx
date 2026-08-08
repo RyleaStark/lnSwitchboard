@@ -49,7 +49,6 @@ function CloudflareConnectionsPage() {
   const [accountId, setAccountId] = useState("")
   const [tunnelId, setTunnelId] = useState("")
   const [zoneId, setZoneId] = useState("")
-  const [hostname, setHostname] = useState("")
   const [apiToken, setApiToken] = useState("")
   const [authorizing, setAuthorizing] = useState(false)
 
@@ -92,7 +91,6 @@ function CloudflareConnectionsPage() {
   const provision = useMutation({
     mutationFn: api.provisionCloudflare,
     onSuccess: async () => {
-      setHostname("")
       queryClient.removeQueries({ queryKey: ["cloudflare-authorization"] })
       await queryClient.invalidateQueries({ queryKey: ["connections"] })
       toast.success("Cloudflare Tunnel is provisioning")
@@ -186,19 +184,23 @@ function CloudflareConnectionsPage() {
             <ProvisionForm
               accountId={accountId}
               tunnelId={tunnelId}
+              zones={authorization.accounts.find((account) => account.id === accountId)?.zones ?? []}
               zoneId={zoneId}
-              hostname={hostname}
               pending={provision.isPending}
-              onHostnameChange={setHostname}
+              onZoneChange={setZoneId}
               onBack={() => cancelAuthorization.mutate()}
-              onSubmit={() =>
+              onSubmit={() => {
+                const zone = authorization.accounts
+                  .find((account) => account.id === accountId)
+                  ?.zones.find((item) => item.id === zoneId)
+                if (!zone) return
                 provision.mutate({
                   account_id: accountId,
                   tunnel_id: tunnelId,
                   zone_id: zoneId,
-                  hostname: hostname.trim(),
+                  hostname: zone.name,
                 })
-              }
+              }}
             />
           ) : (
             <AuthorizationForm
@@ -786,34 +788,36 @@ function AuthorizationForm({
 function ProvisionForm({
   accountId,
   tunnelId,
+  zones,
   zoneId,
-  hostname,
   pending,
-  onHostnameChange,
+  onZoneChange,
   onBack,
   onSubmit,
 }: {
   accountId: string
   tunnelId: string
+  zones: Array<{ id: string; name: string }>
   zoneId: string
-  hostname: string
   pending: boolean
-  onHostnameChange: (value: string) => void
+  onZoneChange: (value: string) => void
   onBack: () => void
   onSubmit: () => void
 }) {
-  const ready = Boolean(accountId && tunnelId && zoneId && hostname.trim())
+  const selectedZone = zones.find((zone) => zone.id === zoneId)
   return (
     <FieldGroup className="max-w-2xl">
       <Field><FieldLabel>Cloudflare account ID</FieldLabel><Input value={accountId} disabled /></Field>
       <Field><FieldLabel>Existing tunnel ID</FieldLabel><Input value={tunnelId} disabled /></Field>
-      <Field><FieldLabel>Zone ID</FieldLabel><Input value={zoneId} disabled /></Field>
       <Field>
-        <FieldLabel htmlFor="cloudflare-hostname">Public hostname</FieldLabel>
-        <Input id="cloudflare-hostname" value={hostname} disabled={pending} placeholder="pay.example.com" autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={(event) => onHostnameChange(event.target.value)} />
-        <FieldDescription>lnSwitchboard checks this exact hostname before creating an owned DNS record. Existing records are never overwritten.</FieldDescription>
+        <FieldLabel htmlFor="cloudflare-zone">Primary domain</FieldLabel>
+        <select id="cloudflare-zone" value={zoneId} disabled={pending} onChange={(event) => onZoneChange(event.target.value)} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none md:text-sm">
+          {zones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
+        </select>
+        <FieldDescription>Lightning Addresses use this zone’s apex. lnSwitchboard adds only the two required Zero Trust Public Hostname paths: LNURL-pay and NIP-05.</FieldDescription>
       </Field>
-      <div className="flex flex-wrap gap-2"><Button type="button" disabled={!ready || pending} onClick={onSubmit}>{pending ? "Configuring tunnel…" : "Configure existing tunnel"}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onBack}>Back</Button></div>
+      {selectedZone ? <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">Public hostname: <span className="font-medium text-foreground">{selectedZone.name}</span></p> : null}
+      <div className="flex flex-wrap gap-2"><Button type="button" disabled={!selectedZone || pending} onClick={onSubmit}>{pending ? "Configuring tunnel…" : "Configure existing tunnel"}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onBack}>Back</Button></div>
     </FieldGroup>
   )
 }

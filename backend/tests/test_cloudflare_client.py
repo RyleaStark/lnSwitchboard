@@ -57,7 +57,8 @@ async def test_client_builds_remote_tunnel_dns_and_public_only_ingress() -> None
     assert config_body == {
         "config": {
             "ingress": [
-                {"hostname": "pay.example.com", "service": "http://app:21212"},
+                {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
+                {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
                 {"service": "http_status:404"},
             ]
         }
@@ -68,18 +69,20 @@ async def test_client_builds_remote_tunnel_dns_and_public_only_ingress() -> None
     assert dns_body["proxied"] is True
 
 
-def test_tunnel_ingress_override_preserves_unrelated_routes() -> None:
+def test_tunnel_ingress_override_preserves_unrelated_public_hostnames() -> None:
     ingress = [
         {"hostname": "other.example.com", "service": "http://other:8080"},
-        {"hostname": "pay.example.com", "service": "http://old:21212"},
+        {"hostname": "pay.example.com", "path": "/other", "service": "http://old:21212"},
         {"service": "http_status:404"},
     ]
 
-    assert CloudflareClient._override_ingress_route(
+    assert CloudflareClient._override_ingress_routes(
         ingress, "pay.example.com", "http://app:21212"
     ) == [
         {"hostname": "other.example.com", "service": "http://other:8080"},
-        {"hostname": "pay.example.com", "service": "http://app:21212"},
+        {"hostname": "pay.example.com", "path": "/other", "service": "http://old:21212"},
+        {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
+        {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
         {"service": "http_status:404"},
     ]
 

@@ -193,7 +193,7 @@ test("keeps connected management controls active when onboarding capability is u
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled()
 })
 
-test("collects explicit IDs and provisions the selected hostname on the existing tunnel", async () => {
+test("selects an authorized zone and provisions its apex on the existing tunnel", async () => {
   const user = userEvent.setup()
   vi.mocked(api.authorizeCloudflare).mockResolvedValue({ accounts: [{ id: "a".repeat(32), name: "Example account", zones: [{ id: "b".repeat(32), name: "example.com" }] }] })
   vi.mocked(api.provisionCloudflare).mockResolvedValue({
@@ -209,7 +209,7 @@ test("collects explicit IDs and provisions the selected hostname on the existing
     updated_at: "2026-08-04T00:00:00Z",
     domains: [
       {
-        hostname: "pay.example.com",
+        hostname: "example.com",
         status: "pending",
         zone_id: "b".repeat(32),
         external_id: "dns-id",
@@ -225,7 +225,8 @@ test("collects explicit IDs and provisions the selected hostname on the existing
   await user.type(screen.getByLabelText(/API token/i), "cloudflare-token-secret")
   await user.click(screen.getByRole("button", { name: "Connect tunnel" }))
   await screen.findByRole("button", { name: "Configure existing tunnel" })
-  await user.type(screen.getByLabelText("Public hostname"), "pay.example.com")
+  expect(screen.getByLabelText("Primary domain")).toHaveValue("b".repeat(32))
+  expect(screen.queryByLabelText("Public hostname")).not.toBeInTheDocument()
   await user.click(screen.getByRole("button", { name: "Configure existing tunnel" }))
 
   await waitFor(() => {
@@ -233,7 +234,7 @@ test("collects explicit IDs and provisions the selected hostname on the existing
       account_id: "a".repeat(32),
       tunnel_id: "1".repeat(32),
       zone_id: "b".repeat(32),
-      hostname: "pay.example.com",
+      hostname: "example.com",
     })
   })
   expect(api.cloudflareAuthorization).toHaveBeenCalled()

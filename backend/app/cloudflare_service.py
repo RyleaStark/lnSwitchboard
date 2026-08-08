@@ -306,8 +306,10 @@ class CloudflareService:
             raise CloudflareValidationError(
                 "zone does not belong to the selected account"
             )
-        if hostname != zone_name and not hostname.endswith(f".{zone_name}"):
-            raise CloudflareValidationError("hostname is outside the selected zone")
+        if hostname != zone_name:
+            raise CloudflareValidationError(
+                "Cloudflare Lightning Addresses must use the selected zone apex"
+            )
         if await client.list_dns_records(zone_id, hostname):
             raise CloudflareConflictError(
                 "A DNS record already exists for this hostname; lnSwitchboard will not replace it"
