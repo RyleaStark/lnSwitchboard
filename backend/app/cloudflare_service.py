@@ -310,15 +310,23 @@ class CloudflareService:
             raise CloudflareValidationError(
                 "Cloudflare Lightning Addresses must use the selected zone apex"
             )
-        if await client.list_dns_records(zone_id, hostname):
-            raise CloudflareConflictError(
-                "A DNS record already exists for this hostname; lnSwitchboard will not replace it"
-            )
-
+        # Write the two published application routes and let Cloudflare judge
+        # the operator's setup. A duplicate-record rejection means the apex
+        # already has DNS (already routed or chained); adopt it untouched.
         await client.configure_tunnel(account_id, tunnel_id, hostname, self.origin_url)
-        dns_record_id = await self._create_or_find_dns_record(
-            client, zone_id, hostname, tunnel_id
-        )
+        dns_adopted = False
+        dns_record_id: str | None = None
+        try:
+            record = await client.create_dns_record(zone_id, hostname, tunnel_id)
+            dns_record_id = str(record.get("id", "")) or None
+            if dns_record_id is None:
+                raise CloudflareServiceError(
+                    "Cloudflare DNS creation outcome could not be reconciled"
+                )
+        except CloudflareAPIError as exc:
+            if not ({81053, 81057, 81058} & set(exc.error_codes)):
+                raise
+            dns_adopted = True
         connector_token = await client.get_tunnel_token(account_id, tunnel_id)
         self._write_connector_token(connector_token)
         connection = self.store.upsert_connection(
@@ -327,7 +335,7 @@ class CloudflareService:
             label="Cloudflare Tunnel",
             status="provisioning",
             account_id=account_id,
-            public_metadata={"zone_id": zone_id, "zone_name": zone_name, "origin": self.origin_url},
+            public_metadata={"zone_id": zone_id, "zone_name": zone_name, "origin": self.origin_url, "dns_adopted": dns_adopted},
         )
         self.store.replace_domains(
             connection.id,
