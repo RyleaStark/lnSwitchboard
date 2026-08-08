@@ -108,7 +108,7 @@ export function SettingsPage() {
         description="Rotate the invoice macaroon and edit safe environment settings."
       />
       <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as SettingsTab)} className="flex flex-col gap-6">
-        <div className="max-w-full overflow-x-auto pb-1">
+        <div className="max-w-full overflow-x-auto overflow-y-hidden pb-2">
           <TabsList variant="line" className="h-11 w-max min-w-full justify-start gap-2 p-0">
             {settingsTabs.map((item) => (
               <TabsTrigger
