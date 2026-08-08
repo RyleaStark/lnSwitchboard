@@ -9,7 +9,6 @@ import pytest
 
 from backend.app.cloudflare_client import CloudflareAPIError
 from backend.app.cloudflare_service import (
-    CloudflareConflictError,
     CloudflareNotFoundError,
     CloudflareService,
     CloudflareUnavailableError,
@@ -29,6 +28,7 @@ CONNECTOR_TOKEN = "connector-token-secret"
 class FakeCloudflareClient:
     calls: list[tuple[str, Any]] = field(default_factory=list)
     dns_records: list[dict[str, Any]] = field(default_factory=list)
+    create_dns_error: CloudflareAPIError | None = None
 
     async def _call(self, name: str, value: Any = None) -> None:
         self.calls.append((name, value))
@@ -61,6 +61,8 @@ class FakeCloudflareClient:
 
     async def create_dns_record(self, zone_id: str, hostname: str, tunnel_id: str) -> dict[str, Any]:
         await self._call("create_dns_record", (zone_id, hostname, tunnel_id))
+        if self.create_dns_error is not None:
+            raise self.create_dns_error
         return {"id": DNS_ID, "name": hostname, "type": "CNAME", "content": f"{tunnel_id}.cfargotunnel.com", "comment": "Managed by lnSwitchboard"}
 
     async def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
@@ -108,7 +110,7 @@ async def test_existing_tunnel_onboarding_validates_operator_ids_and_never_creat
     assert token_path.read_text() == CONNECTOR_TOKEN
     assert secrets.get(connection.id) == {"api_token": API_TOKEN}
     assert store.list_provisioning_journals("cloudflare") == []
-    assert [name for name, _ in client.calls] == ["verify_token", "get_tunnel", "list_accounts", "list_zones", "get_zone", "list_dns_records", "configure_tunnel", "create_dns_record", "get_tunnel_token"]
+    assert [name for name, _ in client.calls] == ["verify_token", "get_tunnel", "list_accounts", "list_zones", "get_zone", "configure_tunnel", "create_dns_record", "get_tunnel_token"]
 
 
 @pytest.mark.anyio
@@ -143,14 +145,14 @@ async def test_existing_tunnel_authorizes_when_account_enumeration_is_forbidden(
 
 
 @pytest.mark.anyio
-async def test_provision_adopts_apex_cname_pointing_at_selected_tunnel(service_parts) -> None:
+async def test_provision_adopts_existing_apex_dns_when_cloudflare_reports_duplicate(service_parts) -> None:
     service, store, _secrets, client, _token_path = service_parts
-    client.dns_records = [{"id": "apex", "type": "CNAME", "name": "example.com", "content": f"{TUNNEL_ID}.cfargotunnel.com"}]
+    client.create_dns_error = CloudflareAPIError(400, [81053])
     authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
     connection = await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="example.com")
     call_names = [name for name, _ in client.calls]
-    assert "create_dns_record" not in call_names
     assert "configure_tunnel" in call_names
+    assert "create_dns_record" in call_names
     assert connection.public_metadata["dns_adopted"] is True
     refreshed = store.get_connection(connection.id)
     assert refreshed is not None and refreshed.domains[0].external_id is None
@@ -163,26 +165,23 @@ async def test_provision_adopts_apex_cname_pointing_at_selected_tunnel(service_p
 
 
 @pytest.mark.anyio
-async def test_provision_rejects_apex_routed_through_a_different_tunnel(service_parts) -> None:
+async def test_provision_surfaces_cloudflare_rejection_of_dns_creation(service_parts) -> None:
     service, _store, _secrets, client, _token_path = service_parts
-    other_tunnel_cname = "99999999-8888-4777-8666-777777777777.cfargotunnel.com"
-    client.dns_records = [{"id": "apex", "type": "CNAME", "name": "example.com", "content": other_tunnel_cname}]
+    client.create_dns_error = CloudflareAPIError(403, [9109])
     authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
-    with pytest.raises(CloudflareConflictError, match="different Cloudflare Tunnel"):
+    with pytest.raises(CloudflareAPIError, match="9109"):
         await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="example.com")
-    call_names = [name for name, _ in client.calls]
-    assert "configure_tunnel" not in call_names
-    assert "create_dns_record" not in call_names
 
 
 @pytest.mark.anyio
 async def test_existing_tunnel_onboarding_preserves_existing_dns(service_parts) -> None:
     service, _store, _secrets, client, _token_path = service_parts
-    authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
     client.dns_records = [{"id": "existing", "type": "A"}]
-    with pytest.raises(CloudflareConflictError):
-        await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="example.com")
-    assert "create_dns_record" not in [name for name, _ in client.calls]
+    authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
+    connection = await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="example.com")
+    assert await service.disconnect(connection.id) is True
+    deleted = [value for name, value in client.calls if name == "delete_dns_record"]
+    assert all(record_id == DNS_ID for _zone_id, record_id in deleted)
 
 
 @pytest.mark.anyio
