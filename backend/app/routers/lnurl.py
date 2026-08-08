@@ -980,21 +980,9 @@ async def lnurl_verify(
                 details=details,
             )
         )
-        reason = "Lookup failed"
-        try:
-            import grpc  # type: ignore
-        except Exception:  # pragma: no cover - optional diagnostics
-            grpc = None  # type: ignore
-        if grpc and isinstance(exc, grpc.aio.AioRpcError):  # type: ignore[attr-defined]
-            # Prefer the gRPC details string when available.
-            grpc_reason = exc.details()  # type: ignore[attr-defined]
-            if grpc_reason:
-                reason = f"Lookup failed: {grpc_reason}"
-            else:
-                reason = f"Lookup failed: {exc}"
-        elif str(exc):
-            reason = f"Lookup failed: {exc}"
-        return {"status": "ERROR", "reason": reason}
+        # Anonymous callers get a generic reason; the exception detail stays
+        # in the operator's request log instead of leaking node internals.
+        return {"status": "ERROR", "reason": "Lookup failed"}
 
     settled = bool(invoice_info.get("settled"))
     preimage_bytes = invoice_info.get("r_preimage") or b""
