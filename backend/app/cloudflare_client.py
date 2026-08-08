@@ -176,7 +176,7 @@ class CloudflareClient:
         if not isinstance(current, dict) or not isinstance(current.get("config"), dict):
             raise CloudflareAPIError(502)
         config = dict(current["config"])
-        ingress = self._override_ingress_route(
+        ingress = self._override_ingress_routes(
             config.get("ingress"), hostname, origin_url
         )
         config["ingress"] = ingress
@@ -192,23 +192,36 @@ class CloudflareClient:
         verified_ingress = (
             verified_config.get("ingress") if isinstance(verified_config, dict) else None
         )
-        if not isinstance(verified_ingress, list) or not any(
-            isinstance(route, dict)
+        if not isinstance(verified_ingress, list):
+            raise CloudflareAPIError(502)
+        required_paths = {
+            r"^/\.well-known/lnurlp/.*$",
+            r"^/\.well-known/nostr\.json$",
+        }
+        configured_paths = {
+            route.get("path")
+            for route in verified_ingress
+            if isinstance(route, dict)
             and route.get("hostname") == hostname
             and route.get("service") == origin_url
-            for route in verified_ingress
-        ):
+        }
+        if not required_paths.issubset(configured_paths):
             raise CloudflareAPIError(502)
 
     @staticmethod
-    def _override_ingress_route(
+    def _override_ingress_routes(
         ingress: Any, hostname: str, origin_url: str
     ) -> list[dict[str, Any]]:
+        """Set the two lnSwitchboard Zero Trust public-hostname routes."""
         if ingress is None:
             ingress = []
         if not isinstance(ingress, list):
             raise CloudflareAPIError(502)
 
+        managed_paths = {
+            r"^/\.well-known/lnurlp/.*$",
+            r"^/\.well-known/nostr\.json$",
+        }
         routes: list[dict[str, Any]] = []
         fallback: dict[str, Any] | None = None
         for index, route in enumerate(ingress):
@@ -223,11 +236,18 @@ class CloudflareClient:
                 continue
             if not isinstance(route_hostname, str):
                 raise CloudflareAPIError(502)
-            if route_hostname.strip().lower().rstrip(".") == hostname:
+            route_path = copied.get("path")
+            if (
+                route_hostname.strip().lower().rstrip(".") == hostname
+                and route_path in managed_paths
+            ):
                 continue
             routes.append(copied)
 
-        routes.append({"hostname": hostname, "service": origin_url})
+        routes.extend(
+            {"hostname": hostname, "path": path, "service": origin_url}
+            for path in sorted(managed_paths)
+        )
         routes.append(fallback or {"service": "http_status:404"})
         return routes
 

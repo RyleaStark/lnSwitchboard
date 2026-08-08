@@ -73,7 +73,7 @@ class FakeCloudflareClient:
 
     async def get_dns_record(self, zone_id: str, record_id: str) -> dict[str, Any] | None:
         await self._call("get_dns_record", (zone_id, record_id))
-        return {"id": record_id, "type": "CNAME", "name": "pay.example.com", "content": f"{TUNNEL_ID}.cfargotunnel.com", "comment": "Managed by lnSwitchboard"}
+        return {"id": record_id, "type": "CNAME", "name": "example.com", "content": f"{TUNNEL_ID}.cfargotunnel.com", "comment": "Managed by lnSwitchboard"}
 
     async def remove_tunnel_route(self, account_id: str, tunnel_id: str, hostname: str) -> None:
         await self._call("remove_tunnel_route", (account_id, tunnel_id, hostname))
@@ -103,7 +103,7 @@ def service_parts(tmp_path: Path):
 async def test_existing_tunnel_onboarding_validates_operator_ids_and_never_creates_a_tunnel(service_parts) -> None:
     service, store, secrets, client, token_path = service_parts
     authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
-    connection = await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="pay.example.com")
+    connection = await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="example.com")
     assert connection.external_id == TUNNEL_ID
     assert token_path.read_text() == CONNECTOR_TOKEN
     assert secrets.get(connection.id) == {"api_token": API_TOKEN}
@@ -148,7 +148,7 @@ async def test_existing_tunnel_onboarding_preserves_existing_dns(service_parts) 
     authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
     client.dns_records = [{"id": "existing", "type": "A"}]
     with pytest.raises(CloudflareConflictError):
-        await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="pay.example.com")
+        await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="example.com")
     assert "create_dns_record" not in [name for name, _ in client.calls]
 
 
@@ -156,7 +156,7 @@ async def test_existing_tunnel_onboarding_preserves_existing_dns(service_parts) 
 async def test_disconnect_removes_only_owned_route_and_dns_record(service_parts) -> None:
     service, store, _secrets, client, _token_path = service_parts
     authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
-    connection = await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="pay.example.com")
+    connection = await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="example.com")
     client.calls.clear()
     assert await service.disconnect(connection.id) is True
     assert [name for name, _ in client.calls] == ["get_dns_record", "remove_tunnel_route", "delete_dns_record"]
