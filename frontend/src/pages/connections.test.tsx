@@ -265,6 +265,47 @@ test("offers unused authorized zones and adds another Cloudflare domain", async 
 })
 
 
+test("only claims Lightning Address availability for active Cloudflare domains", async () => {
+  const connection = cloudflareConnection([
+    {
+      hostname: "example.com",
+      status: "active",
+      zone_id: "b".repeat(32),
+      external_id: "dns-id",
+      last_error: null,
+    },
+    {
+      hostname: "pending.example.com",
+      status: "pending",
+      zone_id: "b".repeat(32),
+      external_id: "dns-id-2",
+      last_error: null,
+    },
+    {
+      hostname: "broken.example.com",
+      status: "error",
+      zone_id: "b".repeat(32),
+      external_id: "dns-id-3",
+      last_error: "Managed tunnel ingress is missing",
+    },
+  ])
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "cloudflare", name: "Cloudflare", capability: "available", reason: null },
+    ],
+    connections: [connection],
+  })
+
+  renderPage()
+
+  await screen.findByText("broken.example.com")
+  expect(
+    screen.getAllByText("Your Lightning Addresses are available at this hostname."),
+  ).toHaveLength(1)
+  expect(screen.getByText("Managed tunnel ingress is missing")).toBeVisible()
+})
+
+
 test("removes one domain without disconnecting the Cloudflare tunnel", async () => {
   const user = userEvent.setup()
   const connected = cloudflareConnection([

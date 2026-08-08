@@ -16,7 +16,9 @@ permissions:
   packages: write
 
 concurrency:
-  group: publish-rc-${{ github.ref }}-${{ github.sha }}
+  # Serialize per ref+version: two commits carrying the same RC version must
+  # never publish concurrently. github.sha deliberately excluded.
+  group: publish-rc-${{ github.ref }}-${{ inputs.version }}
   cancel-in-progress: false
 
 env:
@@ -77,8 +79,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if docker buildx imagetools inspect "$GHCR_IMAGE:$VERSION" >/dev/null 2>&1; then
+          # Fail-closed: only a positively identified 404 means the tag is
+          # vacant. Auth failures, timeouts, rate limits, or any other
+          # registry error abort the run instead of risking an overwrite.
+          REPO="${GHCR_IMAGE#ghcr.io/}"
+          TOKEN="$(
+            curl -fsSL \
+              -u "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+              "https://ghcr.io/token?scope=repository:${REPO}:pull" \
+            | jq -r .token
+          )"
+          STATUS="$(
+            curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/${REPO}/manifests/${VERSION}"
+          )"
+          if [[ "$STATUS" == "200" ]]; then
             echo "::error::GHCR candidate tag already exists and is immutable: $GHCR_IMAGE:$VERSION" >&2
+            exit 1
+          fi
+          if [[ "$STATUS" != "404" ]]; then
+            echo "::error::unable to verify GHCR tag vacancy (HTTP $STATUS); refusing to publish" >&2
             exit 1
           fi
 

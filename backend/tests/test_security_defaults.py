@@ -89,6 +89,29 @@ def test_trusted_host_wildcard_allows_only_subdomains(monkeypatch, test_client) 
         get_settings.cache_clear()
 
 
+@pytest.mark.parametrize(
+    "host_header",
+    [
+        ".example.com",
+        "foo..example.com",
+        "-pay.example.com",
+        "pay-.example.com",
+        "pay.ex_ample.com",
+    ],
+)
+def test_malformed_authority_cannot_match_wildcard_trusted_host(
+    monkeypatch, test_client, host_header: str
+) -> None:
+    monkeypatch.setenv("TRUSTED_HOSTS", "*.example.com")
+    get_settings.cache_clear()
+    try:
+        response = test_client.get("/api/health", headers={"Host": host_header})
+        assert response.status_code == 400
+        assert response.text == "Invalid host header"
+    finally:
+        get_settings.cache_clear()
+
+
 def test_trusted_proxy_cannot_forward_an_untrusted_host(monkeypatch, test_client) -> None:
     monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "192.168.50.10/32")
     monkeypatch.setenv("TRUSTED_HOSTS", "testserver")

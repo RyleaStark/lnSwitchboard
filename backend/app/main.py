@@ -82,6 +82,29 @@ ADMIN_LAN_NETWORKS = tuple(
 )
 
 
+def _valid_host_grammar(hostname: str) -> bool:
+    """Strict DNS-label or IP-literal grammar for an authority hostname.
+
+    urlsplit().hostname is not a validator: authorities such as `.example.com`
+    or `foo..example.com` parse cleanly and would otherwise satisfy wildcard
+    suffix matching in _host_is_trusted.
+    """
+    if not hostname or not hostname.isascii():
+        return False
+    try:
+        ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+    return all(
+        0 < len(label) <= 63
+        and label[0].isalnum()
+        and label[-1].isalnum()
+        and all(character.isalnum() or character == "-" for character in label)
+        for label in hostname.split(".")
+    )
+
+
 def _normalized_authority_hostname(host_header: str) -> str | None:
     if (
         not host_header
@@ -105,6 +128,7 @@ def _normalized_authority_hostname(host_header: str) -> str | None:
         or parsed.path
         or parsed.query
         or parsed.fragment
+        or not _valid_host_grammar(hostname)
     ):
         return None
     return hostname

@@ -698,7 +698,9 @@ function ConnectedTailscale({
               />
             </div>
           </div>
-          <p className="mt-2 text-sm text-muted-foreground">Your Lightning Addresses are available at this hostname.</p>
+          {domain.status === "active" ? (
+            <p className="mt-2 text-sm text-muted-foreground">Your Lightning Addresses are available at this hostname.</p>
+          ) : null}
           {domain.last_error ? (
             <p role="alert" className="mt-2 text-xs text-destructive">{domain.last_error}</p>
           ) : null}
@@ -985,7 +987,9 @@ function ConnectedCloudflare({
                 ) : null}
               </div>
             </div>
-            <p className="mt-2 text-xs text-muted-foreground">Your Lightning Addresses are available at this hostname.</p>
+            {domain.status === "active" ? (
+              <p className="mt-2 text-xs text-muted-foreground">Your Lightning Addresses are available at this hostname.</p>
+            ) : null}
             {domain.last_error ? <p role="alert" className="mt-2 text-xs text-destructive">{domain.last_error}</p> : null}
           </div>
         ))}
