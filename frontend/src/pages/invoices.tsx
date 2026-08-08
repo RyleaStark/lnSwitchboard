@@ -41,9 +41,7 @@ export function InvoicesPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Invoice ledger"
         title="Invoices"
-        description="Review generated invoices, settlement status, payment hashes, expiry windows, and raw payment requests."
       />
       <Card>
         <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">

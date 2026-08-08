@@ -95,9 +95,7 @@ export function WebhooksPage() {
     return (
       <>
         <PageHeader
-          eyebrow="Reference"
           title="Webhooks"
-          description="Delivery contract for settled Lightning payment automation."
         />
         <LoadingRows rows={4} />
       </>
@@ -108,9 +106,7 @@ export function WebhooksPage() {
     return (
       <>
         <PageHeader
-          eyebrow="Reference"
           title="Webhooks"
-          description="Delivery contract for settled Lightning payment automation."
         />
         <PageError message="Unable to load the app version for webhook examples." onRetry={() => void version.refetch()} retrying={version.isFetching} />
       </>
@@ -127,9 +123,7 @@ export function WebhooksPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Reference"
         title="Webhooks"
-        description="Use settled-payment webhooks to notify n8n, databases, bots, and other downstream services when a routed Lightning invoice is paid."
         actionAlign="start"
         action={(
           <>

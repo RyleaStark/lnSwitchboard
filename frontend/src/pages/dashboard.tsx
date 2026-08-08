@@ -31,9 +31,7 @@ export function DashboardPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Live node surface"
         title="Dashboard"
-        description="Track request volume, paid invoice flow, routed sats, and advertised domains without opening a terminal."
       />
       {summary.isLoading ? <LoadingRows rows={3} /> : null}
       {summary.isError ? <PageError message="Unable to load dashboard metrics." onRetry={() => void summary.refetch()} retrying={summary.isFetching} /> : null}
@@ -144,13 +142,13 @@ function MetricCard({
   note?: string
 }) {
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-3 p-4 pb-1.5 sm:p-6 sm:pb-2">
+    <Card size="sm" className="gap-1.5">
+      <CardHeader className="flex flex-row items-center justify-between gap-3">
         <CardDescription>{label}</CardDescription>
         <span className="text-muted-foreground [&_svg]:size-4">{icon}</span>
       </CardHeader>
-      <CardContent className="flex flex-col gap-0.5 p-4 pt-1.5 sm:gap-1 sm:p-6 sm:pt-0">
-        <div className="text-xl font-semibold tracking-normal sm:text-2xl">{value}</div>
+      <CardContent className="flex flex-col gap-0.5">
+        <div className="text-lg font-semibold tracking-normal sm:text-xl">{value}</div>
         {note ? <p className="text-xs text-muted-foreground">{note}</p> : null}
       </CardContent>
     </Card>
