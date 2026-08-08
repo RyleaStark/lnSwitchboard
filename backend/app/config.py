@@ -160,17 +160,55 @@ class Settings(BaseSettings):
     )
     cloudflared_token_path: Path = _env_field(
         env="CLOUDFLARED_TOKEN_PATH",
-        default=Path("secrets/cloudflared/tunnel.token"),
-    )
-    cloudflared_metrics_url: str = _env_field(
-        env="CLOUDFLARED_METRICS_URL",
-        default="http://cloudflared:2000",
+        default=Path("secrets/cloudflare-mesh/node.env"),
     )
     cloudflared_origin_url: str = _env_field(
         env="CLOUDFLARED_ORIGIN_URL",
         default="http://lnswitchboard:21212",
     )
     cloudflared_token_gid: int = _env_field(env="CLOUDFLARED_TOKEN_GID", default=0)
+    # Cloudflare account OAuth onboarding (public client, PKCE S256, no secret).
+    # Endpoint defaults confirmed against
+    # https://dash.cloudflare.com/.well-known/openid-configuration and
+    # https://developers.cloudflare.com/fundamentals/oauth/integrate-with-cloudflare/
+    cloudflare_oauth_client_id: str = _env_field(
+        env="CLOUDFLARE_OAUTH_CLIENT_ID",
+        default="placeholder-client-id",
+    )
+    cloudflare_oauth_authorize_url: str = _env_field(
+        env="CLOUDFLARE_OAUTH_AUTHORIZE_URL",
+        default="https://dash.cloudflare.com/oauth2/auth",
+    )
+    cloudflare_oauth_token_url: str = _env_field(
+        env="CLOUDFLARE_OAUTH_TOKEN_URL",
+        default="https://dash.cloudflare.com/oauth2/token",
+    )
+    # Public OAuth scope IDs are listed by Cloudflare's authenticated
+    # GET /client/v4/oauth/scopes endpoint. Keep this request synchronized with
+    # the permissions selected on the registered public client.
+    cloudflare_oauth_scope: str = _env_field(
+        env="CLOUDFLARE_OAUTH_SCOPE",
+        default=(
+            "offline_access account-settings.read zone.read dns.read dns.write "
+            "workers-scripts.read workers-scripts.write workers-scripts.bind "
+            "connectivity-directory.bind "
+            "workers-routes.read workers-routes.write "
+            "teams-connector-warp.read teams-connector-warp.write "
+            "teams.read teams.write access.read access.write"
+        ),
+    )
+    cloudflare_oauth_redirect_loopback: str = _env_field(
+        env="CLOUDFLARE_OAUTH_REDIRECT_LOOPBACK",
+        default="http://127.0.0.1:22121/api/cloudflare/oauth/callback",
+    )
+    cloudflare_oauth_redirect_page: str = _env_field(
+        env="CLOUDFLARE_OAUTH_REDIRECT_PAGE",
+        default="https://placeholder.invalid/oauth/callback",
+    )
+    cloudflare_oauth_state_ttl_seconds: int = _env_field(
+        env="CLOUDFLARE_OAUTH_STATE_TTL_SECONDS",
+        default=600,
+    )
     tailscale_connector_enabled: bool = _env_field(
         env="TAILSCALE_CONNECTOR_ENABLED", default=False
     )

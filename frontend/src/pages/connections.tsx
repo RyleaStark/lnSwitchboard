@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ExternalLinkIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XIcon } from "lucide-react"
+import { ExternalLinkIcon, PlusIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XIcon } from "lucide-react"
 import QRCode from "qrcode"
-import { useLocation } from "react-router"
+import { useLocation, useSearchParams } from "react-router"
 
 import { toast } from "sonner"
 
@@ -32,7 +32,16 @@ import {
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ApiError, api, type ProviderConnection, type TailscaleLogin } from "@/lib/api"
+import {
+  ApiError,
+  api,
+  type CloudflareOAuthFlow,
+  type CloudflareOAuthGrant,
+  type CloudflareOAuthRedirectMode,
+  type CloudflareZone,
+  type ProviderConnection,
+  type TailscaleLogin,
+} from "@/lib/api"
 
 export function ConnectionsPage() {
   const location = useLocation()
@@ -43,14 +52,48 @@ export function ConnectionsPage() {
   )
 }
 
+type CloudflareStep = "connect" | "authorize" | "grant" | "account" | "provision"
+
+type CloudflareAccount = { id: string; name: string }
+
+function cloudflareFlowState(authorizeUrl: string): string {
+  try {
+    return new URL(authorizeUrl).searchParams.get("state") ?? ""
+  } catch {
+    return ""
+  }
+}
+
+function grantExpiryLabel(grant: CloudflareOAuthGrant): string {
+  if (grant.access_token_expires_at === null) {
+    return grant.has_refresh_token ? "Renews automatically" : "No expiry recorded"
+  }
+  const expiry = new Date(grant.access_token_expires_at * 1000)
+  if (Number.isNaN(expiry.getTime())) return "No expiry recorded"
+  if (expiry.getTime() <= Date.now()) {
+    return grant.has_refresh_token
+      ? "Access token expired — renews automatically"
+      : `Access token expired ${expiry.toLocaleString()}`
+  }
+  return `Access token expires ${expiry.toLocaleString()}`
+}
+
 function CloudflareConnectionsPage() {
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
 
+  const [step, setStep] = useState<CloudflareStep>("connect")
+  const [redirectMode, setRedirectMode] = useState<CloudflareOAuthRedirectMode>("loopback")
+  const [flow, setFlow] = useState<CloudflareOAuthFlow | null>(null)
+  const [code, setCode] = useState("")
+  const [stateValue, setStateValue] = useState("")
   const [accountId, setAccountId] = useState("")
-  const [tunnelId, setTunnelId] = useState("")
   const [zoneId, setZoneId] = useState("")
-  const [apiToken, setApiToken] = useState("")
-  const [authorizing, setAuthorizing] = useState(false)
+  const [hostname, setHostname] = useState("")
+  const [selectedGrantId, setSelectedGrantId] = useState("")
+  const [discoveredAccounts, setDiscoveredAccounts] = useState<CloudflareAccount[]>([])
+  const [pending, setPending] = useState<"begin" | "complete" | "authorize" | null>(null)
+  const [reconnectNotice, setReconnectNotice] = useState<string | null>(null)
 
   const connections = useQuery({ queryKey: ["connections"], queryFn: api.connections })
   const setup = useQuery({ queryKey: ["cloudflare-setup"], queryFn: api.cloudflareSetup })
@@ -59,33 +102,137 @@ function CloudflareConnectionsPage() {
   )
   const provider = connections.data?.providers.find((item) => item.id === "cloudflare")
   const available = setup.data?.available === true && provider?.capability === "available"
+  const onboarding = !cloudflareConnection || reconnectNotice !== null
   const pendingAuthorization = useQuery({
     queryKey: ["cloudflare-authorization"],
     queryFn: api.cloudflareAuthorization,
-    enabled: available && !cloudflareConnection,
+    enabled: available && onboarding,
     retry: false,
   })
   const authorization = pendingAuthorization.data ?? null
+  const grants = useQuery({
+    queryKey: ["cloudflare-oauth-grants"],
+    queryFn: api.cloudflareOAuthGrants,
+    enabled: available && onboarding && !authorization && step === "grant",
+    retry: false,
+  })
+  const availableDomains = useQuery({
+    queryKey: ["cloudflare-available-domains", cloudflareConnection?.id],
+    queryFn: () => api.availableCloudflareDomains(cloudflareConnection!.id),
+    enabled: available && Boolean(cloudflareConnection) && reconnectNotice === null,
+    retry: false,
+  })
   const authorizationMissing =
     pendingAuthorization.error instanceof ApiError && pendingAuthorization.error.status === 404
 
-  const authorize = async () => {
-    const token = apiToken.trim()
-    if (!token || authorizing) return
-    setAuthorizing(true)
-    try {
-      const authorization = await api.authorizeCloudflare({ api_token: token, account_id: accountId.trim(), tunnel_id: tunnelId.trim() })
-      const selectedAccount = authorization.accounts.find((account) => account.id === accountId.trim())
-      if (!selectedAccount?.zones.length) throw new Error("This token can access the tunnel but has no active DNS zones. Add Zone / Zone / Read and Zone / DNS / Edit for a zone, then try again.")
-      setZoneId(selectedAccount.zones[0].id)
-      queryClient.setQueryData(["cloudflare-authorization"], authorization)
-      toast.success("Tunnel and DNS access confirmed")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Token validation failed")
-    } finally {
-      setApiToken("")
-      setAuthorizing(false)
+  useEffect(() => {
+    const result = searchParams.get("cloudflare")
+    if (!result) return
+    if (result === "connected") {
+      setStep("grant")
+      void queryClient.invalidateQueries({ queryKey: ["cloudflare-oauth-grants"] })
+      toast.success("Cloudflare authorization received")
+    } else {
+      toast.error("Cloudflare authorization failed or was cancelled. Try again.")
     }
+    const next = new URLSearchParams(searchParams)
+    next.delete("cloudflare")
+    setSearchParams(next, { replace: true })
+  }, [searchParams, setSearchParams, queryClient])
+
+  const begin = async () => {
+    if (!available || pending !== null) return
+    setPending("begin")
+    try {
+      const nextFlow = await api.beginCloudflareOAuth(redirectMode)
+      setFlow(nextFlow)
+      setStateValue(cloudflareFlowState(nextFlow.authorize_url))
+      setCode("")
+      setStep("authorize")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to start Cloudflare authorization")
+    } finally {
+      setPending(null)
+    }
+  }
+
+  const complete = async () => {
+    const pastedCode = code.trim()
+    const pastedState = stateValue.trim()
+    if (!pastedCode || !pastedState || pending !== null) return
+    setPending("complete")
+    try {
+      await api.completeCloudflareOAuth({ code: pastedCode, state: pastedState })
+      setFlow(null)
+      setStep("grant")
+      await queryClient.invalidateQueries({ queryKey: ["cloudflare-oauth-grants"] })
+      toast.success("Cloudflare authorization received")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cloudflare authorization failed")
+    } finally {
+      setCode("")
+      setStateValue("")
+      setPending(null)
+    }
+  }
+
+  const selectGrant = async (grant: CloudflareOAuthGrant) => {
+    if (pending !== null) return
+    setPending("authorize")
+    try {
+      const result = await api.authorizeCloudflare({ grant_id: grant.grant_id })
+      if (result.accounts.length === 0) {
+        throw new Error("Cloudflare returned no accounts for this authorization.")
+      }
+      setSelectedGrantId(grant.grant_id)
+      setDiscoveredAccounts(result.accounts)
+      setStep("account")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cloudflare authorization failed")
+    } finally {
+      setPending(null)
+    }
+  }
+
+  const selectAccount = async (selectedAccountId: string) => {
+    if (pending !== null || !selectedGrantId) return
+    setPending("authorize")
+    try {
+      const result = await api.authorizeCloudflare({
+        grant_id: selectedGrantId,
+        account_id: selectedAccountId,
+      })
+      const account = result.accounts.find((item) => item.id === selectedAccountId)
+      if (!account) throw new Error("Cloudflare did not authorize the selected account.")
+      queryClient.setQueryData(["cloudflare-authorization"], result)
+      if (cloudflareConnection && reconnectNotice !== null) {
+        await api.reauthorizeCloudflare(cloudflareConnection.id)
+        queryClient.removeQueries({ queryKey: ["cloudflare-authorization"] })
+        await queryClient.invalidateQueries({ queryKey: ["connections"] })
+        resetOnboarding("connect")
+        setReconnectNotice(null)
+        toast.success("Cloudflare authorization restored")
+        return
+      }
+      setAccountId(account.id)
+      setZoneId(account.zones[0]?.id ?? "")
+      setHostname(account.zones[0]?.name ?? "")
+      setStep("provision")
+      toast.success("Cloudflare account access confirmed")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cloudflare authorization failed")
+    } finally {
+      setPending(null)
+    }
+  }
+
+  const resetOnboarding = (nextStep: CloudflareStep) => {
+    setFlow(null)
+    setCode("")
+    setStateValue("")
+    setSelectedGrantId("")
+    setDiscoveredAccounts([])
+    setStep(nextStep)
   }
 
   const provision = useMutation({
@@ -93,34 +240,82 @@ function CloudflareConnectionsPage() {
     onSuccess: async () => {
       queryClient.removeQueries({ queryKey: ["cloudflare-authorization"] })
       await queryClient.invalidateQueries({ queryKey: ["connections"] })
-      toast.success("Cloudflare Tunnel is provisioning")
+      resetOnboarding("connect")
+      setReconnectNotice(null)
+      toast.success("Cloudflare connection is provisioning")
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Tunnel provisioning failed"),
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Cloudflare provisioning failed"),
   })
 
   const cancelAuthorization = useMutation({
     mutationFn: api.cancelCloudflareAuthorization,
-    onSuccess: () =>
-      queryClient.removeQueries({ queryKey: ["cloudflare-authorization"] }),
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ["cloudflare-authorization"] })
+      setStep("grant")
+    },
     onError: (error) =>
       toast.error(
         error instanceof Error ? error.message : "Unable to cancel authorization",
       ),
   })
 
+  const deleteGrant = useMutation({
+    mutationFn: api.deleteCloudflareOAuthGrant,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["cloudflare-oauth-grants"] })
+      toast.success("Cloudflare authorization removed")
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Unable to remove authorization"),
+  })
+
+  const handleManagementError = (error: unknown, fallback: string) => {
+    if (error instanceof ApiError && error.status === 409 && /reconnect/i.test(error.message)) {
+      setReconnectNotice(error.message)
+      resetOnboarding("connect")
+    }
+    toast.error(error instanceof Error ? error.message : fallback)
+  }
+
   const refreshStatus = useMutation({
     mutationFn: api.refreshCloudflareStatus,
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["connections"] }),
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Status refresh failed"),
+    onError: (error) => handleManagementError(error, "Status refresh failed"),
   })
 
   const disconnect = useMutation({
     mutationFn: api.disconnectCloudflare,
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["connections"] })
-      toast.success("Cloudflare Tunnel disconnected")
+      toast.success("Cloudflare disconnected")
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Disconnect failed"),
+  })
+
+  const addDomain = useMutation({
+    mutationFn: (payload: { connectionId: string; zoneId: string; hostname: string }) =>
+      api.addCloudflareDomain(payload),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["connections"] }),
+        queryClient.invalidateQueries({ queryKey: ["cloudflare-available-domains"] }),
+      ])
+      toast.success("Cloudflare domain added")
+    },
+    onError: (error) => handleManagementError(error, "Unable to add domain"),
+  })
+
+  const removeDomain = useMutation({
+    mutationFn: (payload: { connectionId: string; hostname: string }) =>
+      api.removeCloudflareDomain(payload),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["connections"] }),
+        queryClient.invalidateQueries({ queryKey: ["cloudflare-available-domains"] }),
+      ])
+      toast.success("Cloudflare domain removed")
+    },
+    onError: (error) => handleManagementError(error, "Unable to remove domain"),
   })
 
   if (
@@ -151,10 +346,10 @@ function CloudflareConnectionsPage() {
           <div className="min-w-0 space-y-1.5">
             <div className="flex items-center gap-2">
               <CloudflareIcon className="size-5" />
-              <h2 className="font-heading text-xl font-semibold tracking-tight">Cloudflare Tunnel</h2>
+              <h2 className="font-heading text-xl font-semibold tracking-tight">Cloudflare</h2>
             </div>
             <p className="max-w-2xl text-sm text-pretty text-muted-foreground">
-              Bring an existing Cloudflare Tunnel online, then choose where your Lightning Addresses should be available.
+              Connect your Cloudflare account to publish Lightning Addresses on your own domains. Authorization happens entirely between you and Cloudflare; tokens never leave this device.
             </p>
           </div>
           <div className="shrink-0">
@@ -164,59 +359,131 @@ function CloudflareConnectionsPage() {
               <Badge variant="outline">Ready to connect</Badge>
             ) : (
               <Badge variant="secondary">
-                Connector not installed
+                {setup.data?.oauth_configured === false ? "OAuth not configured" : "Connector not installed"}
               </Badge>
             )}
           </div>
         </div>
 
         <div className="mt-6">
-          {cloudflareConnection ? (
+          {setup.data?.configuration_error ? (
+            <p role="alert" className="mb-4 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {setup.data.configuration_error}
+            </p>
+          ) : null}
+          {cloudflareConnection && reconnectNotice === null ? (
             <ConnectedCloudflare
               connection={cloudflareConnection}
+              availableZones={availableDomains.data?.zones ?? []}
               refreshing={refreshStatus.isPending}
               disconnecting={disconnect.isPending}
-              actionsDisabled={refreshStatus.isPending || disconnect.isPending}
+              addingDomain={addDomain.isPending}
+              removingDomain={removeDomain.isPending}
+              actionsDisabled={
+                refreshStatus.isPending ||
+                disconnect.isPending ||
+                addDomain.isPending ||
+                removeDomain.isPending
+              }
               onRefresh={() => refreshStatus.mutate(cloudflareConnection.id)}
+              onAddDomain={(selectedZoneId, selectedHostname) =>
+                addDomain.mutate({
+                  connectionId: cloudflareConnection.id,
+                  zoneId: selectedZoneId,
+                  hostname: selectedHostname,
+                })
+              }
+              onRemoveDomain={(selectedHostname) =>
+                removeDomain.mutate({
+                  connectionId: cloudflareConnection.id,
+                  hostname: selectedHostname,
+                })
+              }
               onDisconnect={() => disconnect.mutate(cloudflareConnection.id)}
             />
-          ) : authorization ? (
-            <ProvisionForm
-              accountId={accountId}
-              tunnelId={tunnelId}
-              zones={authorization.accounts.find((account) => account.id === accountId)?.zones ?? []}
-              zoneId={zoneId}
-              pending={provision.isPending}
-              onZoneChange={setZoneId}
-              onBack={() => cancelAuthorization.mutate()}
-              onSubmit={() => {
-                const zone = authorization.accounts
-                  .find((account) => account.id === accountId)
-                  ?.zones.find((item) => item.id === zoneId)
-                if (!zone) return
-                provision.mutate({
-                  account_id: accountId,
-                  tunnel_id: tunnelId,
-                  zone_id: zoneId,
-                  hostname: zone.name,
-                })
-              }}
-            />
           ) : (
-            <AuthorizationForm
-              available={available}
-              permissions={setup.data?.required_permissions ?? []}
-              reason={provider?.reason ?? null}
-              error={pendingAuthorization.isError && !authorizationMissing}
-              apiToken={apiToken}
-              accountId={accountId}
-              tunnelId={tunnelId}
-              pending={authorizing}
-              onTokenChange={setApiToken}
-              onAccountChange={setAccountId}
-              onTunnelChange={setTunnelId}
-              onSubmit={() => void authorize()}
-            />
+            <div className="flex flex-col gap-5">
+              {reconnectNotice !== null ? (
+                <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {reconnectNotice} Reconnect Cloudflare below to restore domain management.
+                </p>
+              ) : null}
+              {authorization ? (
+                <CloudflareProvisionForm
+                  accounts={authorization.accounts}
+                  accountId={accountId}
+                  zoneId={zoneId}
+                  hostname={hostname}
+                  pending={provision.isPending}
+                  onAccountChange={(nextAccountId) => {
+                    setAccountId(nextAccountId)
+                    const nextAccount = authorization.accounts.find((account) => account.id === nextAccountId)
+                    setZoneId(nextAccount?.zones[0]?.id ?? "")
+                    setHostname(nextAccount?.zones[0]?.name ?? "")
+                  }}
+                  onZoneChange={(nextZoneId) => {
+                    setZoneId(nextZoneId)
+                    const nextZone = authorization.accounts
+                      .find((account) => account.id === accountId)
+                      ?.zones.find((zone) => zone.id === nextZoneId)
+                    if (nextZone) setHostname(nextZone.name)
+                  }}
+                  onHostnameChange={setHostname}
+                  onBack={() => cancelAuthorization.mutate()}
+                  onSubmit={() => {
+                    const account = authorization.accounts.find((item) => item.id === accountId)
+                    const zone = account?.zones.find((item) => item.id === zoneId)
+                    if (!account || !zone) return
+                    provision.mutate({
+                      account_id: account.id,
+                      zone_id: zone.id,
+                      hostname,
+                    })
+                  }}
+                />
+              ) : step === "account" ? (
+                <CloudflareAccountPicker
+                  accounts={discoveredAccounts}
+                  pending={pending !== null}
+                  onSelect={(selectedAccountId) => void selectAccount(selectedAccountId)}
+                  onBack={() => resetOnboarding("grant")}
+                />
+              ) : step === "grant" ? (
+                <CloudflareGrantPicker
+                  grants={grants.data?.grants ?? []}
+                  loading={grants.isPending}
+                  error={grants.error instanceof Error ? grants.error.message : null}
+                  pending={pending !== null}
+                  deleting={deleteGrant.isPending}
+                  onSelect={(grant) => void selectGrant(grant)}
+                  onDelete={(grantId) => deleteGrant.mutate(grantId)}
+                  onConnect={() => resetOnboarding("connect")}
+                />
+              ) : step === "authorize" && flow ? (
+                <CloudflareAwaitingAuthorization
+                  authorizeUrl={flow.authorize_url}
+                  expiresAt={flow.expires_at}
+                  code={code}
+                  stateValue={stateValue}
+                  pending={pending !== null}
+                  onCodeChange={setCode}
+                  onStateChange={setStateValue}
+                  onComplete={() => void complete()}
+                  onCancel={() => resetOnboarding("connect")}
+                />
+              ) : (
+                <CloudflareConnect
+                  available={available}
+                  permissions={setup.data?.required_permissions ?? []}
+                  reason={provider?.reason ?? null}
+                  authorizationFailed={pendingAuthorization.isError && !authorizationMissing}
+                  redirectMode={redirectMode}
+                  pending={pending !== null}
+                  onRedirectModeChange={setRedirectMode}
+                  onSubmit={() => void begin()}
+                />
+              )}
+            </div>
           )}
         </div>
       </section>
@@ -633,7 +900,9 @@ function ConnectedTailscale({
               />
             </div>
           </div>
-          <p className="mt-2 text-sm text-muted-foreground">Your Lightning Addresses are available at this hostname.</p>
+          {domain.status === "active" ? (
+            <p className="mt-2 text-sm text-muted-foreground">Your Lightning Addresses are available at this hostname.</p>
+          ) : null}
           {domain.last_error ? (
             <p role="alert" className="mt-2 text-xs text-destructive">{domain.last_error}</p>
           ) : null}
@@ -669,96 +938,67 @@ function ConnectedTailscale({
   )
 }
 
-function AuthorizationForm({
+function CloudflareConnect({
   available,
   permissions,
   reason,
-  error,
-  apiToken,
-  accountId,
-  tunnelId,
+  authorizationFailed,
+  redirectMode,
   pending,
-  onTokenChange,
-  onAccountChange,
-  onTunnelChange,
+  onRedirectModeChange,
   onSubmit,
 }: {
   available: boolean
   permissions: string[]
   reason: string | null
-  error: boolean
-  apiToken: string
-  accountId: string
-  tunnelId: string
+  authorizationFailed: boolean
+  redirectMode: CloudflareOAuthRedirectMode
   pending: boolean
-  onTokenChange: (value: string) => void
-  onAccountChange: (value: string) => void
-  onTunnelChange: (value: string) => void
+  onRedirectModeChange: (value: CloudflareOAuthRedirectMode) => void
   onSubmit: () => void
 }) {
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.8fr)]">
       <div className="space-y-4">
         <div>
-          <h3 className="font-medium">1. Choose your existing tunnel</h3>
+          <h3 className="font-medium">Connect your Cloudflare account</h3>
           <p className="mt-1 max-w-xl text-sm leading-normal text-pretty text-muted-foreground">
-            Enter the account and tunnel you already created in Cloudflare. Then authorize lnSwitchboard to configure one public Lightning Address.
+            lnSwitchboard opens Cloudflare’s authorization page, where you sign in and approve access. Authorization happens entirely between you and Cloudflare; tokens never leave this device.
           </p>
         </div>
-        <a
-          className="text-sm font-medium text-primary underline-offset-4 hover:underline"
-          href="https://dash.cloudflare.com/profile/api-tokens"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Create a scoped token in Cloudflare
-        </a>
-        {error ? (
+        {authorizationFailed ? (
           <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
-            Cloudflare authorization expired or could not be loaded. Validate the token again.
+            Cloudflare authorization expired or could not be loaded. Connect again.
           </p>
         ) : null}
         <Field className="max-w-xl">
-          <FieldLabel htmlFor="cloudflare-account-id">Cloudflare account ID</FieldLabel>
-          <Input id="cloudflare-account-id" value={accountId} disabled={!available || pending} autoComplete="off" onChange={(event) => onAccountChange(event.target.value)} />
-        </Field>
-        <Field className="max-w-xl">
-          <FieldLabel htmlFor="cloudflare-tunnel-id">Existing tunnel ID</FieldLabel>
-          <Input id="cloudflare-tunnel-id" value={tunnelId} disabled={!available || pending} autoComplete="off" onChange={(event) => onTunnelChange(event.target.value)} />
-          <FieldDescription>
-            Enter the tunnel UUID from Cloudflare Zero Trust. Do not paste a Cloudflared connector token here; lnSwitchboard retrieves and stores that credential privately after authorization.
-          </FieldDescription>
-        </Field>
-        <h3 className="pt-2 font-medium">2. Authorize DNS access</h3>
-        <Field className="max-w-xl">
-          <FieldLabel htmlFor="cloudflare-api-token">User API token</FieldLabel>
-          <Input
-            id="cloudflare-api-token"
-            type="password"
-            value={apiToken}
+          <FieldLabel htmlFor="cloudflare-redirect-mode">Completion method</FieldLabel>
+          <select
+            id="cloudflare-redirect-mode"
+            value={redirectMode}
             disabled={!available || pending}
-            autoComplete="off"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            onChange={(event) => onTokenChange(event.target.value)}
-          />
+            onChange={(event) => onRedirectModeChange(event.target.value === "page" ? "page" : "loopback")}
+            className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none md:text-sm"
+          >
+            <option value="loopback">Return here automatically (this device)</option>
+            <option value="page">Show a code to paste back (other devices)</option>
+          </select>
           <FieldDescription>
-            Use a user-scoped API token from Profile → API Tokens, not a Global API Key or an account-owned token. It is cleared after validation and never placed in a URL or browser storage.
+            Automatic return works when you browse this admin panel on the machine that runs lnSwitchboard. Choose paste-back when you browse from another device on your network.
           </FieldDescription>
         </Field>
         <Button
           type="button"
-          disabled={!available || pending || !apiToken.trim()}
+          disabled={!available || pending}
           onClick={onSubmit}
         >
           <ShieldCheckIcon />
-          {pending ? "Checking access…" : "Connect tunnel"}
+          {pending ? "Contacting Cloudflare…" : "Connect Cloudflare"}
         </Button>
         {!available ? (
           <p className="text-sm text-muted-foreground">
             {reason === "connector_not_installed"
-              ? "Add the cloudflared connector service to this deployment stack to enable onboarding."
+              ? "Add the Cloudflare connector service to this deployment stack to enable onboarding."
               : "Cloudflare onboarding is unavailable in this deployment."}
           </p>
         ) : null}
@@ -767,7 +1007,7 @@ function AuthorizationForm({
       <div className="rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
         <div className="flex items-center gap-2 text-sm font-medium">
           <ShieldCheckIcon className="size-4" />
-          Required token permissions
+          Cloudflare will request these permissions
         </div>
         <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
           {permissions.map((permission) => (
@@ -778,84 +1018,452 @@ function AuthorizationForm({
           ))}
         </ul>
         <p className="mt-3 text-xs leading-normal text-muted-foreground">
-          Restrict the token to the Cloudflare account and zone you intend to connect.
+          Review them on Cloudflare’s consent screen before approving. You can revoke access at any time in your Cloudflare profile.
         </p>
       </div>
     </div>
   )
 }
 
-function ProvisionForm({
-  accountId,
-  tunnelId,
-  zones,
-  zoneId,
+function CloudflareAwaitingAuthorization({
+  authorizeUrl,
+  expiresAt,
+  code,
+  stateValue,
   pending,
+  onCodeChange,
+  onStateChange,
+  onComplete,
+  onCancel,
+}: {
+  authorizeUrl: string
+  expiresAt: number
+  code: string
+  stateValue: string
+  pending: boolean
+  onCodeChange: (value: string) => void
+  onStateChange: (value: string) => void
+  onComplete: () => void
+  onCancel: () => void
+}) {
+  const expiresAtDate = new Date(expiresAt * 1000)
+  const expiresLabel = Number.isNaN(expiresAtDate.getTime()) ? null : expiresAtDate.toLocaleTimeString()
+  return (
+    <FieldGroup className="max-w-2xl">
+      <div>
+        <h3 className="font-medium">Finish authorization in Cloudflare</h3>
+        <p className="mt-1 max-w-xl text-sm leading-normal text-pretty text-muted-foreground">
+          Open the authorization page, sign in to Cloudflare, and approve the requested permissions. This page finishes automatically when you are redirected back here.
+        </p>
+      </div>
+      <a
+        className="inline-flex items-center gap-2 text-sm font-medium text-primary underline-offset-4 hover:underline"
+        href={authorizeUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        Open Cloudflare authorization <ExternalLinkIcon className="size-4" />
+      </a>
+      {expiresLabel ? (
+        <p className="text-xs text-muted-foreground">This link expires at {expiresLabel}.</p>
+      ) : null}
+      <Field>
+        <FieldLabel htmlFor="cloudflare-oauth-code">Authorization code</FieldLabel>
+        <Input
+          id="cloudflare-oauth-code"
+          value={code}
+          disabled={pending}
+          autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          onChange={(event) => onCodeChange(event.target.value)}
+        />
+        <FieldDescription>
+          If the page did not redirect back automatically, paste the code shown after authorizing.
+        </FieldDescription>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor="cloudflare-oauth-state">State</FieldLabel>
+        <Input
+          id="cloudflare-oauth-state"
+          value={stateValue}
+          disabled={pending}
+          autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          onChange={(event) => onStateChange(event.target.value)}
+        />
+        <FieldDescription>
+          Shown under the code on the Cloudflare callback page. It is filled in for you when available.
+        </FieldDescription>
+      </Field>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" disabled={pending || !code.trim() || !stateValue.trim()} onClick={onComplete}>
+          {pending ? "Completing…" : "Complete authorization"}
+        </Button>
+        <Button type="button" variant="ghost" disabled={pending} onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+    </FieldGroup>
+  )
+}
+
+function CloudflareAccountPicker({
+  accounts,
+  pending,
+  onSelect,
+  onBack,
+}: {
+  accounts: CloudflareAccount[]
+  pending: boolean
+  onSelect: (accountId: string) => void
+  onBack: () => void
+}) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="font-medium">Choose a Cloudflare account</h3>
+        <p className="mt-1 max-w-xl text-sm leading-normal text-pretty text-muted-foreground">
+          Cloudflare returned only the accounts you selected during consent. Choose the account that owns your DNS zone.
+        </p>
+      </div>
+      <div className="grid max-w-2xl gap-3">
+        {accounts.map((account) => (
+          <Button
+            key={account.id}
+            type="button"
+            variant="outline"
+            className="h-auto min-h-12 justify-start px-4 py-3 text-left"
+            disabled={pending}
+            onClick={() => onSelect(account.id)}
+          >
+            {account.name}
+          </Button>
+        ))}
+      </div>
+      <Button type="button" variant="ghost" disabled={pending} onClick={onBack}>
+        Back
+      </Button>
+    </div>
+  )
+}
+
+function CloudflareGrantPicker({
+  grants,
+  loading,
+  error,
+  pending,
+  deleting,
+  onSelect,
+  onDelete,
+  onConnect,
+}: {
+  grants: CloudflareOAuthGrant[]
+  loading: boolean
+  error: string | null
+  pending: boolean
+  deleting: boolean
+  onSelect: (grant: CloudflareOAuthGrant) => void
+  onDelete: (grantId: string) => void
+  onConnect: () => void
+}) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="font-medium">Choose a Cloudflare authorization</h3>
+        <p className="mt-1 max-w-xl text-sm leading-normal text-pretty text-muted-foreground">
+          Each authorization below is a consent grant stored on this device — never a token in your browser. Pick one to continue, or connect again.
+        </p>
+      </div>
+      {loading ? (
+        <div className="space-y-2" aria-label="Loading Cloudflare authorizations">
+          <Skeleton className="h-20 w-full max-w-2xl rounded-xl" />
+          <Skeleton className="h-20 w-full max-w-2xl rounded-xl" />
+        </div>
+      ) : error ? (
+        <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
+      ) : grants.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No Cloudflare authorizations yet. Connect Cloudflare to create one.</p>
+      ) : (
+        <div className="grid gap-3">
+          {grants.map((grant) => (
+            <div key={grant.grant_id} className="max-w-2xl rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
+              <div className="flex min-w-0 items-center justify-between gap-3">
+                <span className="min-w-0 truncate font-medium">
+                  {grant.account_label ?? "Cloudflare account"}
+                </span>
+                <Badge variant="outline">{grant.has_refresh_token ? "renews" : "one-time"}</Badge>
+              </div>
+              {grant.scopes ? (
+                <p className="mt-2 text-xs break-words text-muted-foreground">{grant.scopes}</p>
+              ) : null}
+              <p className="mt-1 text-xs text-muted-foreground">{grantExpiryLabel(grant)}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button type="button" disabled={pending || deleting} onClick={() => onSelect(grant)}>
+                  {pending ? "Authorizing…" : "Use this authorization"}
+                </Button>
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      aria-label={`Delete authorization for ${grant.account_label ?? "Cloudflare account"}`}
+                      disabled={pending || deleting}
+                    >
+                      <Trash2Icon />
+                      Delete
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Delete this Cloudflare authorization?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        lnSwitchboard removes the stored grant from this device and asks Cloudflare to revoke it. You can reconnect Cloudflare at any time.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction variant="destructive" onClick={() => onDelete(grant.grant_id)}>
+                        Delete authorization
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div>
+        <Button type="button" variant="outline" disabled={pending} onClick={onConnect}>
+          Connect Cloudflare again
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function CloudflareProvisionForm({
+  accounts,
+  accountId,
+  zoneId,
+  hostname,
+  pending,
+  onAccountChange,
   onZoneChange,
+  onHostnameChange,
   onBack,
   onSubmit,
 }: {
+  accounts: Array<{ id: string; name: string; zones: Array<{ id: string; name: string }> }>
   accountId: string
-  tunnelId: string
-  zones: Array<{ id: string; name: string }>
   zoneId: string
+  hostname: string
   pending: boolean
+  onAccountChange: (value: string) => void
   onZoneChange: (value: string) => void
+  onHostnameChange: (value: string) => void
   onBack: () => void
   onSubmit: () => void
 }) {
+  const selectedAccount = accounts.find((account) => account.id === accountId) ?? accounts[0]
+  const zones = selectedAccount?.zones ?? []
   const selectedZone = zones.find((zone) => zone.id === zoneId)
+  const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, "")
+  const hostnameAuthorized = Boolean(selectedZone) && (
+    normalizedHostname === selectedZone!.name || normalizedHostname.endsWith(`.${selectedZone!.name}`)
+  )
   return (
     <FieldGroup className="max-w-2xl">
-      <Field><FieldLabel>Cloudflare account ID</FieldLabel><Input value={accountId} disabled /></Field>
-      <Field><FieldLabel>Existing tunnel ID</FieldLabel><Input value={tunnelId} disabled /></Field>
       <Field>
-        <FieldLabel htmlFor="cloudflare-zone">Primary domain</FieldLabel>
-        <select id="cloudflare-zone" value={zoneId} disabled={pending} onChange={(event) => onZoneChange(event.target.value)} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none md:text-sm">
-          {zones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
+        <FieldLabel htmlFor="cloudflare-account">Cloudflare account</FieldLabel>
+        <select
+          id="cloudflare-account"
+          value={selectedAccount?.id ?? ""}
+          disabled={pending || accounts.length < 2}
+          onChange={(event) => onAccountChange(event.target.value)}
+          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none md:text-sm"
+        >
+          {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
         </select>
-        <FieldDescription>Lightning Addresses use this zone’s apex. lnSwitchboard adds only the two required Zero Trust Public Hostname paths: LNURL-pay and NIP-05. An apex already routed through the selected tunnel is reused, not replaced.</FieldDescription>
+        <FieldDescription>The account you approved on Cloudflare’s consent screen.</FieldDescription>
       </Field>
-      {selectedZone ? <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">Public hostname: <span className="font-medium text-foreground">{selectedZone.name}</span></p> : null}
-      <div className="flex flex-wrap gap-2"><Button type="button" disabled={!selectedZone || pending} onClick={onSubmit}>{pending ? "Configuring tunnel…" : "Configure existing tunnel"}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onBack}>Back</Button></div>
+      {zones.length === 0 ? (
+        <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          This authorization has no active DNS zones. Add a zone to the Cloudflare account, then authorize again.
+        </p>
+      ) : (
+        <Field>
+          <FieldLabel htmlFor="cloudflare-zone">Domain</FieldLabel>
+          <select id="cloudflare-zone" value={zoneId} disabled={pending} onChange={(event) => onZoneChange(event.target.value)} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none md:text-sm">
+            {zones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
+          </select>
+          <FieldDescription>Select the Cloudflare zone that authorizes the hostname below.</FieldDescription>
+        </Field>
+      )}
+      <Field data-invalid={!hostnameAuthorized || undefined}>
+        <FieldLabel htmlFor="cloudflare-hostname">Hostname</FieldLabel>
+        <Input id="cloudflare-hostname" value={hostname} disabled={pending || zones.length === 0} aria-invalid={!hostnameAuthorized} autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={(event) => onHostnameChange(event.target.value)} />
+        <FieldDescription>Use the zone apex or a subdomain, such as pay.{selectedZone?.name ?? "example.com"}. Only the LNURL-pay and NIP-05 paths are published.</FieldDescription>
+        {!hostnameAuthorized ? <p role="alert" className="text-sm text-destructive">Hostname must be the selected zone or one of its subdomains.</p> : null}
+      </Field>
+      <div className="flex flex-wrap gap-2"><Button type="button" disabled={!selectedZone || !hostnameAuthorized || pending} onClick={onSubmit}>{pending ? "Provisioning…" : "Create connection"}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onBack}>Back</Button></div>
     </FieldGroup>
   )
 }
 
 function ConnectedCloudflare({
   connection,
+  availableZones,
   refreshing,
   disconnecting,
+  addingDomain,
+  removingDomain,
   actionsDisabled,
   onRefresh,
+  onAddDomain,
+  onRemoveDomain,
   onDisconnect,
 }: {
   connection: ProviderConnection
+  availableZones: CloudflareZone[]
   refreshing: boolean
   disconnecting: boolean
+  addingDomain: boolean
+  removingDomain: boolean
   actionsDisabled: boolean
   onRefresh: () => void
+  onAddDomain: (zoneId: string, hostname: string) => void
+  onRemoveDomain: (hostname: string) => void
   onDisconnect: () => void
 }) {
+  const [showAddDomain, setShowAddDomain] = useState(false)
+  const [selectedZoneId, setSelectedZoneId] = useState("")
+  const [selectedHostname, setSelectedHostname] = useState("")
+  const selectedZone = availableZones.find((zone) => zone.id === selectedZoneId)
+  const normalizedHostname = selectedHostname.trim().toLowerCase().replace(/\.$/, "")
+  const hostnameAuthorized = Boolean(selectedZone) && (
+    normalizedHostname === selectedZone!.name || normalizedHostname.endsWith(`.${selectedZone!.name}`)
+  )
+
+  const beginAddingDomain = () => {
+    const firstZone = availableZones[0]
+    setSelectedZoneId(firstZone?.id ?? "")
+    setSelectedHostname(firstZone?.name ?? "")
+    setShowAddDomain(true)
+  }
+
   return (
     <div className="flex flex-col gap-5">
       <div className="grid gap-3 sm:grid-cols-2">
         {connection.domains.map((domain) => (
           <div key={domain.hostname} className="rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
             <div className="flex items-center justify-between gap-3">
-              <span className="truncate font-medium">{domain.hostname}</span>
-              <Badge variant={domain.status === "error" ? "destructive" : "outline"}>{domain.status}</Badge>
+              <span className="min-w-0 truncate font-medium" title={domain.hostname}>{domain.hostname}</span>
+              <div className="flex shrink-0 items-center gap-2">
+                <Badge variant={domain.status === "error" ? "destructive" : "outline"}>{domain.status}</Badge>
+                {connection.domains.length > 1 && domain.zone_id ? (
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        aria-label={`Remove ${domain.hostname}`}
+                        disabled={actionsDisabled}
+                      >
+                        <Trash2Icon />
+                        Remove
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Remove {domain.hostname}?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          lnSwitchboard will remove only this hostname’s LNURL-pay and NIP-05 routes. DNS created by lnSwitchboard will be removed; adopted DNS will be preserved. Your other domains stay connected.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                          variant="destructive"
+                          disabled={removingDomain}
+                          onClick={() => onRemoveDomain(domain.hostname)}
+                        >
+                          Remove domain
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                ) : null}
+              </div>
             </div>
-            <p className="mt-2 text-xs text-muted-foreground">DNS and tunnel configuration managed by lnSwitchboard</p>
+            {domain.status === "active" ? (
+              <p className="mt-2 text-xs text-muted-foreground">Your Lightning Addresses are available at this hostname.</p>
+            ) : null}
+            {domain.last_error ? <p role="alert" className="mt-2 text-xs text-destructive">{domain.last_error}</p> : null}
           </div>
         ))}
       </div>
+      {showAddDomain && availableZones.length > 0 ? (
+        <FieldGroup className="max-w-2xl rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
+          <Field>
+            <FieldLabel htmlFor="cloudflare-additional-domain">Additional domain</FieldLabel>
+            <select
+              id="cloudflare-additional-domain"
+              value={selectedZoneId}
+              disabled={addingDomain}
+              onChange={(event) => {
+                const nextZoneId = event.target.value
+                setSelectedZoneId(nextZoneId)
+                const nextZone = availableZones.find((zone) => zone.id === nextZoneId)
+                if (nextZone) setSelectedHostname(nextZone.name)
+              }}
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none md:text-sm"
+            >
+              {availableZones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
+            </select>
+            <FieldDescription>
+              Select the Cloudflare zone that authorizes the hostname below.
+            </FieldDescription>
+          </Field>
+          <Field data-invalid={!hostnameAuthorized || undefined}>
+            <FieldLabel htmlFor="cloudflare-additional-hostname">Hostname</FieldLabel>
+            <Input id="cloudflare-additional-hostname" value={selectedHostname} disabled={addingDomain} aria-invalid={!hostnameAuthorized} autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={(event) => setSelectedHostname(event.target.value)} />
+            <FieldDescription>Use the zone apex or a subdomain, such as pay.{selectedZone?.name ?? "example.com"}.</FieldDescription>
+            {!hostnameAuthorized ? <p role="alert" className="text-sm text-destructive">Hostname must be the selected zone or one of its subdomains.</p> : null}
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              disabled={!selectedZoneId || !hostnameAuthorized || addingDomain}
+              onClick={() => {
+                onAddDomain(selectedZoneId, normalizedHostname)
+                setShowAddDomain(false)
+              }}
+            >
+              {addingDomain ? "Adding domain…" : "Add selected domain"}
+            </Button>
+            <Button type="button" variant="ghost" disabled={addingDomain} onClick={() => setShowAddDomain(false)}>
+              Cancel
+            </Button>
+          </div>
+        </FieldGroup>
+      ) : null}
       {connection.last_error ? (
         <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {connection.last_error}
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">
+        {availableZones.length > 0 && !showAddDomain ? (
+          <Button type="button" disabled={actionsDisabled} onClick={beginAddingDomain}>
+            <PlusIcon />
+            Add Domain
+          </Button>
+        ) : null}
         <Button variant="outline" disabled={actionsDisabled} onClick={onRefresh}>
           <RefreshCwIcon className={refreshing ? "animate-spin" : undefined} />
           {refreshing ? "Checking…" : "Refresh status"}
@@ -869,15 +1477,15 @@ function ConnectedCloudflare({
           </AlertDialogTrigger>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Disconnect Cloudflare Tunnel?</AlertDialogTitle>
+              <AlertDialogTitle>Disconnect Cloudflare?</AlertDialogTitle>
               <AlertDialogDescription>
-                lnSwitchboard will remove its public ingress route and owned DNS record. The existing tunnel itself is preserved; DNS records that no longer match are also preserved.
+                lnSwitchboard will remove every managed public route and owned DNS record. Adopted or changed DNS records are preserved.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
               <AlertDialogAction variant="destructive" onClick={onDisconnect}>
-                Disconnect tunnel
+                Disconnect
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

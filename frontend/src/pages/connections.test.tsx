@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router"
 
-import { ApiError, api } from "@/lib/api"
+import { ApiError, api, type CloudflareOAuthGrant, type ProviderConnection } from "@/lib/api"
 import { ConnectionsPage } from "@/pages/connections"
 
 import { vi } from "vitest"
@@ -13,11 +13,19 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   api: {
     connections: vi.fn(),
     cloudflareSetup: vi.fn(),
+    beginCloudflareOAuth: vi.fn(),
+    completeCloudflareOAuth: vi.fn(),
+    cloudflareOAuthGrants: vi.fn(),
+    deleteCloudflareOAuthGrant: vi.fn(),
     authorizeCloudflare: vi.fn(),
     cloudflareAuthorization: vi.fn(),
     cancelCloudflareAuthorization: vi.fn(),
     provisionCloudflare: vi.fn(),
+    availableCloudflareDomains: vi.fn(),
+    addCloudflareDomain: vi.fn(),
+    removeCloudflareDomain: vi.fn(),
     refreshCloudflareStatus: vi.fn(),
+    reauthorizeCloudflare: vi.fn(),
     disconnectCloudflare: vi.fn(),
     tailscaleSetup: vi.fn(),
     beginTailscaleLogin: vi.fn(),
@@ -30,14 +38,21 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 
 const setup = {
   available: true,
+  oauth_configured: true,
+  configuration_error: null,
   origin: "http://lnswitchboard:21212",
   required_permissions: [
-    "Cloudflare One Connector: cloudflared Write",
-    "DNS Write",
-    "Zone Read",
-    "Account Settings Read",
+    "Account Settings Read (account-settings.read)",
+    "Zone Read (zone.read)",
+    "DNS Read and Write (dns.read, dns.write)",
+    "Workers Scripts Read, Write, and Bind (workers-scripts.read, workers-scripts.write, workers-scripts.bind)",
+    "Connectivity Directory Bind (connectivity-directory.bind)",
+    "Workers Routes Read and Write (workers-routes.read, workers-routes.write)",
+    "Cloudflare One Connector: WARP Read and Write (teams-connector-warp.read, teams-connector-warp.write)",
+    "Zero Trust Read and Write (teams.read, teams.write)",
+    "Access: Apps and Policies Read and Write (access.read, access.write)",
   ],
-  authorization_method: "api_token" as const,
+  authorization_method: "oauth" as const,
 }
 
 const tailscaleSetup = {
@@ -60,6 +75,39 @@ function tailscaleAuthUrl() {
   return "https://" + "login.tailscale.com" + "/a/" + "TEST_ONLY_AUTHORIZATION"
 }
 
+function oauthFlow() {
+  return {
+    flow_id: "flow-1",
+    authorize_url: "https://dash.cloudflare.com/oauth2/authorize?client_id=lns&state=flow-state",
+    expires_at: Math.floor(Date.now() / 1000) + 600,
+  }
+}
+
+function oauthGrant(): CloudflareOAuthGrant {
+  return {
+    grant_id: "grant-1",
+    scopes: "workers:write zerotrust:write dns:write",
+    account_label: "Example account",
+    account_metadata: { account_id: "a".repeat(32), account_name: "Example account" },
+    access_token_expires_at: 4_000_000_000,
+    has_refresh_token: true,
+    created_at: 1_700_000_000,
+    updated_at: 1_700_000_000,
+  }
+}
+
+function cloudflareAuthorization() {
+  return {
+    accounts: [
+      {
+        id: "a".repeat(32),
+        name: "Example account",
+        zones: [{ id: "b".repeat(32), name: "example.com" }],
+      },
+    ],
+  }
+}
+
 function renderPage(path = "/connections/cloudflare/") {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -74,6 +122,30 @@ function renderPage(path = "/connections/cloudflare/") {
   return { client, ...rendered }
 }
 
+function cloudflareConnection(domains: ProviderConnection["domains"] = [
+  {
+    hostname: "example.com",
+    status: "active",
+    zone_id: "b".repeat(32),
+    external_id: "dns-id",
+    last_error: null,
+  },
+]): ProviderConnection {
+  return {
+    id: "connection-id",
+    provider: "cloudflare",
+    external_id: "mesh-node-id",
+    label: "Cloudflare",
+    status: "connected",
+    account_id: "a".repeat(32),
+    public_metadata: { origin: "http://lnswitchboard:21212" },
+    last_error: null,
+    created_at: "2026-08-04T00:00:00Z",
+    updated_at: "2026-08-04T00:00:00Z",
+    domains,
+  }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(api.connections).mockResolvedValue({
@@ -84,6 +156,8 @@ beforeEach(() => {
     connections: [],
   })
   vi.mocked(api.cloudflareSetup).mockResolvedValue(setup)
+  vi.mocked(api.cloudflareOAuthGrants).mockResolvedValue({ grants: [] })
+  vi.mocked(api.availableCloudflareDomains).mockResolvedValue({ zones: [] })
   vi.mocked(api.tailscaleSetup).mockResolvedValue(tailscaleSetup)
   vi.mocked(api.tailscaleLoginStatus).mockRejectedValue(
     new ApiError(404, "Login not found", "Login not found"),
@@ -109,52 +183,216 @@ test("keeps Cloudflare visible but disabled when the connector is unavailable", 
 
   renderPage()
 
-  expect(await screen.findByRole("heading", { name: "Cloudflare Tunnel" })).toBeVisible()
+  expect(await screen.findByRole("heading", { name: "Cloudflare" })).toBeVisible()
   expect(screen.getByText("Connector not installed")).toBeVisible()
-  expect(screen.getByRole("button", { name: "Connect tunnel" })).toBeDisabled()
-  expect(screen.getByLabelText(/API token/i)).toBeDisabled()
+  expect(screen.getByRole("button", { name: "Connect Cloudflare" })).toBeDisabled()
+  expect(screen.getByLabelText("Completion method")).toBeDisabled()
+  expect(screen.queryByLabelText(/API token/i)).not.toBeInTheDocument()
+  expect(screen.getAllByText(/tokens never leave this device/)).not.toHaveLength(0)
   expect(document.body.textContent).not.toContain("22121")
 })
 
-test("guides token creation and clears the token after secure authorization", async () => {
-  const user = userEvent.setup()
-  vi.mocked(api.authorizeCloudflare).mockResolvedValue({ accounts: [{ id: "a".repeat(32), name: "Example account", zones: [{ id: "b".repeat(32), name: "example.com" }] }] })
-  const { client } = renderPage()
+test("explains when the deployment has not configured its OAuth client", async () => {
+  vi.mocked(api.cloudflareSetup).mockResolvedValue({
+    ...setup,
+    available: false,
+    oauth_configured: false,
+    configuration_error: "Cloudflare OAuth is not configured for this deployment.",
+  })
 
-  const tokenInput = await screen.findByLabelText(/API token/i)
-  expect(tokenInput).toHaveAttribute("type", "password")
-  expect(tokenInput).toHaveAttribute("autocomplete", "off")
-  expect(screen.getByRole("link", { name: /create a scoped token/i })).toHaveAttribute(
-    "href",
-    "https://dash.cloudflare.com/profile/api-tokens",
+  renderPage()
+
+  expect(await screen.findByText("OAuth not configured")).toBeVisible()
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Cloudflare OAuth is not configured for this deployment.",
   )
-  await user.type(screen.getByLabelText("Cloudflare account ID"), "a".repeat(32))
-  await user.type(screen.getByLabelText("Existing tunnel ID"), "1".repeat(32))
-  await user.type(tokenInput, "cloudflare-token-secret")
-  await user.click(screen.getByRole("button", { name: "Connect tunnel" }))
-
-  await waitFor(() => expect(api.authorizeCloudflare).toHaveBeenCalledWith({
-    api_token: "cloudflare-token-secret", account_id: "a".repeat(32), tunnel_id: "1".repeat(32),
-  }))
-  await waitFor(() => expect(screen.queryByLabelText(/API token/i)).not.toBeInTheDocument())
-  expect(client.getMutationCache().getAll()).toHaveLength(0)
-  expect(document.body.textContent).not.toContain("cloudflare-token-secret")
+  expect(screen.getByRole("button", { name: "Connect Cloudflare" })).toBeDisabled()
 })
 
-test("clears a rejected token without retaining it in the mutation cache", async () => {
+test("shows the OAuth scopes the consent screen will request without token guidance", async () => {
+  renderPage()
+
+  for (const permission of setup.required_permissions) {
+    expect(await screen.findByText(permission)).toBeVisible()
+  }
+  expect(screen.getByText(/Cloudflare will request these permissions/)).toBeVisible()
+  expect(screen.queryByRole("link", { name: /api token/i })).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/tunnel/i)).not.toBeInTheDocument()
+})
+
+test("begins OAuth in loopback mode by default and completes via paste-back", async () => {
   const user = userEvent.setup()
-  vi.mocked(api.authorizeCloudflare).mockRejectedValue(new Error("Token validation failed"))
+  vi.mocked(api.beginCloudflareOAuth).mockResolvedValue(oauthFlow())
+  vi.mocked(api.completeCloudflareOAuth).mockResolvedValue(oauthGrant())
+  vi.mocked(api.cloudflareOAuthGrants).mockResolvedValue({ grants: [oauthGrant()] })
   const { client } = renderPage()
 
-  const tokenInput = await screen.findByLabelText(/API token/i)
-  await user.type(screen.getByLabelText("Cloudflare account ID"), "a".repeat(32))
-  await user.type(screen.getByLabelText("Existing tunnel ID"), "1".repeat(32))
-  await user.type(tokenInput, "rejected-cloudflare-token")
-  await user.click(screen.getByRole("button", { name: "Connect tunnel" }))
+  await user.click(await screen.findByRole("button", { name: "Connect Cloudflare" }))
 
-  await waitFor(() => expect(tokenInput).toHaveValue(""))
+  await waitFor(() => expect(api.beginCloudflareOAuth).toHaveBeenCalledWith("loopback"))
+  expect(await screen.findByRole("link", { name: "Open Cloudflare authorization" })).toHaveAttribute(
+    "href",
+    oauthFlow().authorize_url,
+  )
+  expect(screen.getByText(/paste the code shown after authorizing/)).toBeVisible()
+  expect(screen.getByLabelText("State")).toHaveValue("flow-state")
+
+  await user.type(screen.getByLabelText("Authorization code"), "pasted-code")
+  await user.click(screen.getByRole("button", { name: "Complete authorization" }))
+
+  await waitFor(() =>
+    expect(api.completeCloudflareOAuth).toHaveBeenCalledWith({
+      code: "pasted-code",
+      state: "flow-state",
+    }),
+  )
+  expect(await screen.findByText("Example account")).toBeVisible()
   expect(client.getMutationCache().getAll()).toHaveLength(0)
-  expect(document.body.textContent).not.toContain("rejected-cloudflare-token")
+  expect(document.body.textContent).not.toContain("pasted-code")
+  expect(window.localStorage?.length ?? 0).toBe(0)
+  expect(window.sessionStorage?.length ?? 0).toBe(0)
+})
+
+test("uses the page redirect mode when selected", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginCloudflareOAuth).mockResolvedValue(oauthFlow())
+  renderPage()
+
+  await user.selectOptions(await screen.findByLabelText("Completion method"), "page")
+  await user.click(screen.getByRole("button", { name: "Connect Cloudflare" }))
+
+  await waitFor(() => expect(api.beginCloudflareOAuth).toHaveBeenCalledWith("page"))
+  expect(await screen.findByRole("link", { name: "Open Cloudflare authorization" })).toBeInTheDocument()
+})
+
+test("clears a rejected authorization code without retaining it", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginCloudflareOAuth).mockResolvedValue(oauthFlow())
+  vi.mocked(api.completeCloudflareOAuth).mockRejectedValue(
+    new Error("invalid_grant: authorization code expired"),
+  )
+  const { client } = renderPage()
+
+  await user.click(await screen.findByRole("button", { name: "Connect Cloudflare" }))
+  const codeInput = await screen.findByLabelText("Authorization code")
+  await user.type(codeInput, "rejected-pasted-code")
+  await user.click(screen.getByRole("button", { name: "Complete authorization" }))
+
+  await waitFor(() => expect(codeInput).toHaveValue(""))
+  expect(screen.getByRole("link", { name: "Open Cloudflare authorization" })).toBeInTheDocument()
+  expect(client.getMutationCache().getAll()).toHaveLength(0)
+  expect(document.body.textContent).not.toContain("rejected-pasted-code")
+})
+
+test("surfaces a begin failure verbatim and stays on the connect step", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginCloudflareOAuth).mockRejectedValue(
+    new Error("Cloudflare OAuth client is not configured"),
+  )
+  renderPage()
+
+  await user.click(await screen.findByRole("button", { name: "Connect Cloudflare" }))
+
+  await waitFor(() => expect(api.beginCloudflareOAuth).toHaveBeenCalledTimes(1))
+  expect(screen.getByRole("button", { name: "Connect Cloudflare" })).toBeEnabled()
+  expect(screen.queryByRole("link", { name: "Open Cloudflare authorization" })).not.toBeInTheDocument()
+})
+
+test("selects grant, account, and zone, then provisions a hostname", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginCloudflareOAuth).mockResolvedValue(oauthFlow())
+  vi.mocked(api.completeCloudflareOAuth).mockResolvedValue(oauthGrant())
+  vi.mocked(api.cloudflareOAuthGrants).mockResolvedValue({ grants: [oauthGrant()] })
+  vi.mocked(api.authorizeCloudflare)
+    .mockResolvedValueOnce({
+      accounts: [{ id: "a".repeat(32), name: "Example account", zones: [] }],
+    })
+    .mockResolvedValueOnce(cloudflareAuthorization())
+  vi.mocked(api.provisionCloudflare).mockResolvedValue({
+    ...cloudflareConnection([
+      {
+        hostname: "pay.example.com",
+        status: "pending",
+        zone_id: "b".repeat(32),
+        external_id: "dns-id",
+        last_error: null,
+      },
+    ]),
+    status: "provisioning",
+  })
+  const { client } = renderPage()
+
+  await user.click(await screen.findByRole("button", { name: "Connect Cloudflare" }))
+  await user.type(await screen.findByLabelText("Authorization code"), "pasted-code")
+  await user.click(screen.getByRole("button", { name: "Complete authorization" }))
+
+  await user.click(await screen.findByRole("button", { name: "Use this authorization" }))
+  await waitFor(() =>
+    expect(api.authorizeCloudflare).toHaveBeenNthCalledWith(1, {
+      grant_id: "grant-1",
+    }),
+  )
+  await user.click(await screen.findByRole("button", { name: "Example account" }))
+  await waitFor(() =>
+    expect(api.authorizeCloudflare).toHaveBeenNthCalledWith(2, {
+      grant_id: "grant-1",
+      account_id: "a".repeat(32),
+    }),
+  )
+
+  await screen.findByRole("button", { name: "Create connection" })
+  expect(screen.getByLabelText("Cloudflare account")).toHaveValue("a".repeat(32))
+  expect(screen.getByLabelText("Domain")).toHaveValue("b".repeat(32))
+  expect(screen.getByLabelText("Hostname")).toHaveValue("example.com")
+  await user.clear(screen.getByLabelText("Hostname"))
+  await user.type(screen.getByLabelText("Hostname"), "pay.example.com")
+  await user.click(screen.getByRole("button", { name: "Create connection" }))
+
+  await waitFor(() =>
+    expect(vi.mocked(api.provisionCloudflare).mock.calls[0]?.[0]).toEqual({
+      account_id: "a".repeat(32),
+      zone_id: "b".repeat(32),
+      hostname: "pay.example.com",
+    }),
+  )
+  await waitFor(() =>
+    expect(client.getQueryData(["cloudflare-authorization"])).toBeUndefined(),
+  )
+  expect(document.body.textContent).not.toContain("pasted-code")
+})
+
+test("resumes the grant picker after an automatic loopback redirect", async () => {
+  vi.mocked(api.cloudflareOAuthGrants).mockResolvedValue({ grants: [oauthGrant()] })
+  renderPage("/connections/cloudflare/?cloudflare=connected")
+
+  expect(await screen.findByText("Example account")).toBeVisible()
+  expect(screen.getByRole("button", { name: "Use this authorization" })).toBeEnabled()
+  expect(api.beginCloudflareOAuth).not.toHaveBeenCalled()
+})
+
+test("shows an empty state when no grants exist and returns to the connect step", async () => {
+  const user = userEvent.setup()
+  renderPage("/connections/cloudflare/?cloudflare=connected")
+
+  expect(await screen.findByText(/No Cloudflare authorizations yet/)).toBeVisible()
+  await user.click(screen.getByRole("button", { name: "Connect Cloudflare again" }))
+  expect(await screen.findByRole("button", { name: "Connect Cloudflare" })).toBeEnabled()
+})
+
+test("lists grants with expiry and deletes one after confirmation", async () => {
+  const user = userEvent.setup()
+  vi.mocked(api.cloudflareOAuthGrants).mockResolvedValue({ grants: [oauthGrant()] })
+  vi.mocked(api.deleteCloudflareOAuthGrant).mockResolvedValue(null)
+  renderPage("/connections/cloudflare/?cloudflare=connected")
+
+  expect(await screen.findByText("Example account")).toBeVisible()
+  expect(screen.getByText(/Access token expires/)).toBeVisible()
+  await user.click(screen.getByRole("button", { name: "Delete authorization for Example account" }))
+  await user.click(screen.getByRole("button", { name: "Delete authorization" }))
+
+  await waitFor(() =>
+    expect(vi.mocked(api.deleteCloudflareOAuthGrant).mock.calls[0]?.[0]).toBe("grant-1"),
+  )
 })
 
 test("keeps connected management controls active when onboarding capability is unavailable", async () => {
@@ -167,78 +405,176 @@ test("keeps connected management controls active when onboarding capability is u
         reason: "connector_not_installed",
       },
     ],
-    connections: [
-      {
-        id: "connection-id",
-        provider: "cloudflare",
-        external_id: "tunnel-id",
-        label: "Cloudflare Tunnel",
-        status: "connected",
-        account_id: "a".repeat(32),
-        public_metadata: { origin: "http://lnswitchboard:21212" },
-        last_error: null,
-        created_at: "2026-08-04T00:00:00Z",
-        updated_at: "2026-08-04T00:00:00Z",
-        domains: [],
-      },
-    ],
+    connections: [cloudflareConnection([])],
   })
   vi.mocked(api.cloudflareSetup).mockResolvedValue({ ...setup, available: false })
 
   renderPage()
 
-  const heading = await screen.findByRole("heading", { name: "Cloudflare Tunnel" })
+  const heading = await screen.findByRole("heading", { name: "Cloudflare" })
   expect(heading.closest('[data-slot="card"]')).toBeNull()
   expect(screen.getByRole("button", { name: "Refresh status" })).toBeEnabled()
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled()
 })
 
-test("selects an authorized zone and provisions its apex on the existing tunnel", async () => {
+test("reconnects an existing connection without reprovisioning", async () => {
   const user = userEvent.setup()
-  vi.mocked(api.authorizeCloudflare).mockResolvedValue({ accounts: [{ id: "a".repeat(32), name: "Example account", zones: [{ id: "b".repeat(32), name: "example.com" }] }] })
-  vi.mocked(api.provisionCloudflare).mockResolvedValue({
-    id: "connection-id",
-    provider: "cloudflare",
-    external_id: "tunnel-id",
-    label: "Cloudflare Tunnel",
-    status: "provisioning",
-    account_id: "a".repeat(32),
-    public_metadata: { origin: "http://lnswitchboard:21212" },
-    last_error: null,
-    created_at: "2026-08-04T00:00:00Z",
-    updated_at: "2026-08-04T00:00:00Z",
-    domains: [
-      {
-        hostname: "example.com",
-        status: "pending",
-        zone_id: "b".repeat(32),
-        external_id: "dns-id",
-        last_error: null,
-      },
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "cloudflare", name: "Cloudflare", capability: "available", reason: null },
     ],
+    connections: [cloudflareConnection()],
+  })
+  vi.mocked(api.refreshCloudflareStatus).mockRejectedValue(
+    new ApiError(409, "Cloudflare authorization expired; reconnect Cloudflare", "Conflict"),
+  )
+  vi.mocked(api.beginCloudflareOAuth).mockResolvedValue(oauthFlow())
+  vi.mocked(api.completeCloudflareOAuth).mockResolvedValue(oauthGrant())
+  vi.mocked(api.cloudflareOAuthGrants).mockResolvedValue({ grants: [oauthGrant()] })
+  vi.mocked(api.authorizeCloudflare)
+    .mockResolvedValueOnce({
+      accounts: [{ id: "a".repeat(32), name: "Example account", zones: [] }],
+    })
+    .mockResolvedValueOnce(cloudflareAuthorization())
+  vi.mocked(api.reauthorizeCloudflare).mockResolvedValue(cloudflareConnection())
+
+  renderPage()
+
+  await user.click(await screen.findByRole("button", { name: "Refresh status" }))
+
+  const alert = await screen.findByRole("alert")
+  expect(alert).toHaveTextContent("Cloudflare authorization expired; reconnect Cloudflare")
+  expect(alert).toHaveTextContent(/restore domain management/)
+  await user.click(screen.getByRole("button", { name: "Connect Cloudflare" }))
+  await user.type(await screen.findByLabelText("Authorization code"), "new-code")
+  await user.click(screen.getByRole("button", { name: "Complete authorization" }))
+  await user.click(await screen.findByRole("button", { name: "Use this authorization" }))
+  await user.click(await screen.findByRole("button", { name: "Example account" }))
+
+  await waitFor(() =>
+    expect(api.reauthorizeCloudflare).toHaveBeenCalledWith("connection-id"),
+  )
+  expect(screen.queryByRole("button", { name: "Create connection" })).not.toBeInTheDocument()
+})
+
+test("offers unused authorized zones and adds another Cloudflare domain", async () => {
+  const user = userEvent.setup()
+  const existing = cloudflareConnection()
+  const added = cloudflareConnection([
+    ...existing.domains,
+    {
+      hostname: "example.net",
+      status: "pending",
+      zone_id: "d".repeat(32),
+      external_id: "dns-id-2",
+      last_error: null,
+    },
+  ])
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "cloudflare", name: "Cloudflare", capability: "available", reason: null },
+    ],
+    connections: [existing],
+  })
+  vi.mocked(api.availableCloudflareDomains).mockResolvedValue({
+    zones: [{ id: "d".repeat(32), name: "example.net" }],
+  })
+  vi.mocked(api.addCloudflareDomain).mockResolvedValue(added)
+
+  renderPage()
+
+  expect(await screen.findByText("Your Lightning Addresses are available at this hostname.")).toBeVisible()
+  await user.click(await screen.findByRole("button", { name: "Add Domain" }))
+  expect(screen.getByLabelText("Additional domain")).toHaveValue("d".repeat(32))
+  expect(screen.getByLabelText("Hostname")).toHaveValue("example.net")
+  await user.clear(screen.getByLabelText("Hostname"))
+  await user.type(screen.getByLabelText("Hostname"), "pay.example.net")
+  await user.click(screen.getByRole("button", { name: "Add selected domain" }))
+
+  await waitFor(() =>
+    expect(api.addCloudflareDomain).toHaveBeenCalledWith({
+      connectionId: "connection-id",
+      zoneId: "d".repeat(32),
+      hostname: "pay.example.net",
+    }),
+  )
+})
+
+
+test("only claims Lightning Address availability for active Cloudflare domains", async () => {
+  const connection = cloudflareConnection([
+    {
+      hostname: "example.com",
+      status: "active",
+      zone_id: "b".repeat(32),
+      external_id: "dns-id",
+      last_error: null,
+    },
+    {
+      hostname: "pending.example.com",
+      status: "pending",
+      zone_id: "b".repeat(32),
+      external_id: "dns-id-2",
+      last_error: null,
+    },
+    {
+      hostname: "broken.example.com",
+      status: "error",
+      zone_id: "b".repeat(32),
+      external_id: "dns-id-3",
+      last_error: "Managed route is missing",
+    },
+  ])
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "cloudflare", name: "Cloudflare", capability: "available", reason: null },
+    ],
+    connections: [connection],
   })
 
   renderPage()
 
-  await user.type(await screen.findByLabelText("Cloudflare account ID"), "a".repeat(32))
-  await user.type(screen.getByLabelText("Existing tunnel ID"), "1".repeat(32))
-  await user.type(screen.getByLabelText(/API token/i), "cloudflare-token-secret")
-  await user.click(screen.getByRole("button", { name: "Connect tunnel" }))
-  await screen.findByRole("button", { name: "Configure existing tunnel" })
-  expect(screen.getByLabelText("Primary domain")).toHaveValue("b".repeat(32))
-  expect(screen.queryByLabelText("Public hostname")).not.toBeInTheDocument()
-  await user.click(screen.getByRole("button", { name: "Configure existing tunnel" }))
+  await screen.findByText("broken.example.com")
+  expect(
+    screen.getAllByText("Your Lightning Addresses are available at this hostname."),
+  ).toHaveLength(1)
+  expect(screen.getByText("Managed route is missing")).toBeVisible()
+})
 
-  await waitFor(() => {
-    expect(vi.mocked(api.provisionCloudflare).mock.calls[0]?.[0]).toEqual({
-      account_id: "a".repeat(32),
-      tunnel_id: "1".repeat(32),
-      zone_id: "b".repeat(32),
-      hostname: "example.com",
-    })
+
+test("removes one domain without disconnecting Cloudflare", async () => {
+  const user = userEvent.setup()
+  const connected = cloudflareConnection([
+    ...cloudflareConnection().domains,
+    {
+      hostname: "example.net",
+      status: "active",
+      zone_id: "d".repeat(32),
+      external_id: "dns-id-2",
+      last_error: null,
+    },
+  ])
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "cloudflare", name: "Cloudflare", capability: "available", reason: null },
+    ],
+    connections: [connected],
   })
-  expect(api.cloudflareAuthorization).toHaveBeenCalled()
-  expect(document.body.textContent).not.toContain("cloudflare-token-secret")
+  vi.mocked(api.removeCloudflareDomain).mockResolvedValue(cloudflareConnection())
+
+  renderPage()
+
+  await screen.findByText("example.net")
+  await user.click(screen.getByRole("button", { name: "Remove example.net" }))
+  await user.click(screen.getByRole("button", { name: "Remove domain" }))
+
+  await waitFor(() =>
+    expect(api.removeCloudflareDomain).toHaveBeenCalledWith({
+      connectionId: "connection-id",
+      hostname: "example.net",
+    }),
+  )
+  expect(api.disconnectCloudflare).not.toHaveBeenCalled()
 })
 
 test("asks for a device name and suggests lns by default", async () => {

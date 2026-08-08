@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from ..app import deps
 from ..app.config import Settings, get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from ..app.outbound_security import UnsafeOutboundTarget, ensure_public_endpoint, post_to_pinned_endpoint
 
@@ -27,12 +28,86 @@ def test_untrusted_host_header_is_rejected(test_client) -> None:
     assert response.text == "Invalid host header"
 
 
+@pytest.mark.parametrize(
+    "host_header",
+    [
+        "evil@testserver",
+        "testserver/path",
+        "testserver?query",
+        "testserver#fragment",
+        "testserver:bad",
+        "testserver,attacker.example",
+        "test server",
+        "testserver..",
+        "testserver...",
+    ],
+)
+def test_malformed_authority_cannot_match_a_trusted_host(test_client, host_header: str) -> None:
+    response = test_client.get("/api/health", headers={"Host": host_header})
+
+    assert response.status_code == 400
+    assert response.text == "Invalid host header"
+
+
+@pytest.mark.parametrize(
+    "host_header",
+    [
+        " pay.example.com ",
+        "evil@pay.example.com",
+        "pay.example.com/path",
+        "pay.example.com..",
+    ],
+)
+def test_malformed_authority_cannot_match_a_registered_domain(
+    test_client, host_header: str
+) -> None:
+    store = deps._get_connection_store()
+    connection = store.upsert_connection(
+        provider="cloudflare",
+        external_id="dynamic-host-test",
+        label="Cloudflare Tunnel",
+        status="connected",
+    )
+    store.replace_domains(
+        connection.id,
+        [{"hostname": "pay.example.com", "status": "active"}],
+    )
+
+    response = test_client.get("/api/health", headers={"Host": host_header})
+
+    assert response.status_code == 400
+    assert response.text == "Invalid host header"
+
+
 def test_trusted_host_wildcard_allows_only_subdomains(monkeypatch, test_client) -> None:
     monkeypatch.setenv("TRUSTED_HOSTS", "*.example.com")
     get_settings.cache_clear()
     try:
         assert test_client.get("/api/health", headers={"Host": "pay.example.com"}).status_code == 200
         assert test_client.get("/api/health", headers={"Host": "example.com"}).status_code == 400
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "host_header",
+    [
+        ".example.com",
+        "foo..example.com",
+        "-pay.example.com",
+        "pay-.example.com",
+        "pay.ex_ample.com",
+    ],
+)
+def test_malformed_authority_cannot_match_wildcard_trusted_host(
+    monkeypatch, test_client, host_header: str
+) -> None:
+    monkeypatch.setenv("TRUSTED_HOSTS", "*.example.com")
+    get_settings.cache_clear()
+    try:
+        response = test_client.get("/api/health", headers={"Host": host_header})
+        assert response.status_code == 400
+        assert response.text == "Invalid host header"
     finally:
         get_settings.cache_clear()
 
@@ -76,6 +151,34 @@ def test_invalid_trusted_proxy_setting_is_rejected(monkeypatch) -> None:
 
     with pytest.raises(ValueError):
         Settings()
+
+
+def test_default_cloudflare_oauth_scope_matches_registered_capabilities(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("CLOUDFLARE_OAUTH_SCOPE", raising=False)
+
+    scopes = set(Settings().cloudflare_oauth_scope.split())
+
+    assert scopes == {
+        "offline_access",
+        "account-settings.read",
+        "zone.read",
+        "dns.read",
+        "dns.write",
+        "workers-scripts.read",
+        "workers-scripts.write",
+        "workers-scripts.bind",
+        "connectivity-directory.bind",
+        "workers-routes.read",
+        "workers-routes.write",
+        "teams-connector-warp.read",
+        "teams-connector-warp.write",
+        "teams.read",
+        "teams.write",
+        "access.read",
+        "access.write",
+    }
 
 
 def test_outbound_endpoint_validation_returns_a_pinned_public_address() -> None:

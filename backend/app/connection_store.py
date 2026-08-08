@@ -316,7 +316,12 @@ class ConnectionStore:
         domain remains eligible. Error domains are intentionally withdrawn.
         """
 
-        normalized = hostname.strip().lower().rstrip(".")
+        if hostname != hostname.strip():
+            return False
+        normalized = hostname.lower()
+        if normalized.endswith(".."):
+            return False
+        normalized = normalized.removesuffix(".")
         if not normalized:
             return False
         with sqlite_connection(self.path) as connection:

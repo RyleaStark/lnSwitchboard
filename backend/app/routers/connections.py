@@ -9,6 +9,10 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..cloudflare_client import CloudflareAPIError
+from ..cloudflare_oauth import (
+    CloudflareOAuthGrantNotFoundError,
+    CloudflareOAuthReauthRequiredError,
+)
 from ..cloudflare_service import (
     CloudflareConflictError,
     CloudflareNotFoundError,
@@ -39,9 +43,15 @@ _Result = TypeVar("_Result")
 CLOUDFLARE_AUTHORIZATION_COOKIE = "lnswitchboard_cloudflare_authorization"
 TAILSCALE_LOGIN_COOKIE = "lnswitchboard_tailscale_login"
 _REQUIRED_PERMISSIONS = [
-    "Account / Cloudflare One Connectors / Edit",
-    "Zone / DNS / Edit",
-    "Zone / Zone / Read",
+    "Account Settings Read (account-settings.read)",
+    "Zone Read (zone.read)",
+    "DNS Read and Write (dns.read, dns.write)",
+    "Workers Scripts Read, Write, and Bind (workers-scripts.read, workers-scripts.write, workers-scripts.bind)",
+    "Connectivity Directory Bind (connectivity-directory.bind)",
+    "Workers Routes Read and Write (workers-routes.read, workers-routes.write)",
+    "Cloudflare One Connector: WARP Read and Write (teams-connector-warp.read, teams-connector-warp.write)",
+    "Zero Trust Read and Write (teams.read, teams.write)",
+    "Access: Apps and Policies Read and Write (access.read, access.write)",
 ]
 _SENSITIVE_METADATA_KEY_PARTS = ("authorization", "credential", "secret", "token")
 _PRIVATE_NO_STORE = "no-store, private"
@@ -66,7 +76,20 @@ def _serialize_connection(connection: ProviderConnection) -> dict[str, object]:
 
 class CloudflareProvisionRequest(BaseModel):
     account_id: str
-    tunnel_id: str
+    zone_id: str
+    hostname: str
+
+
+class CloudflareAuthorizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    grant_id: str = Field(min_length=1, max_length=256)
+    account_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class CloudflareDomainRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     zone_id: str
     hostname: str
 
@@ -121,9 +144,22 @@ async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Resu
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
         ) from exc
     except CloudflareAPIError as exc:
+        if exc.status_code == status.HTTP_409_CONFLICT:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cloudflare configuration changed; retry the operation",
+            ) from exc
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
+            detail="Cloudflare provider request failed",
+        ) from exc
+    except (
+        CloudflareOAuthGrantNotFoundError,
+        CloudflareOAuthReauthRequiredError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cloudflare authorization expired; reconnect Cloudflare",
         ) from exc
     except CloudflareServiceError as exc:
         raise HTTPException(
@@ -135,9 +171,11 @@ async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Resu
 @router.get("")
 async def list_connections(
     request: Request,
+    response: Response,
     store: ConnectionStore = Depends(get_connection_store_dep),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
+    _set_private_no_store(response)
     connector_available = settings.cloudflared_connector_enabled
     tailscale_available = settings.tailscale_connector_enabled
     tailscale_reason = (
@@ -274,13 +312,31 @@ async def disconnect_tailscale(
 
 @router.get("/cloudflare/setup")
 async def cloudflare_setup(
+    response: Response,
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
+    _set_private_no_store(response)
+    oauth_configured = (
+        settings.cloudflare_oauth_client_id != "placeholder-client-id"
+        and settings.cloudflare_oauth_redirect_page
+        != "https://placeholder.invalid/oauth/callback"
+        and len(settings.cloudflare_oauth_scope.split()) > 1
+        and "replace-with" not in settings.cloudflare_oauth_scope
+    )
     return {
-        "available": settings.cloudflared_connector_enabled,
+        "available": settings.cloudflared_connector_enabled and oauth_configured,
+        "oauth_configured": oauth_configured,
+        "configuration_error": (
+            None
+            if oauth_configured
+            else (
+                "Cloudflare OAuth client, callback, and approved scope IDs are not "
+                "configured for this deployment."
+            )
+        ),
         "origin": settings.cloudflared_origin_url,
         "required_permissions": _REQUIRED_PERMISSIONS,
-        "authorization_method": "api_token",
+        "authorization_method": "oauth",
     }
 
 
@@ -288,32 +344,24 @@ async def cloudflare_setup(
     "/cloudflare/authorize",
 )
 async def authorize_cloudflare(
-    request: Request,
+    request: CloudflareAuthorizeRequest,
     response: Response,
     service: CloudflareService = Depends(get_cloudflare_service_dep),
 ) -> dict[str, object]:
-    try:
-        payload = await request.json()
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Invalid Cloudflare authorization request",
-        ) from exc
-    api_token = payload.get("api_token") if isinstance(payload, dict) else None
-    account_id = payload.get("account_id") if isinstance(payload, dict) else None
-    tunnel_id = payload.get("tunnel_id") if isinstance(payload, dict) else None
-    if (
-        not isinstance(api_token, str)
-        or not isinstance(account_id, str)
-        or not isinstance(tunnel_id, str)
-        or not 1 <= len(api_token) <= 4096
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Invalid Cloudflare authorization request",
+    _set_private_no_store(response)
+    account_id = request.account_id
+    if account_id is None:
+        accounts = await _cloudflare_call(
+            lambda: service.discover_grant_accounts(request.grant_id)
         )
+        return {
+            "accounts": [
+                {"id": account["id"], "name": account["name"], "zones": []}
+                for account in accounts
+            ],
+        }
     authorization = await _cloudflare_call(
-        lambda: service.authorize(api_token, account_id, tunnel_id)
+        lambda: service.authorize_grant(request.grant_id, account_id)
     )
     response.set_cookie(
         CLOUDFLARE_AUTHORIZATION_COOKIE,
@@ -333,16 +381,49 @@ async def authorize_cloudflare(
 )
 async def get_cloudflare_authorization(
     request: Request,
+    response: Response,
     service: CloudflareService = Depends(get_cloudflare_service_dep),
 ) -> dict[str, object]:
+    _set_private_no_store(response)
     authorization_id = request.cookies.get(CLOUDFLARE_AUTHORIZATION_COOKIE)
     if not authorization_id:
-        raise HTTPException(status_code=404, detail="Authorization not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Authorization not found",
+            headers={"Cache-Control": _PRIVATE_NO_STORE, "Pragma": "no-cache"},
+        )
 
     async def operation() -> dict[str, object]:
         return service.get_authorization(authorization_id)
 
     return await _cloudflare_call(operation)
+
+
+@router.post("/cloudflare/{connection_id}/reauthorize")
+async def reauthorize_cloudflare(
+    connection_id: str,
+    request: Request,
+    response: Response,
+    service: CloudflareService = Depends(get_cloudflare_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    authorization_id = request.cookies.get(CLOUDFLARE_AUTHORIZATION_COOKIE)
+    if not authorization_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Authorize Cloudflare before reconnecting",
+            headers={"Cache-Control": _PRIVATE_NO_STORE, "Pragma": "no-cache"},
+        )
+
+    async def operation() -> ProviderConnection:
+        return await service.reauthorize(connection_id, authorization_id)
+
+    connection = await _cloudflare_call(operation)
+    response.delete_cookie(
+        CLOUDFLARE_AUTHORIZATION_COOKIE,
+        path="/api/connections/cloudflare",
+    )
+    return _serialize_connection(connection)
 
 
 @router.delete(
@@ -353,6 +434,7 @@ async def cancel_cloudflare_authorization(
     response: Response,
     service: CloudflareService = Depends(get_cloudflare_service_dep),
 ) -> dict[str, bool]:
+    _set_private_no_store(response)
     authorization_id = request.cookies.get(CLOUDFLARE_AUTHORIZATION_COOKIE)
     cancelled = (
         service.cancel_authorization(authorization_id) if authorization_id else False
@@ -377,14 +459,18 @@ async def provision_cloudflare(
     response: Response,
     service: CloudflareService = Depends(get_cloudflare_service_dep),
 ) -> dict[str, object]:
+    _set_private_no_store(response)
     authorization_id = raw_request.cookies.get(CLOUDFLARE_AUTHORIZATION_COOKIE)
     if not authorization_id:
-        raise HTTPException(status_code=404, detail="Authorization not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Authorization not found",
+            headers={"Cache-Control": _PRIVATE_NO_STORE, "Pragma": "no-cache"},
+        )
     connection = await _cloudflare_call(
         lambda: service.provision(
             authorization_id=authorization_id,
             account_id=request.account_id,
-            tunnel_id=request.tunnel_id,
             zone_id=request.zone_id,
             hostname=request.hostname,
         )
@@ -399,13 +485,61 @@ async def provision_cloudflare(
     return _serialize_connection(connection)
 
 
+@router.get(
+    "/cloudflare/{connection_id}/domains/available",
+)
+async def available_cloudflare_domains(
+    connection_id: str,
+    response: Response,
+    service: CloudflareService = Depends(get_cloudflare_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    zones = await _cloudflare_call(lambda: service.available_zones(connection_id))
+    return {"zones": zones}
+
+
+@router.post(
+    "/cloudflare/{connection_id}/domains",
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_cloudflare_domain(
+    connection_id: str,
+    request: CloudflareDomainRequest,
+    response: Response,
+    service: CloudflareService = Depends(get_cloudflare_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    connection = await _cloudflare_call(
+        lambda: service.add_domain(connection_id, request.zone_id, request.hostname)
+    )
+    return _serialize_connection(connection)
+
+
+@router.delete(
+    "/cloudflare/{connection_id}/domains/{hostname}",
+)
+async def remove_cloudflare_domain(
+    connection_id: str,
+    hostname: str,
+    response: Response,
+    service: CloudflareService = Depends(get_cloudflare_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    connection = await _cloudflare_call(
+        lambda: service.remove_domain(connection_id, hostname)
+    )
+    return _serialize_connection(connection)
+
+
 @router.post(
     "/cloudflare/{connection_id}/status",
 )
 async def refresh_cloudflare_status(
     connection_id: str,
+    response: Response,
     service: CloudflareService = Depends(get_cloudflare_service_dep),
 ) -> dict[str, object]:
+    _set_private_no_store(response)
     connection = await _cloudflare_call(lambda: service.refresh_status(connection_id))
     return _serialize_connection(connection)
 
@@ -415,7 +549,9 @@ async def refresh_cloudflare_status(
 )
 async def disconnect_cloudflare(
     connection_id: str,
+    response: Response,
     service: CloudflareService = Depends(get_cloudflare_service_dep),
 ) -> dict[str, bool]:
+    _set_private_no_store(response)
     removed = await _cloudflare_call(lambda: service.disconnect(connection_id))
     return {"disconnected": removed}

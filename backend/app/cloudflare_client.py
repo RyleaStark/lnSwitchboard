@@ -1,26 +1,69 @@
-"""Minimal, secret-safe Cloudflare REST client for Tunnel provisioning."""
+"""Minimal, secret-safe Cloudflare REST client for Mesh + Worker provisioning."""
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
 
+from .cloudflare_worker_source import (
+    INTERNAL_HOSTNAME,
+    MANAGED_COMMENT,
+    MESH_BINDING_NAME,
+    MESH_NETWORK_ID,
+    WORKER_COMPATIBILITY_DATE,
+    WORKER_SOURCE,
+)
+
+# Originless placeholder content for proxied DNS records lnSwitchboard creates
+# when a hostname has no DNS at all. Workers Routes only need any proxied
+# record to activate; 100:: (discard-only, RFC 6666) never receives traffic.
+PLACEHOLDER_DNS_CONTENT = "100::"
+
 
 class CloudflareAPIError(RuntimeError):
-    """A sanitized Cloudflare API failure safe to surface to administrators."""
+    """A Cloudflare API failure safe to surface to administrators.
 
-    def __init__(self, status_code: int, error_codes: list[int] | None = None) -> None:
+    Provider error messages are carried verbatim for user-facing setup errors
+    (owner preference); transport failures and malformed responses raise the
+    sanitized fixed message with no provider or exception detail.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        error_codes: list[int] | None = None,
+        messages: list[str] | None = None,
+    ) -> None:
         self.status_code = status_code
         self.error_codes = error_codes or []
+        self.messages = messages or []
         suffix = (
             f" (codes: {', '.join(map(str, self.error_codes))})"
             if self.error_codes
             else ""
         )
+        detail = f": {'; '.join(self.messages)}" if self.messages else ""
         super().__init__(
-            f"Cloudflare rejected the request with HTTP {status_code}{suffix}"
+            f"Cloudflare rejected the request with HTTP {status_code}{suffix}{detail}"
         )
+
+
+class CloudflareRollbackError(CloudflareAPIError):
+    """A remote mutation whose rollback could not be safely completed."""
+
+
+class CloudflareWorkersRouteProvisionError(CloudflareAPIError):
+    """Workers Route provisioning failed after creating known route IDs."""
+
+    def __init__(
+        self,
+        cause: CloudflareAPIError,
+        created_routes: list[tuple[str, str]],
+    ) -> None:
+        super().__init__(cause.status_code, cause.error_codes, cause.messages)
+        self.created_routes = tuple(created_routes)
 
 
 class CloudflareClient:
@@ -45,6 +88,8 @@ class CloudflareClient:
         *,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        raw_text: bool = False,
         allow_not_found: bool = False,
     ) -> Any:
         try:
@@ -54,9 +99,19 @@ class CloudflareClient:
                 timeout=15.0,
                 transport=self._transport,
             ) as client:
-                response = await client.request(method, path, params=params, json=json)
+                response = await client.request(
+                    method, path, params=params, json=json, files=files
+                )
         except httpx.HTTPError as exc:
             raise CloudflareAPIError(503) from exc
+
+        if response.status_code == 404 and allow_not_found:
+            return None
+        if raw_text:
+            if response.is_error:
+                codes, messages = self._error_details(response)
+                raise CloudflareAPIError(response.status_code, codes, messages)
+            return response.text
 
         payload: dict[str, Any] = {}
         try:
@@ -65,16 +120,31 @@ class CloudflareClient:
                 payload = parsed
         except ValueError:
             pass
-        if response.status_code == 404 and allow_not_found:
-            return None
         if response.is_error or payload.get("success") is False:
-            codes = [
-                int(item["code"])
-                for item in payload.get("errors", [])
-                if isinstance(item, dict) and isinstance(item.get("code"), int)
-            ]
-            raise CloudflareAPIError(response.status_code, codes)
+            codes, messages = self._error_details(response, payload)
+            raise CloudflareAPIError(response.status_code, codes, messages)
         return payload.get("result")
+
+    @staticmethod
+    def _error_details(
+        response: httpx.Response, payload: dict[str, Any] | None = None
+    ) -> tuple[list[int], list[str]]:
+        if payload is None:
+            try:
+                parsed = response.json()
+                payload = parsed if isinstance(parsed, dict) else {}
+            except ValueError:
+                payload = {}
+        codes: list[int] = []
+        messages: list[str] = []
+        for item in payload.get("errors", []):
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("code"), int):
+                codes.append(int(item["code"]))
+            if isinstance(item.get("message"), str) and item["message"]:
+                messages.append(item["message"])
+        return codes, messages
 
     async def verify_token(self) -> None:
         result = await self._request("GET", "/user/tokens/verify")
@@ -116,33 +186,27 @@ class CloudflareClient:
             raise CloudflareAPIError(502)
         return result
 
-    async def list_dns_records(
-        self, zone_id: str, hostname: str
-    ) -> list[dict[str, Any]]:
-        result = await self._request(
-            "GET",
-            f"/zones/{zone_id}/dns_records",
-            params={"name.exact": hostname, "per_page": 50},
-        )
-        return list(result) if isinstance(result, list) else []
+    # ------------------------------------------------------------------
+    # Mesh node (WARP connector)
+    # ------------------------------------------------------------------
 
-    async def create_tunnel(self, account_id: str, name: str) -> dict[str, Any]:
+    async def create_mesh_node(self, account_id: str, name: str) -> dict[str, Any]:
         result = await self._request(
             "POST",
-            f"/accounts/{account_id}/cfd_tunnel",
-            json={"name": name, "config_src": "cloudflare"},
+            f"/accounts/{account_id}/warp_connector",
+            json={"name": name},
         )
         if not isinstance(result, dict):
             raise CloudflareAPIError(502)
         return result
 
-    async def find_tunnel_by_name(
+    async def find_mesh_node_by_name(
         self, account_id: str, name: str
     ) -> dict[str, Any] | None:
         result = await self._request(
             "GET",
-            f"/accounts/{account_id}/cfd_tunnel",
-            params={"name": name, "is_deleted": "false", "per_page": 50},
+            f"/accounts/{account_id}/warp_connector",
+            params={"name": name, "per_page": 50},
         )
         if not isinstance(result, list):
             raise CloudflareAPIError(502)
@@ -155,188 +219,433 @@ class CloudflareClient:
             None,
         )
 
-    async def get_tunnel(
-        self, account_id: str, tunnel_id: str
+    async def get_mesh_node(
+        self, account_id: str, node_id: str
     ) -> dict[str, Any] | None:
         result = await self._request(
-            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}", allow_not_found=True
+            "GET",
+            f"/accounts/{account_id}/warp_connector/{node_id}",
+            allow_not_found=True,
         )
         return result if isinstance(result, dict) else None
 
-    async def configure_tunnel(
-        self,
-        account_id: str,
-        tunnel_id: str,
-        hostname: str,
-        origin_url: str,
-    ) -> None:
-        current = await self._request(
-            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+    async def get_mesh_node_token(self, account_id: str, node_id: str) -> str:
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/warp_connector/{node_id}/token"
         )
-        if not isinstance(current, dict):
+        if isinstance(result, dict) and isinstance(result.get("token"), str):
+            result = result["token"]
+        if not isinstance(result, str) or not result:
             raise CloudflareAPIError(502)
-        current_config = current.get("config")
-        if current_config is None:
-            # Cloudflare represents a valid, not-yet-configured remote tunnel
-            # as result.config=null until its first configuration PUT.
-            config: dict[str, Any] = {}
-        elif isinstance(current_config, dict):
-            config = dict(current_config)
-        else:
-            raise CloudflareAPIError(502)
-        ingress = self._override_ingress_routes(
-            config.get("ingress"), hostname, origin_url
-        )
-        config["ingress"] = ingress
-        await self._request(
-            "PUT",
-            f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
-            json={"config": config},
-        )
-        verified = await self._request(
-            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
-        )
-        verified_config = verified.get("config") if isinstance(verified, dict) else None
-        verified_ingress = (
-            verified_config.get("ingress") if isinstance(verified_config, dict) else None
-        )
-        if not isinstance(verified_ingress, list):
-            raise CloudflareAPIError(502)
-        required_paths = {
-            r"^/\.well-known/lnurlp/.*$",
-            r"^/\.well-known/nostr\.json$",
-        }
-        configured_paths = {
-            route.get("path")
-            for route in verified_ingress
-            if isinstance(route, dict)
-            and route.get("hostname") == hostname
-            and route.get("service") == origin_url
-        }
-        if not required_paths.issubset(configured_paths):
-            raise CloudflareAPIError(502)
+        return result
 
-    @staticmethod
-    def _override_ingress_routes(
-        ingress: Any, hostname: str, origin_url: str
+    async def list_mesh_node_connections(
+        self, account_id: str, node_id: str
     ) -> list[dict[str, Any]]:
-        """Set the two lnSwitchboard Zero Trust public-hostname routes."""
-        if ingress is None:
-            ingress = []
-        if not isinstance(ingress, list):
-            raise CloudflareAPIError(502)
-
-        managed_paths = {
-            r"^/\.well-known/lnurlp/.*$",
-            r"^/\.well-known/nostr\.json$",
-        }
-        routes: list[dict[str, Any]] = []
-        fallback: dict[str, Any] | None = None
-        for index, route in enumerate(ingress):
-            if not isinstance(route, dict):
-                raise CloudflareAPIError(502)
-            copied = dict(route)
-            route_hostname = copied.get("hostname")
-            if route_hostname is None:
-                if index != len(ingress) - 1 or fallback is not None:
-                    raise CloudflareAPIError(502)
-                fallback = copied
-                continue
-            if not isinstance(route_hostname, str):
-                raise CloudflareAPIError(502)
-            route_path = copied.get("path")
-            if (
-                route_hostname.strip().lower().rstrip(".") == hostname
-                and route_path in managed_paths
-            ):
-                continue
-            routes.append(copied)
-
-        routes.extend(
-            {"hostname": hostname, "path": path, "service": origin_url}
-            for path in sorted(managed_paths)
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/warp_connector/{node_id}/connections"
         )
-        routes.append(fallback or {"service": "http_status:404"})
-        return routes
+        return list(result) if isinstance(result, list) else []
 
-    async def remove_tunnel_route(
-        self, account_id: str, tunnel_id: str, hostname: str
-    ) -> None:
-        current = await self._request(
-            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
-        )
-        config = current.get("config") if isinstance(current, dict) else None
-        if not isinstance(config, dict):
-            raise CloudflareAPIError(502)
-        ingress = config.get("ingress")
-        if not isinstance(ingress, list):
-            raise CloudflareAPIError(502)
-        managed_paths = {
-            r"^/\.well-known/lnurlp/.*$",
-            r"^/\.well-known/nostr\.json$",
-        }
-        normalized = hostname.lower().rstrip(".")
-        retained = [
-            dict(route) for route in ingress
-            if isinstance(route, dict)
-            and not (
-                str(route.get("hostname", "")).lower().rstrip(".") == normalized
-                and route.get("path") in managed_paths
-            )
-        ]
-        if len(retained) == len(ingress):
-            return
+    async def delete_mesh_node(self, account_id: str, node_id: str) -> None:
         await self._request(
-            "PUT", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
-            json={"config": {**config, "ingress": retained}},
-        )
-
-    async def disable_tunnel(self, account_id: str, tunnel_id: str) -> None:
-        await self._request(
-            "PUT",
-            f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
-            json={"config": {"ingress": [{"service": "http_status:404"}]}},
+            "DELETE",
+            f"/accounts/{account_id}/warp_connector/{node_id}",
             allow_not_found=True,
         )
 
-    async def create_dns_record(
-        self,
-        zone_id: str,
-        hostname: str,
-        tunnel_id: str,
+    # ------------------------------------------------------------------
+    # Cloudflare One account prerequisites (device enrollment, device
+    # profiles, device/connectivity settings)
+    # ------------------------------------------------------------------
+
+    async def list_access_apps(self, account_id: str) -> list[dict[str, Any]]:
+        return await self._list_pages(f"/accounts/{account_id}/access/apps")
+
+    async def create_access_app(
+        self, account_id: str, app: dict[str, Any]
     ) -> dict[str, Any]:
         result = await self._request(
             "POST",
-            f"/zones/{zone_id}/dns_records",
+            f"/accounts/{account_id}/access/apps",
+            json=app,
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def list_device_policies(self, account_id: str) -> list[dict[str, Any]]:
+        result = await self._request(
+            "GET",
+            f"/accounts/{account_id}/devices/policies",
+            params={"per_page": 50},
+        )
+        if not isinstance(result, list):
+            raise CloudflareAPIError(502)
+        return [item for item in result if isinstance(item, dict)]
+
+    async def get_default_device_policy(self, account_id: str) -> dict[str, Any]:
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/devices/policy"
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def patch_default_device_policy(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "PATCH",
+            f"/accounts/{account_id}/devices/policy",
+            json=fields,
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def get_device_settings(self, account_id: str) -> dict[str, Any]:
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/devices/settings"
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def patch_device_settings(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "PATCH",
+            f"/accounts/{account_id}/devices/settings",
+            json=fields,
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def get_connectivity_settings(self, account_id: str) -> dict[str, Any]:
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/zerotrust/connectivity_settings"
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def patch_connectivity_settings(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "PATCH",
+            f"/accounts/{account_id}/zerotrust/connectivity_settings",
+            json=fields,
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    # ------------------------------------------------------------------
+    # Hostname route (internal reachability of the app over the mesh)
+    # ------------------------------------------------------------------
+
+    async def create_hostname_route(
+        self, account_id: str, node_id: str, hostname: str = INTERNAL_HOSTNAME
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "POST",
+            f"/accounts/{account_id}/zerotrust/routes/hostname",
             json={
-                "type": "CNAME",
-                "name": hostname,
-                "content": f"{tunnel_id}.cfargotunnel.com",
-                "proxied": True,
-                "comment": "Managed by lnSwitchboard",
+                "hostname": hostname,
+                "tunnel_id": node_id,
+                "comment": MANAGED_COMMENT,
             },
         )
         if not isinstance(result, dict):
             raise CloudflareAPIError(502)
         return result
 
-    async def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str:
-        result = await self._request(
-            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/token"
-        )
-        if not isinstance(result, str) or not result:
-            raise CloudflareAPIError(502)
-        return result
-
-    async def list_tunnel_connections(
-        self,
-        account_id: str,
-        tunnel_id: str,
+    async def list_hostname_routes(
+        self, account_id: str, hostname: str | None = None
     ) -> list[dict[str, Any]]:
+        params = {"hostname": hostname} if hostname else None
         result = await self._request(
-            "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/connections"
+            "GET", f"/accounts/{account_id}/zerotrust/routes/hostname", params=params
         )
         return list(result) if isinstance(result, list) else []
+
+    async def get_hostname_route(
+        self, account_id: str, route_id: str
+    ) -> dict[str, Any] | None:
+        result = await self._request(
+            "GET",
+            f"/accounts/{account_id}/zerotrust/routes/hostname/{route_id}",
+            allow_not_found=True,
+        )
+        return result if isinstance(result, dict) else None
+
+    async def delete_hostname_route(self, account_id: str, route_id: str) -> None:
+        await self._request(
+            "DELETE",
+            f"/accounts/{account_id}/zerotrust/routes/hostname/{route_id}",
+            allow_not_found=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Proxy Worker script
+    # ------------------------------------------------------------------
+
+    async def deploy_proxy_worker(
+        self, account_id: str, script_name: str, mesh_ingress_key: str
+    ) -> None:
+        metadata = {
+            "main_module": "worker.js",
+            "bindings": [
+                {
+                    "name": MESH_BINDING_NAME,
+                    "type": "vpc_network",
+                    "network_id": MESH_NETWORK_ID,
+                },
+                {
+                    "name": "LNS_MESH_INGRESS_KEY",
+                    "type": "secret_text",
+                    "text": mesh_ingress_key,
+                },
+            ],
+            "compatibility_date": WORKER_COMPATIBILITY_DATE,
+        }
+        files = {
+            "metadata": (None, json.dumps(metadata), "application/json"),
+            "worker.js": (
+                "worker.js",
+                WORKER_SOURCE,
+                "application/javascript+module",
+            ),
+        }
+        await self._request(
+            "PUT",
+            f"/accounts/{account_id}/workers/scripts/{script_name}",
+            files=files,
+        )
+
+    async def get_worker_script_content(
+        self, account_id: str, script_name: str
+    ) -> str | None:
+        return await self._request(
+            "GET",
+            f"/accounts/{account_id}/workers/scripts/{script_name}/content/v2",
+            raw_text=True,
+            allow_not_found=True,
+        )
+
+    async def configure_worker_subdomain(
+        self, account_id: str, script_name: str
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "POST",
+            f"/accounts/{account_id}/workers/scripts/{script_name}/subdomain",
+            json={"enabled": False, "previews_enabled": False},
+        )
+        return result if isinstance(result, dict) else {}
+
+    async def get_worker_subdomain(
+        self, account_id: str, script_name: str
+    ) -> dict[str, Any] | None:
+        result = await self._request(
+            "GET",
+            f"/accounts/{account_id}/workers/scripts/{script_name}/subdomain",
+            allow_not_found=True,
+        )
+        if result is None:
+            return None
+        return result if isinstance(result, dict) else {}
+
+    async def delete_worker_script(self, account_id: str, script_name: str) -> None:
+        await self._request(
+            "DELETE",
+            f"/accounts/{account_id}/workers/scripts/{script_name}",
+            allow_not_found=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Per-hostname Workers Routes
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def workers_route_patterns(hostname: str) -> tuple[str, str]:
+        return (
+            f"{hostname}/.well-known/lnurlp/*",
+            f"{hostname}/.well-known/nostr.json",
+        )
+
+    async def list_workers_routes(self, zone_id: str) -> list[dict[str, Any]]:
+        return await self._list_pages(f"/zones/{zone_id}/workers/routes")
+
+    async def _create_workers_route(
+        self, zone_id: str, pattern: str, script_name: str
+    ) -> str:
+        result = await self._request(
+            "POST",
+            f"/zones/{zone_id}/workers/routes",
+            json={"pattern": pattern, "script": script_name},
+        )
+        route_id = str(result.get("id", "")) if isinstance(result, dict) else ""
+        if not route_id:
+            raise CloudflareAPIError(502)
+        return route_id
+
+    async def ensure_workers_routes(
+        self, zone_id: str, hostname: str, script_name: str
+    ) -> list[tuple[str, str]]:
+        """Create the two managed routes, adopting our own and refusing foreign.
+
+        Workers Routes use most-specific-wins semantics: these exact path
+        patterns take precedence over operator ``host/*`` wildcard routes, so
+        foreign wildcard routes can never shadow the two well-known endpoints
+        and are left untouched. An identical exact pattern already attached to
+        a DIFFERENT script is a 409 conflict and is never overwritten; one
+        attached to OUR script is adopted (idempotent retry).
+        """
+        existing = await self.list_workers_routes(zone_id)
+        missing: list[str] = []
+        for pattern in self.workers_route_patterns(hostname):
+            matches = [
+                route for route in existing if route.get("pattern") == pattern
+            ]
+            if any(route.get("script") == script_name for route in matches):
+                continue
+            if matches:
+                raise CloudflareAPIError(
+                    409,
+                    messages=[
+                        f"Workers route {pattern} is already attached to another script"
+                    ],
+                )
+            missing.append(pattern)
+
+        created: list[tuple[str, str]] = []
+        for pattern in missing:
+            try:
+                route_id = await self._create_workers_route(
+                    zone_id, pattern, script_name
+                )
+                created.append((route_id, pattern))
+            except CloudflareAPIError as exc:
+                # The create may have succeeded despite a lost/errored
+                # response; reconcile by re-listing before surfacing failure.
+                refreshed = await self.list_workers_routes(zone_id)
+                if not any(
+                    route.get("pattern") == pattern
+                    and route.get("script") == script_name
+                    for route in refreshed
+                ):
+                    if created:
+                        raise CloudflareWorkersRouteProvisionError(
+                            exc, created
+                        ) from exc
+                    raise
+                # An errored response is not sufficient proof that this
+                # operation created the route, so rollback must preserve it.
+                existing = refreshed
+        return created
+
+    async def remove_worker_route(
+        self,
+        zone_id: str,
+        route_id: str,
+        pattern: str,
+        script_name: str,
+    ) -> None:
+        current = await self._request(
+            "GET",
+            f"/zones/{zone_id}/workers/routes/{route_id}",
+            allow_not_found=True,
+        )
+        if current is None:
+            return
+        if (
+            not isinstance(current, dict)
+            or current.get("pattern") != pattern
+            or current.get("script") != script_name
+        ):
+            raise CloudflareAPIError(
+                409,
+                messages=[
+                    f"Workers route {pattern} changed ownership and was preserved"
+                ],
+            )
+        await self._request(
+            "DELETE",
+            f"/zones/{zone_id}/workers/routes/{route_id}",
+            allow_not_found=True,
+        )
+
+    async def verify_workers_routes(
+        self, zone_id: str, hostname: str, script_name: str
+    ) -> bool:
+        existing = await self.list_workers_routes(zone_id)
+        for pattern in self.workers_route_patterns(hostname):
+            matches = [
+                route for route in existing if route.get("pattern") == pattern
+            ]
+            if len(matches) != 1 or matches[0].get("script") != script_name:
+                return False
+        return True
+
+    async def remove_workers_routes(
+        self, zone_id: str, hostname: str, script_name: str
+    ) -> None:
+        """Delete only routes matching an exact managed pattern AND our script."""
+        existing = await self.list_workers_routes(zone_id)
+        for pattern in self.workers_route_patterns(hostname):
+            matches = [
+                route for route in existing if route.get("pattern") == pattern
+            ]
+            if any(route.get("script") != script_name for route in matches):
+                raise CloudflareAPIError(
+                    409,
+                    messages=[
+                        f"Workers route {pattern} is attached to another script and was preserved"
+                    ],
+                )
+            for route in matches:
+                route_id = str(route.get("id", ""))
+                if not route_id:
+                    raise CloudflareAPIError(502)
+                await self.remove_worker_route(
+                    zone_id, route_id, pattern, script_name
+                )
+
+    # ------------------------------------------------------------------
+    # DNS (originless placeholders only; operator records are never touched)
+    # ------------------------------------------------------------------
+
+    async def list_dns_records(
+        self, zone_id: str, hostname: str
+    ) -> list[dict[str, Any]]:
+        result = await self._request(
+            "GET",
+            f"/zones/{zone_id}/dns_records",
+            params={"name.exact": hostname, "per_page": 50},
+        )
+        return list(result) if isinstance(result, list) else []
+
+    async def create_placeholder_dns_record(
+        self, zone_id: str, hostname: str
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "POST",
+            f"/zones/{zone_id}/dns_records",
+            json={
+                "type": "AAAA",
+                "name": hostname,
+                "content": PLACEHOLDER_DNS_CONTENT,
+                "proxied": True,
+                "comment": MANAGED_COMMENT,
+            },
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
 
     async def get_dns_record(
         self, zone_id: str, record_id: str
@@ -352,20 +661,5 @@ class CloudflareClient:
         await self._request(
             "DELETE",
             f"/zones/{zone_id}/dns_records/{record_id}",
-            allow_not_found=True,
-        )
-
-    async def cleanup_tunnel_connections(self, account_id: str, tunnel_id: str) -> None:
-        await self._request(
-            "DELETE",
-            f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/connections",
-            json={},
-            allow_not_found=True,
-        )
-
-    async def delete_tunnel(self, account_id: str, tunnel_id: str) -> None:
-        await self._request(
-            "DELETE",
-            f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}",
             allow_not_found=True,
         )

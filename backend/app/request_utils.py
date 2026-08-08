@@ -213,6 +213,9 @@ def get_client_ip(request: Request) -> str:
 def get_public_host(request: Request) -> str:
     """Return the host selected by the same precedence as public URL generation."""
 
+    mesh_public_host = getattr(request.state, "mesh_public_host", None)
+    if isinstance(mesh_public_host, str) and mesh_public_host:
+        return mesh_public_host
     return str(_resolve_request_context(request)["host"])
 
 
@@ -226,6 +229,9 @@ def get_public_domain(request: Request) -> str:
 def build_public_url(request: Request) -> str:
     context = _resolve_request_context(request)
     url = request.url.replace(query=None)
+    mesh_public_host = getattr(request.state, "mesh_public_host", None)
+    if isinstance(mesh_public_host, str) and mesh_public_host:
+        return str(url.replace(scheme="https", netloc=mesh_public_host))
     return str(url.replace(scheme=context["proto"], netloc=context["netloc"]))
 
 

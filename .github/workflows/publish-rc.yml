@@ -1,9 +1,6 @@
 name: Publish RC image
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       version:
@@ -13,10 +10,11 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
-  group: publish-rc-${{ github.ref }}-${{ github.sha }}
+  # Publication is manual-only and every attempt for one immutable version
+  # shares the same lock regardless of the selected ref or commit.
+  group: publish-rc-${{ inputs.version }}
   cancel-in-progress: false
 
 env:
@@ -25,10 +23,42 @@ env:
   CACHE_SCOPE: lnswitchboard
 
 jobs:
+  verify-ci:
+    name: Verify exact main SHA passed CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require successful CI for this exact main commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main" || {
+            echo "::error::release candidates may only be published from main" >&2
+            exit 1
+          }
+          RUNS="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/runs?head_sha=$GITHUB_SHA&status=completed&per_page=100")"
+          jq -e --arg sha "$GITHUB_SHA" \
+            '.workflow_runs | any(.head_sha == $sha and .conclusion == "success" and .event == "push")' \
+            <<<"$RUNS" >/dev/null || {
+              echo "::error::the exact main commit has not passed the CI workflow" >&2
+              exit 1
+            }
+
   publish:
     name: Publish GHCR release candidate
+    needs: verify-ci
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,8 +107,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if docker buildx imagetools inspect "$GHCR_IMAGE:$VERSION" >/dev/null 2>&1; then
+          # Fail-closed: only a positively identified 404 means the tag is
+          # vacant. Auth failures, timeouts, rate limits, or any other
+          # registry error abort the run instead of risking an overwrite.
+          REPO="${GHCR_IMAGE#ghcr.io/}"
+          TOKEN="$(
+            curl -fsSL \
+              -u "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+              "https://ghcr.io/token?scope=repository:${REPO}:pull" \
+            | jq -r .token
+          )"
+          STATUS="$(
+            curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/${REPO}/manifests/${VERSION}"
+          )"
+          if [[ "$STATUS" == "200" ]]; then
             echo "::error::GHCR candidate tag already exists and is immutable: $GHCR_IMAGE:$VERSION" >&2
+            exit 1
+          fi
+          if [[ "$STATUS" != "404" ]]; then
+            echo "::error::unable to verify GHCR tag vacancy (HTTP $STATUS); refusing to publish" >&2
             exit 1
           fi
 

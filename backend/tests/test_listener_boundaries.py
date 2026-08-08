@@ -384,6 +384,73 @@ def test_untrusted_peer_cannot_authorize_configured_forwarded_domain(
     assert response.status_code == 404
 
 
+def _seed_cloudflare_mesh_domain(hostname: str, ingress_key: str) -> None:
+    store = deps._get_connection_store()
+    connection = store.upsert_connection(
+        provider="cloudflare",
+        external_id="lnswitchboard-mesh-test",
+        label="Cloudflare Mesh",
+        status="connected",
+        account_id="a" * 32,
+        public_metadata={},
+    )
+    store.replace_domains(
+        connection.id,
+        [{"hostname": hostname, "status": "active", "zone_id": "b" * 32}],
+    )
+    deps._get_connection_secret_store().set(
+        connection.id,
+        {"grant_id": "test-grant", "mesh_ingress_key": ingress_key},
+    )
+
+
+def test_mesh_header_uses_authenticated_public_hostname(
+    listener_clients: tuple[AppClient, AppClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRUSTED_HOSTS", "testserver,localhost")
+    config.get_settings.cache_clear()
+    _seed_cloudflare_mesh_domain("pay.example", "correct-mesh-key")
+    admin, public = listener_clients
+    created = admin.post(
+        "/api/lnaddresses",
+        json={"local_part": "alice", "domain": "pay.example"},
+    )
+    assert created.status_code == 201
+
+    response = public.get(
+        "/.well-known/lnurlp/alice",
+        headers={
+            "Host": "lns.internal",
+            "X-LNS-Public-Host": "pay.example",
+            "X-LNS-Mesh-Key": "correct-mesh-key",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["callback"].startswith("https://pay.example/")
+
+
+def test_direct_client_cannot_spoof_mesh_public_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRUSTED_HOSTS", "testserver,localhost")
+    config.get_settings.cache_clear()
+    _seed_cloudflare_mesh_domain("pay.example", "correct-mesh-key")
+    public = AppClient(main.app, port=21212, client_host="198.51.100.10")
+
+    response = public.get(
+        "/.well-known/lnurlp/alice",
+        headers={
+            "Host": "lns.internal",
+            "X-LNS-Public-Host": "pay.example",
+            "X-LNS-Mesh-Key": "wrong-mesh-key",
+        },
+    )
+
+    assert response.status_code == 400
+
+
 def test_nostr_identity_domain_allows_public_listener(
     listener_clients: tuple[AppClient, AppClient],
 ) -> None:

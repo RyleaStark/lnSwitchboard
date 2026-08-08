@@ -278,9 +278,11 @@ export type ConnectionsResponse = {
 
 export type CloudflareSetup = {
   available: boolean
+  oauth_configured: boolean
+  configuration_error: string | null
   origin: string
   required_permissions: string[]
-  authorization_method: "api_token"
+  authorization_method: "oauth"
 }
 
 export type CloudflareAuthorization = {
@@ -289,9 +291,32 @@ export type CloudflareAuthorization = {
 
 export type CloudflareProvisionPayload = {
   account_id: string
-  tunnel_id: string
   zone_id: string
   hostname: string
+}
+
+export type CloudflareOAuthRedirectMode = "loopback" | "page"
+
+export type CloudflareOAuthFlow = {
+  flow_id: string
+  authorize_url: string
+  expires_at: number
+}
+
+export type CloudflareOAuthGrant = {
+  grant_id: string
+  scopes: string
+  account_label: string | null
+  account_metadata: Record<string, JsonValue>
+  access_token_expires_at: number | null
+  has_refresh_token: boolean
+  created_at: number | null
+  updated_at: number | null
+}
+
+export type CloudflareZone = {
+  id: string
+  name: string
 }
 
 export type TailscaleSetup = {
@@ -451,7 +476,27 @@ export const api = {
     }),
   connections: () => request<ConnectionsResponse>("api/connections"),
   cloudflareSetup: () => request<CloudflareSetup>("api/connections/cloudflare/setup"),
-  authorizeCloudflare: (payload: { api_token: string; account_id: string; tunnel_id: string }) =>
+  beginCloudflareOAuth: (redirectMode: CloudflareOAuthRedirectMode = "loopback") =>
+    request<CloudflareOAuthFlow>("api/cloudflare/oauth/begin", {
+      method: "POST",
+      body: JSON.stringify({ redirect_mode: redirectMode }),
+      cache: "no-store",
+    }),
+  completeCloudflareOAuth: (payload: { code: string; state: string }) =>
+    request<CloudflareOAuthGrant>("api/cloudflare/oauth/complete", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    }),
+  cloudflareOAuthGrants: () =>
+    request<{ grants: CloudflareOAuthGrant[] }>("api/cloudflare/oauth/grants", {
+      cache: "no-store",
+    }),
+  deleteCloudflareOAuthGrant: (grantId: string) =>
+    request<null>(`api/cloudflare/oauth/grants/${encodeURIComponent(grantId)}`, {
+      method: "DELETE",
+    }),
+  authorizeCloudflare: (payload: { grant_id: string; account_id?: string }) =>
     request<CloudflareAuthorization>("api/connections/cloudflare/authorize", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -467,10 +512,29 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  availableCloudflareDomains: (connectionId: string) =>
+    request<{ zones: CloudflareZone[] }>(
+      `api/connections/cloudflare/${connectionId}/domains/available`,
+      { cache: "no-store" },
+    ),
+  addCloudflareDomain: ({ connectionId, zoneId, hostname }: { connectionId: string; zoneId: string; hostname: string }) =>
+    request<ProviderConnection>(`api/connections/cloudflare/${connectionId}/domains`, {
+      method: "POST",
+      body: JSON.stringify({ zone_id: zoneId, hostname }),
+    }),
+  removeCloudflareDomain: ({ connectionId, hostname }: { connectionId: string; hostname: string }) =>
+    request<ProviderConnection>(`api/connections/cloudflare/${connectionId}/domains/${encodeURIComponent(hostname)}`, {
+      method: "DELETE",
+    }),
   refreshCloudflareStatus: (connectionId: string) =>
     request<ProviderConnection>(`api/connections/cloudflare/${connectionId}/status`, {
       method: "POST",
     }),
+  reauthorizeCloudflare: (connectionId: string) =>
+    request<ProviderConnection>(
+      `api/connections/cloudflare/${encodeURIComponent(connectionId)}/reauthorize`,
+      { method: "POST" },
+    ),
   disconnectCloudflare: (connectionId: string) =>
     request<{ disconnected: boolean }>(`api/connections/cloudflare/${connectionId}`, {
       method: "DELETE",

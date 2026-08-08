@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
+import secrets
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from ipaddress import IPv6Address, ip_address, ip_network
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import grpc
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from .deps import (
+    get_cloudflare_oauth_manager_dep,
     get_cloudflare_service_dep,
+    get_connection_secret_store_dep,
     get_connection_store_dep,
     get_ln_address_store_dep,
     get_ln_client_dep,
@@ -33,6 +39,7 @@ from .macaroon_store import MacaroonNotConfiguredError
 from .nip05_store import NostrIdentityStore
 from .request_utils import get_public_domain, get_public_host
 from .routers import connections as connections_router
+from .routers import cloudflare_oauth as cloudflare_oauth_router
 from .routers import ln_addresses as ln_addresses_router
 from .routers import lnurl as lnurl_router
 from .routers import nip05 as nip05_router
@@ -81,8 +88,62 @@ ADMIN_LAN_NETWORKS = tuple(
 )
 
 
+def _valid_host_grammar(hostname: str) -> bool:
+    """Strict DNS-label or IP-literal grammar for an authority hostname.
+
+    urlsplit().hostname is not a validator: authorities such as `.example.com`
+    or `foo..example.com` parse cleanly and would otherwise satisfy wildcard
+    suffix matching in _host_is_trusted.
+    """
+    if not hostname or not hostname.isascii():
+        return False
+    try:
+        ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+    return all(
+        0 < len(label) <= 63
+        and label[0].isalnum()
+        and label[-1].isalnum()
+        and all(character.isalnum() or character == "-" for character in label)
+        for label in hostname.split(".")
+    )
+
+
+def _normalized_authority_hostname(host_header: str) -> str | None:
+    if (
+        not host_header
+        or any(character.isspace() for character in host_header)
+        or any(character in host_header for character in "@/?#\\,")
+    ):
+        return None
+    try:
+        parsed = urlsplit(f"//{host_header}")
+        hostname = (parsed.hostname or "").lower()
+        if hostname.endswith(".."):
+            return None
+        hostname = hostname.removesuffix(".")
+        _ = parsed.port
+    except ValueError:
+        return None
+    if (
+        not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or not _valid_host_grammar(hostname)
+    ):
+        return None
+    return hostname
+
+
 def _host_is_trusted(host_header: str, trusted_hosts: tuple[str, ...]) -> bool:
-    hostname = (urlsplit(f"//{host_header}").hostname or "").lower().rstrip(".")
+    hostname = _normalized_authority_hostname(host_header)
+    if hostname is None:
+        return False
     return any(
         pattern == "*"
         or hostname == pattern
@@ -169,12 +230,30 @@ async def lifespan(app: FastAPI):
         webhook_dispatcher=webhook_dispatcher,
     )
     await webhook_dispatcher.resume_pending_retries()
+    cloudflare_authorization_cleanup_task: asyncio.Task[None] | None = None
     if settings.cloudflared_connector_enabled:
         try:
             cloudflare_service = await get_cloudflare_service_dep()
             await cloudflare_service.recover_incomplete_provisioning()
-        except Exception as exc:  # pragma: no cover - network runtime
-            LOGGER.warning("Unable to recover incomplete Cloudflare provisioning: %s", exc)
+        except Exception:  # pragma: no cover - network runtime
+            LOGGER.error("Unable to recover incomplete Cloudflare provisioning")
+            raise
+        else:
+            (await get_cloudflare_oauth_manager_dep()).purge_expired_flows()
+
+            async def purge_expired_cloudflare_authorizations() -> None:
+                while True:
+                    await asyncio.sleep(60)
+                    try:
+                        cloudflare_service.purge_expired_authorizations()
+                    except Exception:  # pragma: no cover - storage runtime
+                        LOGGER.warning(
+                            "Unable to purge expired Cloudflare authorizations"
+                        )
+
+            cloudflare_authorization_cleanup_task = asyncio.create_task(
+                purge_expired_cloudflare_authorizations()
+            )
     if settings.tailscale_connector_enabled:
         try:
             tailscale_service = await get_tailscale_service_dep()
@@ -209,6 +288,10 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # pragma: no cover - network runtime
         LOGGER.warning("Unable to verify LND connection: %s", exc)
     yield
+    if cloudflare_authorization_cleanup_task is not None:
+        cloudflare_authorization_cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cloudflare_authorization_cleanup_task
     await invoice_full_refresh_worker.stop()
     await invoice_subscription_worker.stop()
     await ln_client.close()
@@ -234,14 +317,47 @@ def _add_request_security(target_app: FastAPI) -> None:
             ]
         trusted_hosts = parse_trusted_hosts(settings.trusted_hosts)
         request_host = request.headers.get("host", "")
+        mesh_public_host: str | None = None
+        mesh_candidate = request.headers.get("x-lns-public-host", "")
+        mesh_key = request.headers.get("x-lns-mesh-key", "")
+        if _normalized_authority_hostname(request_host) == "lns.internal":
+            candidate_hostname = _normalized_authority_hostname(mesh_candidate)
+            if candidate_hostname is not None:
+                connection_store = await get_connection_store_dep()
+                secret_store = await get_connection_secret_store_dep()
+                for connection in connection_store.list_connections():
+                    if connection.provider != "cloudflare":
+                        continue
+                    if not any(
+                        domain.hostname == candidate_hostname
+                        and domain.status in {"pending", "active"}
+                        for domain in connection.domains
+                    ):
+                        continue
+                    credential = secret_store.get(connection.id) or {}
+                    expected_key = credential.get("mesh_ingress_key")
+                    if (
+                        isinstance(expected_key, str)
+                        and expected_key
+                        and secrets.compare_digest(mesh_key, expected_key)
+                    ):
+                        mesh_public_host = candidate_hostname
+                    break
+        if mesh_public_host is not None:
+            request.state.mesh_public_host = mesh_public_host
         public_host = get_public_host(request)
+        request_hostname = _normalized_authority_hostname(request_host)
+        public_hostname = _normalized_authority_hostname(public_host)
+        if request_hostname is None or public_hostname is None:
+            return PlainTextResponse("Invalid host header", status_code=400)
         connection_store = await get_connection_store_dep()
         if not (
             _host_is_trusted(request_host, trusted_hosts)
-            or connection_store.has_public_domain(request_host)
+            or connection_store.has_public_domain(request_hostname)
+            or mesh_public_host is not None
         ) or not (
             _host_is_trusted(public_host, trusted_hosts)
-            or connection_store.has_public_domain(public_host)
+            or connection_store.has_public_domain(public_hostname)
         ):
             return PlainTextResponse("Invalid host header", status_code=400)
         return await call_next(request)
@@ -282,6 +398,28 @@ def _add_admin_access_control(target_app: FastAPI) -> None:
         return PlainTextResponse("Forbidden", status_code=status.HTTP_403_FORBIDDEN)
 
 
+def _add_cloudflare_response_privacy(target_app: FastAPI) -> None:
+    @target_app.middleware("http")
+    async def prevent_cloudflare_admin_caching(request: Request, call_next):
+        is_cloudflare_admin = request.url.path.startswith(
+            ("/api/connections/cloudflare", "/api/cloudflare/oauth")
+        )
+        try:
+            response = await call_next(request)
+        except Exception:
+            if not is_cloudflare_admin:
+                raise
+            LOGGER.error("Unhandled Cloudflare administration request failure")
+            response = JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"detail": "Cloudflare operation failed"},
+            )
+        if is_cloudflare_admin:
+            response.headers["Cache-Control"] = "no-store, private"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+
 async def require_configured_public_domain(
     request: Request,
     address_store: LNAddressStore = Depends(get_ln_address_store_dep),
@@ -313,11 +451,29 @@ public_app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@admin_app.exception_handler(RequestValidationError)
+async def sanitize_cloudflare_oauth_validation(
+    request: Request, exc: RequestValidationError
+):
+    if request.url.path.startswith(
+        ("/api/cloudflare/oauth", "/api/connections/cloudflare")
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": "Invalid Cloudflare request"},
+        )
+    return await request_validation_exception_handler(request, exc)
+
+
 _add_admin_access_control(admin_app)
 _add_request_security(admin_app)
+_add_cloudflare_response_privacy(admin_app)
 _add_request_security(public_app)
 
 admin_app.include_router(ui_router.router)
+admin_app.include_router(cloudflare_oauth_router.router)
 admin_app.include_router(connections_router.router)
 admin_app.include_router(webhooks_router.router)
 admin_app.include_router(ln_addresses_router.api_router)

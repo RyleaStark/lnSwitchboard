@@ -71,11 +71,9 @@ Then run:
 docker compose up -d
 ```
 
-The Compose stack includes a separate, unprivileged `cloudflared` connector. It has no host-published ports, Docker socket, privileged mode, host networking, or additional Linux capabilities. lnSwitchboard writes its tunnel token under `./secrets/cloudflared`; the connector mounts only that subdirectory read-only and can reach only the public application listener at `lnswitchboard:21212` through tunnel configuration managed by the app.
+The Compose stack includes a dedicated Cloudflare Mesh node pinned to the immutable multi-platform digest for `cloudflare/mesh:2026.7.0`. It publishes no host ports, has no Docker socket, does not use host networking, and is configured to forward customer traffic only to the public application listener. Cloudflare Mesh requires only `/dev/net/tun`, `NET_ADMIN`, `NET_RAW`, and IP-forwarding sysctls. lnSwitchboard writes the node enrollment material under `./secrets/cloudflare-mesh`; the sidecar mounts that directory read-only and forwards public traffic only to the application listener on port `21212`.
 
-The connector starts from the current released `cloudflare/cloudflared:2026.7.3` image pinned to its immutable multi-platform digest. Its image entrypoint is overridden to allow cloudflared's built-in updater to check every 24 hours. Runtime binary updates survive normal container restarts and host reboots, but recreating the container restores the pinned image and cloudflared checks for updates again. Dependabot also keeps the reviewed version and digest current in this repository.
-
-Before a tunnel has been authorized, the connector may restart with backoff while waiting for `./secrets/cloudflared/tunnel.token`; this is expected. The Connections page distinguishes the installed connector capability from an authenticated, connected tunnel.
+Before Cloudflare onboarding is complete, the Mesh sidecar restarts with backoff while waiting for `./secrets/cloudflare-mesh/node.env`; this is expected. The wrapper reads the token without placing it in Compose, a command line, browser storage, or application logs. The Connections page distinguishes an installed Mesh capability from an active Cloudflare connection.
 
 The Compose stack also includes a dedicated Tailscale userspace sidecar, pinned to `tailscale/tailscale:v1.98.10` by immutable multi-platform digest. It uses a private daemon-state volume and a separate named control/status volume shared only with lnSwitchboard. The container has a read-only root filesystem, drops every Linux capability, enables `no-new-privileges`, publishes no host ports, and mounts neither `/dev/net/tun` nor the Docker socket.
 
@@ -87,22 +85,34 @@ Open **Connections → Tailscale** from the administration panel to onboard the 
 
 lnSwitchboard starts Tailscale's interactive browser login and shows its short-lived authorization link and in-memory QR code only inside the private administration flow. The link is never written to application logs, connection metadata, browser storage, or retained query state. After login, lnSwitchboard reads the daemon-owned DNS name, accepts only a canonical `*.ts.net` hostname covered by `CertDomains`, verifies MagicDNS, HTTPS, the `funnel` node attribute, and port `443`, then enables the fixed Funnel target. Missing prerequisites remain visible for manual correction; lnSwitchboard never edits broad tailnet policy. Cancellation, expiry, failed validation, successful connection, restart recovery, and disconnect all remove transient authorization artifacts.
 
-Open **Connections → Cloudflare** to onboard a hostname. No OAuth client, callback URL, or Cloudflare application registration is required. Follow the link in the page to [create a custom API token](https://dash.cloudflare.com/profile/api-tokens) with only these permissions:
+Open **Connections → Cloudflare** to onboard a hostname through Cloudflare OAuth. There is no manual API-token path and no OAuth client secret. Authorization uses PKCE S256 directly between the local lnSwitchboard instance and Cloudflare; access and refresh grants are encrypted in the local connection secret store and are never returned to the browser after exchange.
 
-- Account / Cloudflare One Connectors / Edit
-  - Compatible dashboard label: Account / Cloudflare One Connector: cloudflared / Edit
-- Zone / DNS / Edit
-- Zone / Zone / Read
+The project OAuth application is a public client (`token_endpoint_auth_method: none`). Register it with these exact Cloudflare OAuth scope IDs, which were verified against the authenticated `GET /client/v4/oauth/scopes` catalog:
 
-Restrict the token resources to the Cloudflare account and zone that will host the public name, then paste it into the administration panel. lnSwitchboard supports HTTP or HTTPS administration; the operator is responsible for securing the administration path. Do not put the token in `.env`, Compose configuration, URLs, command-line arguments, or browser storage.
+- `account-settings.read` — Account Settings Read
+- `zone.read` — Zone Read
+- `dns.read`, `dns.write` — DNS Read/Write
+- `workers-scripts.read`, `workers-scripts.write`, `workers-scripts.bind` — Worker source and the `vpc_network` binding
+- `connectivity-directory.bind` — authorize the Worker VPC binding to Cloudflare's connectivity directory
+- `workers-routes.read`, `workers-routes.write` — path-specific Workers Routes
+- `teams-connector-warp.read`, `teams-connector-warp.write` — Mesh/WARP connector lifecycle
+- `teams.read`, `teams.write` — Cloudflare One device and Gateway prerequisites
+- `access.read`, `access.write` — Access enrollment application and policy prerequisites
+- `offline_access` — local refresh-token support
 
-lnSwitchboard validates the token against the explicit Cloudflare account ID and existing tunnel ID you supply, encrypts the API token at rest, and never returns it to the browser. Enter the zone ID and intended exact hostname; lnSwitchboard checks that hostname in the selected zone and refuses an existing DNS record rather than overwriting or adopting it.
+Configure the same space-separated list in `CLOUDFLARE_OAUTH_SCOPE`. The setup API keeps onboarding disabled until a non-placeholder client ID and callback page are configured.
 
-The page remains visible but disabled until the connector is installed. lnSwitchboard never creates or deletes the selected tunnel: it reads its ingress configuration, overrides only the selected hostname to the isolated `21212` public listener, preserves unrelated routes and the terminal fallback, writes the configuration, then reads it back to verify the route before creating one proxied CNAME. During disconnect, lnSwitchboard removes only that hostname route and revalidates its DNS ownership marker before removing the record; changed records are preserved.
+Register both exact redirect URIs: `http://127.0.0.1:22121/api/cloudflare/oauth/callback` for direct loopback completion and the HTTPS URL where `oauth-callback/index.html` is hosted for paste-back completion. The static callback uses fragment delivery, a hash-restricted CSP, no analytics or external resources, and no network requests. Configure `CLOUDFLARE_OAUTH_CLIENT_ID` and `CLOUDFLARE_OAUTH_REDIRECT_PAGE`. Never configure or ship a client secret.
+
+After consent, choose an OAuth-authorized account and zone rather than pasting resource IDs. lnSwitchboard idempotently verifies or configures the Cloudflare One prerequisites needed by Mesh: device enrollment, the default Split Tunnels profile, Gateway TCP/UDP proxying, unique device IPs, and Mesh connectivity. Customized settings that cannot be changed safely are reported for operator action instead of being overwritten.
+
+lnSwitchboard creates the Mesh node and its exact `lns.internal` hostname route, deploys `lnswitchboard-proxy` into the customer's own Cloudflare account with a `vpc_network` binding, and installs exactly two Workers Routes per hostname: `HOST/.well-known/lnurlp/*` and `HOST/.well-known/nostr.json`. The Worker has no logs, telemetry, analytics bindings, or external fetch path; it only forwards to `env.MESH.fetch()` and returns a fixed sanitized `503` on failure. Public traffic therefore flows from Cloudflare directly through resources in the customer's account to the customer's local Mesh and port `21212`; no project-operated service is in the data path.
+
+Existing usable DNS is preserved. If Cloudflare requires a proxied record and none exists, lnSwitchboard creates an explicitly owned placeholder and deletes it only after immediate ownership revalidation. Identical Workers Routes owned by another script are conflicts; routes already assigned to `lnswitchboard-proxy` are adopted idempotently. Each hostname can be removed independently, while full disconnect removes only resources whose exact ownership is revalidated.
 
 Compose binds administration port `22121` to loopback by default and publishes public port `21212` for LNURL-pay and NIP-05 traffic. The administration listener allows direct loopback/RFC1918 LAN clients (plus IPv6 ULA/link-local clients) and returns `403` to WAN peers. Provider onboarding follows the same administration policy; it does not impose a stricter HTTPS or proxy-identity condition. Override `LNSWITCHBOARD_BIND_ADDRESS` only when the administration listener must bind another host interface.
 
-Requests on port `21212` use the direct `Host` value, or forwarding headers from peers listed in `TRUSTED_PROXY_CIDRS`. The resolved domain must match a configured Lightning Address, Nostr identity, or a pending/active provider domain registered by Cloudflare Tunnel or Tailscale Funnel; otherwise the public listener returns `404`.
+Requests on port `21212` use the direct `Host` value, the fixed public-host header supplied by the customer-owned Worker, or forwarding headers from peers listed in `TRUSTED_PROXY_CIDRS`. The resolved domain must match a configured Lightning Address, Nostr identity, or a pending/active provider domain registered by Cloudflare or Tailscale Funnel; otherwise the public listener returns `404`.
 
 Set `TRUSTED_HOSTS` to every hostname that may serve lnSwitchboard (comma-separated; `*.example.com` wildcards are supported). Requests with any other `Host` value are rejected, which protects a loopback deployment from DNS rebinding. Forwarding headers are ignored unless the immediate reverse proxy is explicitly listed in `TRUSTED_PROXY_CIDRS` (comma-separated IPs or CIDR ranges). Configure the narrowest possible proxy network so LNURL callback URLs and client rate limits use the original HTTPS request safely; never trust an entire shared LAN. Outbound webhooks and Nostr zap receipts refuse destinations on private, loopback, link-local, or reserved networks by default; enable `ALLOW_PRIVATE_WEBHOOKS` or `ALLOW_PRIVATE_NOSTR_RELAYS` only when intentionally targeting trusted local services.
 
