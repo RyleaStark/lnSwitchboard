@@ -11,6 +11,7 @@ import pytest
 
 from backend.app.cloudflare_client import CloudflareAPIError
 from backend.app.cloudflare_service import (
+    PREREQ_METADATA_KEY,
     CloudflareConflictError,
     CloudflareNotFoundError,
     CloudflareService,
@@ -83,12 +84,96 @@ class FakeCloudflareClient:
     ensure_routes_error: CloudflareAPIError | None = None
     delete_node_error: CloudflareAPIError | None = None
     delete_worker_error: CloudflareAPIError | None = None
+    list_access_apps_error: CloudflareAPIError | None = None
+    # Cloudflare One prerequisite state; defaults are fully satisfied so
+    # provisioning tests exercise the no-write path.
+    access_apps: list[dict[str, Any]] = field(default_factory=lambda: [
+        {
+            "id": "app-warp",
+            "type": "warp",
+            "name": "Warp device enrollment",
+            "policies": [
+                {"decision": "allow", "include": [{"everyone": {}}]},
+            ],
+        },
+    ])
+    device_policy: dict[str, Any] = field(default_factory=lambda: {
+        "default": True,
+        "enabled": True,
+        "include": [{"address": "100.96.0.0/12", "description": "mesh"}],
+        "exclude": [],
+        "service_mode_v2": {"mode": "warp"},
+    })
+    device_settings: dict[str, Any] = field(default_factory=lambda: {
+        "gateway_proxy_enabled": True,
+        "gateway_udp_proxy_enabled": True,
+        "use_zt_virtual_ip": True,
+    })
+    connectivity_settings: dict[str, Any] = field(default_factory=lambda: {
+        "icmp_proxy_enabled": True,
+        "offramp_warp_enabled": True,
+    })
     zones: list[dict[str, Any]] = field(default_factory=lambda: [
         {"id": ZONE_ID, "name": "example.com", "account": {"id": ACCOUNT_ID}},
     ])
 
     async def _call(self, name: str, value: Any = None) -> None:
         self.calls.append((name, value))
+
+    async def list_access_apps(self, account_id: str) -> list[dict[str, Any]]:
+        await self._call("list_access_apps", account_id)
+        if self.list_access_apps_error is not None:
+            raise self.list_access_apps_error
+        return [dict(app) for app in self.access_apps]
+
+    async def create_access_app(
+        self, account_id: str, app: dict[str, Any]
+    ) -> dict[str, Any]:
+        await self._call("create_access_app", (account_id, app))
+        created = {"id": "app-created", **app}
+        self.access_apps.append(created)
+        return created
+
+    async def list_device_policies(self, account_id: str) -> list[dict[str, Any]]:
+        await self._call("list_device_policies", account_id)
+        return [dict(self.device_policy)]
+
+    async def get_default_device_policy(self, account_id: str) -> dict[str, Any]:
+        await self._call("get_default_device_policy", account_id)
+        return {
+            key: (list(value) if isinstance(value, list) else value)
+            for key, value in self.device_policy.items()
+        }
+
+    async def patch_default_device_policy(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        await self._call("patch_default_device_policy", (account_id, fields))
+        self.device_policy.update(fields)
+        return dict(self.device_policy)
+
+    async def get_device_settings(self, account_id: str) -> dict[str, Any]:
+        await self._call("get_device_settings", account_id)
+        return dict(self.device_settings)
+
+    async def patch_device_settings(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        await self._call("patch_device_settings", (account_id, fields))
+        self.device_settings.update(fields)
+        return dict(self.device_settings)
+
+    async def get_connectivity_settings(self, account_id: str) -> dict[str, Any]:
+        await self._call("get_connectivity_settings", account_id)
+        return dict(self.connectivity_settings)
+
+    async def patch_connectivity_settings(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        await self._call("patch_connectivity_settings", (account_id, fields))
+        self.connectivity_settings.update(fields)
+        return dict(self.connectivity_settings)
+
 
     async def verify_token(self) -> None:
         await self._call("verify_token")
@@ -491,6 +576,10 @@ async def test_mesh_provision_creates_node_worker_routes_and_dns(service_parts) 
         "list_accounts",
         "list_zones",
         "get_zone",
+        "list_access_apps",
+        "get_default_device_policy",
+        "get_device_settings",
+        "get_connectivity_settings",
         "create_mesh_node",
         "get_mesh_node_token",
         "create_hostname_route",
@@ -508,6 +597,376 @@ async def test_mesh_provision_creates_node_worker_routes_and_dns(service_parts) 
     assert client.worker_content == WORKER_SOURCE
     assert len(client.workers_routes) == 2
     assert len(client.dns_records) == 1
+
+
+PREREQ_WRITE_CALLS = {
+    "create_access_app",
+    "patch_default_device_policy",
+    "patch_device_settings",
+    "patch_connectivity_settings",
+}
+
+
+def prereq_writes(client: FakeCloudflareClient) -> list[str]:
+    return [name for name in call_names(client) if name in PREREQ_WRITE_CALLS]
+
+
+@pytest.mark.anyio
+async def test_prerequisites_already_satisfied_issue_no_writes(service_parts) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    report = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+
+    assert report["status"] == "satisfied"
+    assert set(report["checks"]) == {
+        "device_enrollment",
+        "device_profile",
+        "gateway_proxy",
+        "unique_device_ips",
+        "mesh_connectivity",
+    }
+    assert all(
+        check["status"] == "passed" for check in report["checks"].values()
+    )
+    assert prereq_writes(client) == []
+
+
+@pytest.mark.anyio
+async def test_prerequisite_device_enrollment_created_exactly_once_when_missing(
+    service_parts,
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.access_apps = []
+    report = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+
+    assert report["status"] == "satisfied"
+    assert report["checks"]["device_enrollment"]["status"] == "configured"
+    assert prereq_writes(client) == ["create_access_app"]
+    [created] = client.access_apps
+    assert created["type"] == "warp"
+    assert created["policies"][0]["decision"] == "allow"
+
+    client.calls.clear()
+    second = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+    assert second["checks"]["device_enrollment"]["status"] == "passed"
+    assert prereq_writes(client) == []
+
+
+@pytest.mark.anyio
+async def test_prerequisite_enrollment_app_without_allow_policy_needs_manual_action(
+    service_parts,
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.access_apps = [
+        {"id": "app-warp", "type": "warp", "policies": [{"decision": "block"}]}
+    ]
+    report = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+
+    assert report["status"] == "needs-manual-action"
+    assert report["checks"]["device_enrollment"]["status"] == "needs-manual-action"
+    assert prereq_writes(client) == []
+
+
+@pytest.mark.anyio
+async def test_prerequisite_include_mode_profile_appends_mesh_range_preserving_entries(
+    service_parts,
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.device_policy = {
+        "default": True,
+        "include": [{"address": "10.0.0.0/8", "description": "operator LAN"}],
+        "exclude": [],
+        "service_mode_v2": {"mode": "warp"},
+    }
+    report = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+
+    assert report["checks"]["device_profile"]["status"] == "configured"
+    assert prereq_writes(client) == ["patch_default_device_policy"]
+    addresses = [entry["address"] for entry in client.device_policy["include"]]
+    assert addresses == ["10.0.0.0/8", "100.96.0.0/12"]
+
+    client.calls.clear()
+    second = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+    assert second["checks"]["device_profile"]["status"] == "passed"
+    assert prereq_writes(client) == []
+
+
+@pytest.mark.anyio
+async def test_prerequisite_exclude_mode_removes_only_the_default_cgnat_exclusion(
+    service_parts,
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.device_policy = {
+        "default": True,
+        "include": [],
+        "exclude": [
+            {"address": "100.64.0.0/10", "description": "Default CGNAT"},
+            {"address": "10.0.0.0/8", "description": "operator LAN"},
+        ],
+        "service_mode_v2": {"mode": "warp"},
+    }
+    report = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+
+    assert report["checks"]["device_profile"]["status"] == "configured"
+    assert prereq_writes(client) == ["patch_default_device_policy"]
+    # Only the exact default 100.64.0.0/10 entry is removed; every other
+    # exclusion is preserved untouched.
+    assert client.device_policy["exclude"] == [
+        {"address": "10.0.0.0/8", "description": "operator LAN"}
+    ]
+
+
+@pytest.mark.anyio
+async def test_prerequisite_exclude_mode_without_mesh_blockers_passes(
+    service_parts,
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.device_policy = {
+        "default": True,
+        "include": [],
+        "exclude": [{"address": "10.0.0.0/8", "description": "operator LAN"}],
+        "service_mode_v2": {"mode": "warp"},
+    }
+    report = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+
+    assert report["checks"]["device_profile"]["status"] == "passed"
+    assert prereq_writes(client) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("blocking_address", ["100.64.0.0/9", "100.96.0.0/12", "100.0.0.0/8"])
+async def test_prerequisite_exclude_mode_custom_blocking_entry_needs_manual_action(
+    service_parts, blocking_address: str
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.device_policy = {
+        "default": True,
+        "include": [],
+        "exclude": [
+            {"address": blocking_address, "description": "operator custom"}
+        ],
+        "service_mode_v2": {"mode": "warp"},
+    }
+    report = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+
+    check = report["checks"]["device_profile"]
+    assert report["status"] == "needs-manual-action"
+    assert check["status"] == "needs-manual-action"
+    assert blocking_address in check["detail"]
+    # A customized profile is never mutated.
+    assert prereq_writes(client) == []
+    assert client.device_policy["exclude"] == [
+        {"address": blocking_address, "description": "operator custom"}
+    ]
+
+
+@pytest.mark.anyio
+async def test_prerequisite_non_warp_client_mode_needs_manual_action(
+    service_parts,
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.device_policy = {
+        "default": True,
+        "include": [{"address": "100.96.0.0/12"}],
+        "exclude": [],
+        "service_mode_v2": {"mode": "proxy"},
+    }
+    report = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+
+    check = report["checks"]["device_profile"]
+    assert check["status"] == "needs-manual-action"
+    assert "proxy" in check["detail"]
+    assert prereq_writes(client) == []
+
+
+@pytest.mark.anyio
+async def test_prerequisite_toggles_patch_only_missing_fields(service_parts) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.device_settings["gateway_proxy_enabled"] = False
+    client.connectivity_settings["offramp_warp_enabled"] = False
+    report = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+
+    assert report["status"] == "satisfied"
+    assert report["checks"]["gateway_proxy"]["status"] == "configured"
+    assert report["checks"]["mesh_connectivity"]["status"] == "configured"
+    assert report["checks"]["unique_device_ips"]["status"] == "passed"
+    assert prereq_writes(client) == [
+        "patch_device_settings",
+        "patch_connectivity_settings",
+    ]
+    patch_bodies = {
+        name: value[1]
+        for name, value in client.calls
+        if name in {"patch_device_settings", "patch_connectivity_settings"}
+    }
+    assert patch_bodies["patch_device_settings"] == {"gateway_proxy_enabled": True}
+    assert patch_bodies["patch_connectivity_settings"] == {
+        "offramp_warp_enabled": True
+    }
+
+    client.calls.clear()
+    second = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+    assert all(
+        check["status"] == "passed" for check in second["checks"].values()
+    )
+    assert prereq_writes(client) == []
+
+
+@pytest.mark.anyio
+async def test_prerequisites_second_run_is_fully_idempotent(service_parts) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.access_apps = []
+    client.device_policy = {
+        "default": True,
+        "include": [],
+        "exclude": [{"address": "100.64.0.0/10", "description": "Default CGNAT"}],
+        "service_mode_v2": {"mode": "warp"},
+    }
+    client.device_settings = {
+        "gateway_proxy_enabled": False,
+        "gateway_udp_proxy_enabled": False,
+        "use_zt_virtual_ip": False,
+    }
+    client.connectivity_settings = {
+        "icmp_proxy_enabled": False,
+        "offramp_warp_enabled": False,
+    }
+    first = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+    assert first["status"] == "satisfied"
+    assert sorted(prereq_writes(client)) == [
+        "create_access_app",
+        "patch_connectivity_settings",
+        "patch_default_device_policy",
+        "patch_device_settings",
+    ]
+
+    client.calls.clear()
+    second = await service.ensure_account_prerequisites(client, ACCOUNT_ID)
+    assert second["status"] == "satisfied"
+    assert all(
+        check["status"] == "passed" for check in second["checks"].values()
+    )
+    assert prereq_writes(client) == []
+
+
+@pytest.mark.anyio
+async def test_provision_runs_prerequisites_before_node_creation(service_parts) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    connection = await authorize_and_provision(service)
+
+    names = call_names(client)
+    prereq_reads = [
+        "list_access_apps",
+        "get_default_device_policy",
+        "get_device_settings",
+        "get_connectivity_settings",
+    ]
+    node_index = names.index("create_mesh_node")
+    assert all(names.index(name) < node_index for name in prereq_reads)
+    report = connection.public_metadata[PREREQ_METADATA_KEY]
+    assert report["status"] == "satisfied"
+    # The persisted report carries no credentials.
+    assert API_TOKEN not in str(report)
+    assert NODE_TOKEN not in str(report)
+
+
+@pytest.mark.anyio
+async def test_provision_aborts_before_remote_mutation_when_prereq_api_fails(
+    service_parts,
+) -> None:
+    service, store, _secrets, client, token_path = service_parts
+    client.list_access_apps_error = CloudflareAPIError(
+        403, messages=["Actor requires Zero Trust Edit permission"]
+    )
+
+    with pytest.raises(CloudflareAPIError, match="Zero Trust Edit permission"):
+        await authorize_and_provision(service)
+
+    assert store.list_connections() == []
+    assert client.mesh_nodes == {}
+    assert client.hostname_routes == []
+    assert client.dns_records == []
+    assert client.workers_routes == []
+    assert client.worker_content is None
+    assert not token_path.exists()
+    assert "create_mesh_node" not in call_names(client)
+
+
+@pytest.mark.anyio
+async def test_provision_aborts_when_prereqs_need_manual_action(service_parts) -> None:
+    service, store, _secrets, client, token_path = service_parts
+    client.device_policy = {
+        "default": True,
+        "include": [],
+        "exclude": [{"address": "100.96.0.0/12", "description": "operator"}],
+        "service_mode_v2": {"mode": "warp"},
+    }
+
+    with pytest.raises(CloudflareConflictError, match="manual action"):
+        await authorize_and_provision(service)
+
+    assert store.list_connections() == []
+    assert client.mesh_nodes == {}
+    assert client.hostname_routes == []
+    assert client.dns_records == []
+    assert client.workers_routes == []
+    assert not token_path.exists()
+    assert "create_mesh_node" not in call_names(client)
+
+
+@pytest.mark.anyio
+async def test_refresh_reverifies_and_heals_prereq_drift(service_parts) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    connection = await authorize_and_provision(service)
+    client.node_connections = [{"is_pending_reconnect": False}]
+    client.device_settings["use_zt_virtual_ip"] = False
+    client.calls.clear()
+
+    refreshed = await service.refresh_status(connection.id)
+
+    assert refreshed.status == "connected"
+    assert prereq_writes(client) == ["patch_device_settings"]
+    report = refreshed.public_metadata[PREREQ_METADATA_KEY]
+    assert report["status"] == "satisfied"
+    assert report["checks"]["unique_device_ips"]["status"] == "configured"
+    assert client.device_settings["use_zt_virtual_ip"] is True
+
+
+@pytest.mark.anyio
+async def test_refresh_degrades_with_per_check_detail_when_prereq_needs_manual_action(
+    service_parts,
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    connection = await authorize_and_provision(service)
+    client.node_connections = [{"is_pending_reconnect": False}]
+    client.device_policy = {
+        "default": True,
+        "include": [],
+        "exclude": [{"address": "100.64.0.0/9", "description": "operator"}],
+        "service_mode_v2": {"mode": "warp"},
+    }
+    client.calls.clear()
+
+    refreshed = await service.refresh_status(connection.id)
+
+    assert refreshed.status == "degraded"
+    assert prereq_writes(client) == []
+    report = refreshed.public_metadata[PREREQ_METADATA_KEY]
+    assert report["status"] == "needs-manual-action"
+    check = report["checks"]["device_profile"]
+    assert check["status"] == "needs-manual-action"
+    assert "100.64.0.0/9" in check["detail"]
+
+
+@pytest.mark.anyio
+async def test_refresh_degrades_when_prereq_verification_fails(service_parts) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    connection = await authorize_and_provision(service)
+    client.node_connections = [{"is_pending_reconnect": False}]
+    client.list_access_apps_error = CloudflareAPIError(403, messages=["denied"])
+
+    refreshed = await service.refresh_status(connection.id)
+
+    assert refreshed.status == "degraded"
 
 
 @pytest.mark.anyio

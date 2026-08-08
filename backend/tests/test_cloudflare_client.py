@@ -516,6 +516,186 @@ async def test_delete_operations_are_idempotent_when_resource_is_already_gone() 
 
 
 @pytest.mark.anyio
+async def test_access_apps_list_paginates_and_create_posts_warp_app() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return _envelope({"id": "app-1"})
+        return _envelope(
+            [
+                {
+                    "id": "app-warp",
+                    "type": "warp",
+                    "policies": [{"decision": "allow"}],
+                }
+            ]
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    apps = await client.list_access_apps(ACCOUNT_ID)
+    assert apps == [
+        {"id": "app-warp", "type": "warp", "policies": [{"decision": "allow"}]}
+    ]
+    created = await client.create_access_app(
+        ACCOUNT_ID,
+        {
+            "name": "Warp device enrollment",
+            "type": "warp",
+            "app_launcher_visible": False,
+            "policies": [
+                {
+                    "name": "Allow device enrollment",
+                    "decision": "allow",
+                    "include": [{"everyone": {}}],
+                    "precedence": 1,
+                }
+            ],
+        },
+    )
+    assert created["id"] == "app-1"
+
+    list_request, create_request = requests
+    assert list_request.method == "GET"
+    assert list_request.url.path.endswith(f"/accounts/{ACCOUNT_ID}/access/apps")
+    assert list_request.url.params["per_page"] == "50"
+    assert create_request.method == "POST"
+    assert json.loads(create_request.content)["type"] == "warp"
+    assert json.loads(create_request.content)["policies"][0]["decision"] == "allow"
+
+
+@pytest.mark.anyio
+async def test_device_policy_get_list_and_flat_patch() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/devices/policies"):
+            return _envelope([{"policy_id": "p1", "default": True}])
+        return _envelope({"default": True, "include": [], "exclude": []})
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    policies = await client.list_device_policies(ACCOUNT_ID)
+    assert policies == [{"policy_id": "p1", "default": True}]
+    policy = await client.get_default_device_policy(ACCOUNT_ID)
+    assert policy["default"] is True
+    patched = await client.patch_default_device_policy(
+        ACCOUNT_ID,
+        {"include": [{"address": "100.96.0.0/12", "description": "mesh"}]},
+    )
+    assert isinstance(patched, dict)
+
+    list_request, get_request, patch_request = requests
+    assert list_request.url.path.endswith(f"/accounts/{ACCOUNT_ID}/devices/policies")
+    assert get_request.method == "GET"
+    assert get_request.url.path.endswith(f"/accounts/{ACCOUNT_ID}/devices/policy")
+    assert patch_request.method == "PATCH"
+    assert patch_request.url.path.endswith(f"/accounts/{ACCOUNT_ID}/devices/policy")
+    # The PATCH body is flat (no "device_settings"-style wrapper).
+    assert json.loads(patch_request.content) == {
+        "include": [{"address": "100.96.0.0/12", "description": "mesh"}]
+    }
+
+
+@pytest.mark.anyio
+async def test_device_settings_get_and_flat_patch() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _envelope({"gateway_proxy_enabled": True})
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    settings = await client.get_device_settings(ACCOUNT_ID)
+    assert settings == {"gateway_proxy_enabled": True}
+    await client.patch_device_settings(
+        ACCOUNT_ID, {"gateway_udp_proxy_enabled": True}
+    )
+
+    get_request, patch_request = requests
+    assert get_request.url.path.endswith(f"/accounts/{ACCOUNT_ID}/devices/settings")
+    assert patch_request.method == "PATCH"
+    assert json.loads(patch_request.content) == {"gateway_udp_proxy_enabled": True}
+
+
+@pytest.mark.anyio
+async def test_connectivity_settings_get_and_flat_patch() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _envelope({"icmp_proxy_enabled": True, "offramp_warp_enabled": True})
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    settings = await client.get_connectivity_settings(ACCOUNT_ID)
+    assert settings["offramp_warp_enabled"] is True
+    await client.patch_connectivity_settings(ACCOUNT_ID, {"offramp_warp_enabled": True})
+
+    get_request, patch_request = requests
+    assert get_request.url.path.endswith(
+        f"/accounts/{ACCOUNT_ID}/zerotrust/connectivity_settings"
+    )
+    assert patch_request.method == "PATCH"
+    assert patch_request.url.path.endswith(
+        f"/accounts/{ACCOUNT_ID}/zerotrust/connectivity_settings"
+    )
+    assert json.loads(patch_request.content) == {"offramp_warp_enabled": True}
+
+
+@pytest.mark.anyio
+async def test_prereq_malformed_results_raise_sanitized_502() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _envelope(None)
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    for operation in (
+        client.get_default_device_policy(ACCOUNT_ID),
+        client.get_device_settings(ACCOUNT_ID),
+        client.get_connectivity_settings(ACCOUNT_ID),
+        client.patch_device_settings(ACCOUNT_ID, {"gateway_proxy_enabled": True}),
+        client.patch_default_device_policy(ACCOUNT_ID, {"include": []}),
+        client.patch_connectivity_settings(ACCOUNT_ID, {"icmp_proxy_enabled": True}),
+        client.create_access_app(ACCOUNT_ID, {"type": "warp"}),
+    ):
+        with pytest.raises(CloudflareAPIError) as captured:
+            await operation
+        assert str(captured.value) == "Cloudflare rejected the request with HTTP 502"
+        assert API_TOKEN not in str(captured.value)
+
+    def list_handler(_request: httpx.Request) -> httpx.Response:
+        return _envelope({"unexpected": "object"})
+
+    list_client = CloudflareClient(
+        API_TOKEN, transport=httpx.MockTransport(list_handler)
+    )
+    with pytest.raises(CloudflareAPIError) as captured:
+        await list_client.list_device_policies(ACCOUNT_ID)
+    assert captured.value.status_code == 502
+
+
+@pytest.mark.anyio
+async def test_prereq_endpoints_surface_provider_errors_verbatim() -> None:
+    provider_message = "Actor requires permission com.cloudflare.api.account.zero_trust"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "success": False,
+                "errors": [{"code": 10000, "message": provider_message}],
+                "result": None,
+            },
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(CloudflareAPIError) as captured:
+        await client.get_device_settings(ACCOUNT_ID)
+    assert provider_message in str(captured.value)
+    assert API_TOKEN not in str(captured.value)
+
+
+@pytest.mark.anyio
 async def test_account_discovery_paginates_until_short_page() -> None:
     pages: list[int] = []
 
