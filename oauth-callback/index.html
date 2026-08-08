@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<!--
+  Privacy: this page runs entirely in your browser. It loads no external
+  resources, makes no network requests except an optional best-effort
+  completion POST to your own lnSwitchboard on this machine
+  (http://127.0.0.1:22121 / http://localhost:22121), and tracks nothing.
+  connect-src is restricted to exactly those two loopback origins.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src http://127.0.0.1:22121 http://localhost:22121; base-uri 'none'; form-action 'none'">
+<title>lnSwitchboard — Cloudflare authorization</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e8eaf0; }
+  main { max-width: 40rem; margin: 4rem auto; padding: 0 1.25rem; }
+  h1 { font-size: 1.4rem; }
+  .card { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 1.25rem 1.5rem; }
+  label { display: block; font-size: 0.85rem; color: #9aa3b2; margin: 1rem 0 0.35rem; }
+  input[readonly] { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace;
+    font-size: 1rem; padding: 0.6rem 0.75rem; border-radius: 8px; border: 1px solid #3a4150;
+    background: #0f1115; color: #e8eaf0; user-select: all; }
+  button { margin-top: 1rem; padding: 0.6rem 1.1rem; font-size: 0.95rem; border-radius: 8px;
+    border: 1px solid #4a5265; background: #232838; color: #e8eaf0; cursor: pointer; }
+  button:hover { background: #2b3244; }
+  #status { margin-top: 1rem; font-size: 0.9rem; color: #9aa3b2; min-height: 1.2em; }
+  #status.ok { color: #7fd69a; }
+  #status.err { color: #e58a8a; }
+  .privacy { margin-top: 1.75rem; font-size: 0.8rem; color: #78818f; line-height: 1.5; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Cloudflare authorization for lnSwitchboard</h1>
+  <div class="card">
+    <div id="error-box" class="hidden">
+      <p id="error-text"></p>
+    </div>
+    <div id="code-box" class="hidden">
+      <p>Cloudflare authorized lnSwitchboard. Copy this authorization code back into
+         your lnSwitchboard tab to finish connecting.</p>
+      <label for="code">Authorization code</label>
+      <input id="code" type="text" readonly value="">
+      <label for="state">State (paste too, if asked)</label>
+      <input id="state" type="text" readonly value="">
+      <button id="copy" type="button">Copy code</button>
+      <div id="status" role="status"></div>
+    </div>
+    <div id="empty-box" class="hidden">
+      <p>This page did not receive an authorization response. Return to lnSwitchboard
+         and start the Cloudflare connection again.</p>
+    </div>
+  </div>
+  <p class="privacy">
+    Privacy: this page runs entirely in your browser; nothing is sent anywhere except
+    your own lnSwitchboard when reachable on this machine (an optional, best-effort
+    automatic completion). It loads no external resources, sets no cookies, and
+    collects no analytics.
+  </p>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // Cloudflare OAuth supports response_mode=fragment, so the code arrives in
+  // location.hash and never touches any server. Fall back to the query string.
+  function readParams() {
+    var hash = window.location.hash || "";
+    if (hash.length > 1) {
+      var fromHash = new URLSearchParams(hash.substring(1));
+      if (fromHash.get("code") || fromHash.get("error")) {
+        return fromHash;
+      }
+    }
+    return new URLSearchParams(window.location.search);
+  }
+
+  var params = readParams();
+  var code = params.get("code") || "";
+  var state = params.get("state") || "";
+  var error = params.get("error") || "";
+
+  // Scrub the authorization response from the address bar/history.
+  if (window.history && window.history.replaceState) {
+    window.history.replaceState(null, "", window.location.pathname);
+  }
+
+  function show(id) {
+    document.getElementById(id).classList.remove("hidden");
+  }
+
+  var statusEl = document.getElementById("status");
+
+  if (error) {
+    show("error-box");
+    document.getElementById("error-text").textContent =
+      "Cloudflare returned an error: " + error +
+      ". Return to lnSwitchboard and try again.";
+    return;
+  }
+  if (!code || !state) {
+    show("empty-box");
+    return;
+  }
+
+  show("code-box");
+  var codeInput = document.getElementById("code");
+  var stateInput = document.getElementById("state");
+  codeInput.value = code;
+  stateInput.value = state;
+
+  document.getElementById("copy").addEventListener("click", function () {
+    function copied() {
+      statusEl.textContent = "Code copied. Paste it into lnSwitchboard.";
+      statusEl.className = "ok";
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(copied, function () {
+        codeInput.select();
+        document.execCommand("copy");
+        copied();
+      });
+    } else {
+      codeInput.select();
+      document.execCommand("copy");
+      copied();
+    }
+  });
+
+  // Best-effort automatic completion: if lnSwitchboard is served from this
+  // same machine, hand the code directly to it. Fully tolerant of failure —
+  // manual copy above is the primary path.
+  function tryAutoComplete() {
+    var endpoints = [
+      "http://127.0.0.1:22121/api/cloudflare/oauth/complete",
+      "http://localhost:22121/api/cloudflare/oauth/complete"
+    ];
+    var body = JSON.stringify({ code: code, state: state });
+    var attempts = endpoints.map(function (url) {
+      var controller = new AbortController();
+      var timer = setTimeout(function () { controller.abort(); }, 1500);
+      return fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body,
+        signal: controller.signal,
+        credentials: "omit",
+        referrerPolicy: "no-referrer"
+      }).then(function (response) {
+        clearTimeout(timer);
+        return response.ok;
+      }, function () {
+        clearTimeout(timer);
+        return false;
+      });
+    });
+    Promise.all(attempts).then(function (results) {
+      if (results.indexOf(true) !== -1) {
+        statusEl.textContent =
+          "Done — your lnSwitchboard on this machine received the code automatically. You can close this tab.";
+        statusEl.className = "ok";
+      }
+    });
+  }
+
+  tryAutoComplete();
+})();
+</script>
+</body>
+</html>

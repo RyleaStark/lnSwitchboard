@@ -171,6 +171,41 @@ class Settings(BaseSettings):
         default="http://lnswitchboard:21212",
     )
     cloudflared_token_gid: int = _env_field(env="CLOUDFLARED_TOKEN_GID", default=0)
+    # Cloudflare account OAuth onboarding (public client, PKCE S256, no secret).
+    # Endpoint defaults confirmed against
+    # https://dash.cloudflare.com/.well-known/openid-configuration and
+    # https://developers.cloudflare.com/fundamentals/oauth/integrate-with-cloudflare/
+    cloudflare_oauth_client_id: str = _env_field(
+        env="CLOUDFLARE_OAUTH_CLIENT_ID",
+        default="placeholder-client-id",
+    )
+    cloudflare_oauth_authorize_url: str = _env_field(
+        env="CLOUDFLARE_OAUTH_AUTHORIZE_URL",
+        default="https://dash.cloudflare.com/oauth2/auth",
+    )
+    cloudflare_oauth_token_url: str = _env_field(
+        env="CLOUDFLARE_OAUTH_TOKEN_URL",
+        default="https://dash.cloudflare.com/oauth2/token",
+    )
+    # Space-separated scope string; scope names correspond to Cloudflare API
+    # token permission names (e.g. "workers-platform.read"). offline_access
+    # requests a refresh token.
+    cloudflare_oauth_scope: str = _env_field(
+        env="CLOUDFLARE_OAUTH_SCOPE",
+        default="offline_access",
+    )
+    cloudflare_oauth_redirect_loopback: str = _env_field(
+        env="CLOUDFLARE_OAUTH_REDIRECT_LOOPBACK",
+        default="http://127.0.0.1:22121/api/cloudflare/oauth/callback",
+    )
+    cloudflare_oauth_redirect_page: str = _env_field(
+        env="CLOUDFLARE_OAUTH_REDIRECT_PAGE",
+        default="https://placeholder.invalid/oauth/callback",
+    )
+    cloudflare_oauth_state_ttl_seconds: int = _env_field(
+        env="CLOUDFLARE_OAUTH_STATE_TTL_SECONDS",
+        default=600,
+    )
     tailscale_connector_enabled: bool = _env_field(
         env="TAILSCALE_CONNECTOR_ENABLED", default=False
     )
