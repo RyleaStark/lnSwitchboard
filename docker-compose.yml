@@ -1,6 +1,6 @@
 services:
   lnswitchboard:
-    image: ghcr.io/ryleastark/lnswitchboard:0.4.0.rc2
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc13}
     container_name: lnswitchboard
     restart: unless-stopped
     environment:
@@ -31,6 +31,10 @@ services:
     ports:
       - "${LNSWITCHBOARD_BIND_ADDRESS:-127.0.0.1}:22121:22121"
       - "${PUBLIC_SERVICE_PORT:-21212}:21212"
+    networks:
+      default:
+        aliases:
+          - lns.internal
 
   cloudflare-mesh:
     image: cloudflare/mesh:2026.7.0@sha256:18fad6d500e8ca48b7e4d5ae1905d65e8a50c1f5f5e21eba020d54d5cbf82571

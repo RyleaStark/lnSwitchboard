@@ -9,7 +9,10 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..cloudflare_client import CloudflareAPIError
-from ..cloudflare_oauth import CloudflareOAuthReauthRequiredError
+from ..cloudflare_oauth import (
+    CloudflareOAuthGrantNotFoundError,
+    CloudflareOAuthReauthRequiredError,
+)
 from ..cloudflare_service import (
     CloudflareConflictError,
     CloudflareNotFoundError,
@@ -149,7 +152,10 @@ async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Resu
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
-    except CloudflareOAuthReauthRequiredError as exc:
+    except (
+        CloudflareOAuthGrantNotFoundError,
+        CloudflareOAuthReauthRequiredError,
+    ) as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cloudflare authorization expired; reconnect Cloudflare",

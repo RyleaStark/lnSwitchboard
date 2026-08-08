@@ -36,6 +36,7 @@ def main() -> None:
             host=settings.service_host,
             port=settings.service_port,
             proxy_headers=False,
+            access_log=False,
         )
         uvicorn.Server(config).run(sockets=listeners)
     finally:

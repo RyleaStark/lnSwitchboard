@@ -158,7 +158,7 @@ async def test_deploy_proxy_worker_uploads_module_with_vpc_binding() -> None:
         return _envelope({"id": SCRIPT})
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    await client.deploy_proxy_worker(ACCOUNT_ID, SCRIPT)
+    await client.deploy_proxy_worker(ACCOUNT_ID, SCRIPT, "mesh-ingress-secret")
 
     [request] = requests
     assert request.method == "PUT"
@@ -173,7 +173,12 @@ async def test_deploy_proxy_worker_uploads_module_with_vpc_binding() -> None:
                 "name": MESH_BINDING_NAME,
                 "type": "vpc_network",
                 "network_id": MESH_NETWORK_ID,
-            }
+            },
+            {
+                "name": "LNS_MESH_INGRESS_KEY",
+                "type": "secret_text",
+                "text": "mesh-ingress-secret",
+            },
         ],
         "compatibility_date": WORKER_COMPATIBILITY_DATE,
     }
@@ -394,6 +399,9 @@ async def test_remove_workers_routes_deletes_only_exact_pattern_and_our_script()
         if request.method == "DELETE":
             deleted.append(request.url.path.rsplit("/", 1)[-1])
             return _envelope({"id": "deleted"})
+        route_id = request.url.path.rsplit("/", 1)[-1]
+        if route_id in {"ours-1", "ours-2"}:
+            return _envelope(next(route for route in routes if route["id"] == route_id))
         return _envelope(routes)
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
@@ -415,6 +423,30 @@ async def test_remove_workers_routes_preserves_foreign_identical_pattern() -> No
         return _envelope(routes)
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(CloudflareAPIError) as captured:
+        await client.remove_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+
+    assert captured.value.status_code == 409
+    assert deleted == []
+
+
+@pytest.mark.anyio
+async def test_remove_workers_route_revalidates_exact_id_before_delete() -> None:
+    pattern = CloudflareClient.workers_route_patterns("pay.example.com")[0]
+    deleted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            deleted.append(request.url.path)
+            return _envelope({"id": "deleted"})
+        if request.url.path.endswith("/workers/routes/route-1"):
+            return _envelope(
+                {"id": "route-1", "pattern": pattern, "script": "foreign-script"}
+            )
+        return _envelope([{"id": "route-1", "pattern": pattern, "script": SCRIPT}])
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+
     with pytest.raises(CloudflareAPIError) as captured:
         await client.remove_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
 
@@ -728,6 +760,11 @@ def test_worker_source_privacy_and_version_marker() -> None:
     ]
     assert all("env.MESH.fetch" in line for line in fetch_lines)
     assert "X-LNS-Public-Host" in WORKER_SOURCE
+    assert 'forwarded.headers.delete("X-LNS-Mesh-Key")' in WORKER_SOURCE
+    assert (
+        'forwarded.headers.set("X-LNS-Mesh-Key", env.LNS_MESH_INGRESS_KEY)'
+        in WORKER_SOURCE
+    )
     assert "stripHopByHop(forwarded.headers)" in WORKER_SOURCE
     assert "stripHopByHop(responseHeaders)" in WORKER_SOURCE
     assert "new Response(upstream.body" in WORKER_SOURCE

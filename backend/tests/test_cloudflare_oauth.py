@@ -289,6 +289,46 @@ def test_access_token_cache_and_forced_refresh(oauth_settings, secret_store):
     assert updated["refresh_token"] == ROTATED_REFRESH_TOKEN
 
 
+def test_concurrent_access_token_requests_share_one_refresh(
+    oauth_settings, secret_store
+):
+    server = FakeCloudflareOAuthServer(
+        [
+            token_response(),
+            token_response(
+                access_token=NEW_ACCESS_TOKEN,
+                refresh_token=ROTATED_REFRESH_TOKEN,
+            ),
+            token_response(
+                access_token="unexpected-second-refresh",
+                refresh_token="unexpected-second-rotation",
+            ),
+        ]
+    )
+    manager = make_manager(oauth_settings, secret_store, server)
+    grant = _complete_grant(manager, secret_store)
+    owner = f"{GRANT_PREFIX}{grant['grant_id']}"
+    stored = dict(secret_store.get(owner))
+    stored["access_token_expires_at"] = time.time() - 5
+    secret_store.set(owner, stored)
+    original_token_request = manager._token_request
+
+    async def delayed_token_request(*args, **kwargs):
+        await asyncio.sleep(0.02)
+        return await original_token_request(*args, **kwargs)
+
+    manager._token_request = delayed_token_request
+
+    async def concurrent_refresh() -> list[str]:
+        return await asyncio.gather(
+            manager.get_access_token(grant["grant_id"]),
+            manager.get_access_token(grant["grant_id"]),
+        )
+
+    assert run(concurrent_refresh()) == [NEW_ACCESS_TOKEN, NEW_ACCESS_TOKEN]
+    assert len(server.token_requests) == 2
+
+
 def test_invalid_grant_deletes_grant_and_requires_reauth(
     oauth_settings, secret_store
 ):
@@ -374,7 +414,9 @@ def test_loopback_callback_redirects_303(oauth_settings, secret_store):
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["Location"] == "/connections?cloudflare=connected"
+    assert response.headers["Location"] == (
+        "/connections/cloudflare/?cloudflare=connected"
+    )
     assert_no_store(response)
     assert manager.list_grants() != []
 
@@ -386,7 +428,7 @@ def test_loopback_callback_redirects_303(oauth_settings, secret_store):
         follow_redirects=False,
     )
     assert replay.status_code == 303
-    assert replay.headers["Location"] == "/connections?cloudflare=error"
+    assert replay.headers["Location"] == "/connections/cloudflare/?cloudflare=error"
 
 
 def test_paste_back_complete_endpoint(oauth_settings, secret_store):

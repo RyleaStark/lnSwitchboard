@@ -382,7 +382,9 @@ class CloudflareClient:
     # Proxy Worker script
     # ------------------------------------------------------------------
 
-    async def deploy_proxy_worker(self, account_id: str, script_name: str) -> None:
+    async def deploy_proxy_worker(
+        self, account_id: str, script_name: str, mesh_ingress_key: str
+    ) -> None:
         metadata = {
             "main_module": "worker.js",
             "bindings": [
@@ -390,7 +392,12 @@ class CloudflareClient:
                     "name": MESH_BINDING_NAME,
                     "type": "vpc_network",
                     "network_id": MESH_NETWORK_ID,
-                }
+                },
+                {
+                    "name": "LNS_MESH_INGRESS_KEY",
+                    "type": "secret_text",
+                    "text": mesh_ingress_key,
+                },
             ],
             "compatibility_date": WORKER_COMPATIBILITY_DATE,
         }
@@ -441,16 +448,20 @@ class CloudflareClient:
 
     async def _create_workers_route(
         self, zone_id: str, pattern: str, script_name: str
-    ) -> None:
-        await self._request(
+    ) -> str:
+        result = await self._request(
             "POST",
             f"/zones/{zone_id}/workers/routes",
             json={"pattern": pattern, "script": script_name},
         )
+        route_id = str(result.get("id", "")) if isinstance(result, dict) else ""
+        if not route_id:
+            raise CloudflareAPIError(502)
+        return route_id
 
     async def ensure_workers_routes(
         self, zone_id: str, hostname: str, script_name: str
-    ) -> None:
+    ) -> list[tuple[str, str]]:
         """Create the two managed routes, adopting our own and refusing foreign.
 
         Workers Routes use most-specific-wins semantics: these exact path
@@ -461,6 +472,7 @@ class CloudflareClient:
         attached to OUR script is adopted (idempotent retry).
         """
         existing = await self.list_workers_routes(zone_id)
+        created: list[tuple[str, str]] = []
         for pattern in self.workers_route_patterns(hostname):
             matches = [
                 route
@@ -477,7 +489,10 @@ class CloudflareClient:
                     ],
                 )
             try:
-                await self._create_workers_route(zone_id, pattern, script_name)
+                route_id = await self._create_workers_route(
+                    zone_id, pattern, script_name
+                )
+                created.append((route_id, pattern))
             except CloudflareAPIError:
                 # The create may have succeeded despite a lost/errored
                 # response; reconcile by re-listing before surfacing failure.
@@ -488,7 +503,41 @@ class CloudflareClient:
                     for route in refreshed
                 ):
                     raise
+                # An errored response is not sufficient proof that this
+                # operation created the route, so rollback must preserve it.
                 existing = refreshed
+        return created
+
+    async def remove_worker_route(
+        self,
+        zone_id: str,
+        route_id: str,
+        pattern: str,
+        script_name: str,
+    ) -> None:
+        current = await self._request(
+            "GET",
+            f"/zones/{zone_id}/workers/routes/{route_id}",
+            allow_not_found=True,
+        )
+        if current is None:
+            return
+        if (
+            not isinstance(current, dict)
+            or current.get("pattern") != pattern
+            or current.get("script") != script_name
+        ):
+            raise CloudflareAPIError(
+                409,
+                messages=[
+                    f"Workers route {pattern} changed ownership and was preserved"
+                ],
+            )
+        await self._request(
+            "DELETE",
+            f"/zones/{zone_id}/workers/routes/{route_id}",
+            allow_not_found=True,
+        )
 
     async def verify_workers_routes(
         self, zone_id: str, hostname: str, script_name: str
@@ -522,10 +571,8 @@ class CloudflareClient:
                 route_id = str(route.get("id", ""))
                 if not route_id:
                     raise CloudflareAPIError(502)
-                await self._request(
-                    "DELETE",
-                    f"/zones/{zone_id}/workers/routes/{route_id}",
-                    allow_not_found=True,
+                await self.remove_worker_route(
+                    zone_id, route_id, pattern, script_name
                 )
 
     # ------------------------------------------------------------------

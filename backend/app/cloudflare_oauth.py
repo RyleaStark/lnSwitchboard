@@ -19,6 +19,7 @@ fundamentals OAuth docs (https://developers.cloudflare.com/fundamentals/oauth/):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -112,6 +113,7 @@ class CloudflareOAuthManager:
         self._settings = settings
         self._secrets = secret_store
         self._transport = transport
+        self._grant_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # Flow (begin/complete) handling
@@ -380,6 +382,11 @@ class CloudflareOAuthManager:
         return grants
 
     async def get_access_token(self, grant_id: str) -> str:
+        lock = self._grant_locks.setdefault(grant_id, asyncio.Lock())
+        async with lock:
+            return await self._get_access_token_locked(grant_id)
+
+    async def _get_access_token_locked(self, grant_id: str) -> str:
         """Return a fresh access token, refreshing via refresh_token if needed."""
         grant = self._load_grant(grant_id)
         access_token = grant.get("access_token")
@@ -419,6 +426,11 @@ class CloudflareOAuthManager:
         return str(new_token)
 
     async def revoke(self, grant_id: str) -> bool:
+        lock = self._grant_locks.setdefault(grant_id, asyncio.Lock())
+        async with lock:
+            return await self._revoke_locked(grant_id)
+
+    async def _revoke_locked(self, grant_id: str) -> bool:
         """Best-effort provider revocation; the local grant is always deleted."""
         try:
             grant = self._load_grant(grant_id)

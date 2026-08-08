@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 
 # Bump on every change to WORKER_SOURCE; the service upgrades drifted scripts.
-LNS_WORKER_VERSION = "2026.08.08.2"
+LNS_WORKER_VERSION = "2026.08.08.3"
 
 WORKER_SCRIPT_NAME = "lnswitchboard-proxy"
 INTERNAL_HOSTNAME = "lns.internal"
@@ -74,6 +74,8 @@ export default {
     if (publicHost !== null) {
       forwarded.headers.set("X-LNS-Public-Host", publicHost);
     }
+    forwarded.headers.delete("X-LNS-Mesh-Key");
+    forwarded.headers.set("X-LNS-Mesh-Key", env.LNS_MESH_INGRESS_KEY);
     try {
       const upstream = await env.MESH.fetch(forwarded);
       const responseHeaders = new Headers(upstream.headers);

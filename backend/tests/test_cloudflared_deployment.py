@@ -41,6 +41,7 @@ def test_compose_mesh_sidecar_contract_is_isolated_and_digest_pinned() -> None:
     )
     assert app["environment"]["CLOUDFLARED_ORIGIN_URL"] == "http://lnswitchboard:21212"
     assert app["environment"]["CLOUDFLARED_TOKEN_GID"] == "${CLOUDFLARED_TOKEN_GID:-0}"
+    assert app["networks"]["default"]["aliases"] == ["lns.internal"]
 
 
 def test_compose_never_exposes_docker_socket_or_admin_origin_to_mesh() -> None:

@@ -121,7 +121,9 @@ class CloudflareClientProtocol(Protocol):
     ) -> dict[str, Any] | None: ...
     async def delete_hostname_route(self, account_id: str, route_id: str) -> None: ...
 
-    async def deploy_proxy_worker(self, account_id: str, script_name: str) -> None: ...
+    async def deploy_proxy_worker(
+        self, account_id: str, script_name: str, mesh_ingress_key: str
+    ) -> None: ...
     async def get_worker_script_content(
         self, account_id: str, script_name: str
     ) -> str | None: ...
@@ -129,6 +131,13 @@ class CloudflareClientProtocol(Protocol):
 
     async def ensure_workers_routes(
         self, zone_id: str, hostname: str, script_name: str
+    ) -> list[tuple[str, str]]: ...
+    async def remove_worker_route(
+        self,
+        zone_id: str,
+        route_id: str,
+        pattern: str,
+        script_name: str,
     ) -> None: ...
     async def verify_workers_routes(
         self, zone_id: str, hostname: str, script_name: str
@@ -794,6 +803,7 @@ class CloudflareService:
                 if credential_payload.get("api_token")
                 else {"grant_id": str(credential_payload["grant_id"])}
             )
+            credential["mesh_ingress_key"] = random_secrets.token_urlsafe(32)
             self.secrets.set(connection.id, credential)
         except Exception:
             if connection is not None:
@@ -805,12 +815,14 @@ class CloudflareService:
             "node_attempted": False,
             "node_id": None,
             "hostname_route_id": None,
-            "worker_touched": False,
+            "hostname_route_created": False,
+            "worker_created": False,
             "dns_attempted": False,
             "dns_record_id": None,
-            "routes_touched": False,
+            "routes_created": [],
         }
         dns_adopted = False
+        dns_created = False
         try:
             # Account-level Cloudflare One prerequisites reconcile before any
             # mesh/worker mutation; a failure here leaves no remote resources
@@ -837,7 +849,10 @@ class CloudflareService:
             node_token = await client.get_mesh_node_token(account_id, node_id)
             self._write_node_token(node_token)
 
-            hostname_route_id = await self._create_or_adopt_hostname_route(
+            (
+                hostname_route_id,
+                progress["hostname_route_created"],
+            ) = await self._create_or_adopt_hostname_route(
                 client, account_id, node_id
             )
             progress["hostname_route_id"] = hostname_route_id
@@ -860,25 +875,34 @@ class CloudflareService:
                         "A Worker script named lnswitchboard-proxy already exists "
                         "and is not managed by lnSwitchboard"
                     )
-            progress["worker_touched"] = True
-            if worker_version != LNS_WORKER_VERSION:
-                await client.deploy_proxy_worker(account_id, WORKER_SCRIPT_NAME)
-                deployed = await client.get_worker_script_content(
-                    account_id, WORKER_SCRIPT_NAME
-                )
-                if (
-                    deployed is None
-                    or extract_worker_version(deployed) != LNS_WORKER_VERSION
-                ):
-                    raise CloudflareAPIError(502)
-                worker_version = LNS_WORKER_VERSION
+            progress["worker_created"] = content is None
+            # Always refresh the managed upload during provisioning so the
+            # Worker's secret binding matches this connection's local key.
+            await client.deploy_proxy_worker(
+                account_id,
+                WORKER_SCRIPT_NAME,
+                credential["mesh_ingress_key"],
+            )
+            deployed = await client.get_worker_script_content(
+                account_id, WORKER_SCRIPT_NAME
+            )
+            if (
+                deployed is None
+                or extract_worker_version(deployed) != LNS_WORKER_VERSION
+            ):
+                raise CloudflareAPIError(502)
+            worker_version = LNS_WORKER_VERSION
             metadata["worker_version"] = worker_version
             connection = self._persist_provisioning(
                 connection, metadata, hostname, zone_id, None
             )
 
             progress["dns_attempted"] = True
-            dns_record_id, dns_adopted = await self._create_or_adopt_placeholder_dns(
+            (
+                dns_record_id,
+                dns_adopted,
+                dns_created,
+            ) = await self._create_or_adopt_placeholder_dns(
                 client, zone_id, hostname
             )
             progress["dns_record_id"] = dns_record_id
@@ -887,8 +911,9 @@ class CloudflareService:
                 connection, metadata, hostname, zone_id, dns_record_id
             )
 
-            progress["routes_touched"] = True
-            await client.ensure_workers_routes(zone_id, hostname, WORKER_SCRIPT_NAME)
+            progress["routes_created"] = await client.ensure_workers_routes(
+                zone_id, hostname, WORKER_SCRIPT_NAME
+            )
 
             if not dns_adopted and dns_record_id is not None:
                 record = await client.get_dns_record(zone_id, dns_record_id)
@@ -908,7 +933,7 @@ class CloudflareService:
                 node_name=node_name,
                 zone_id=zone_id,
                 hostname=hostname,
-                dns_adopted=dns_adopted,
+                dns_created=dns_created,
                 progress=progress,
             )
             ambiguous_outcome = (
@@ -920,12 +945,11 @@ class CloudflareService:
                     hostname,
                     zone_id,
                     progress["dns_record_id"],
-                    route_cleanup_pending=bool(progress["routes_touched"]),
+                    route_cleanup_pending=bool(progress["routes_created"]),
                     dns_cleanup_pending=(
-                        not dns_adopted
-                        and (
-                            progress["dns_record_id"] is not None
-                            or (ambiguous_outcome and progress["dns_attempted"])
+                        dns_created
+                        or (
+                            ambiguous_outcome and progress["dns_attempted"]
                         )
                     ),
                 )
@@ -946,7 +970,7 @@ class CloudflareService:
         node_name: str,
         zone_id: str,
         hostname: str,
-        dns_adopted: bool,
+        dns_created: bool,
         progress: dict[str, Any],
     ) -> list[str]:
         """Best-effort reverse-order compensation for a failed provision.
@@ -956,19 +980,21 @@ class CloudflareService:
         Worker script that failed the drift check) are never deleted.
         """
         errors: list[str] = []
-        if progress["routes_touched"]:
+        for route_id, pattern in reversed(progress["routes_created"]):
             try:
-                await client.remove_workers_routes(
-                    zone_id, hostname, WORKER_SCRIPT_NAME
+                await client.remove_worker_route(
+                    zone_id,
+                    route_id,
+                    pattern,
+                    WORKER_SCRIPT_NAME,
                 )
             except CloudflareAPIError as exc:
-                # A 409 here means a foreign-owned route was preserved, which
-                # is the expected conflict path rather than a cleanup failure.
+                # A 409 means the route changed ownership and was preserved.
                 if exc.status_code != 409:
                     errors.append(type(exc).__name__)
             except Exception as exc:
                 errors.append(type(exc).__name__)
-        if not dns_adopted and progress["dns_record_id"] is not None:
+        if dns_created and progress["dns_record_id"] is not None:
             errors.extend(
                 await self._cleanup_created_dns_record(
                     client,
@@ -977,12 +1003,22 @@ class CloudflareService:
                     dns_record_id=progress["dns_record_id"],
                 )
             )
-        if progress["worker_touched"]:
+        if progress["worker_created"]:
             try:
-                await client.delete_worker_script(account_id, WORKER_SCRIPT_NAME)
+                current_worker = await client.get_worker_script_content(
+                    account_id, WORKER_SCRIPT_NAME
+                )
+                if (
+                    current_worker is not None
+                    and extract_worker_version(current_worker) == LNS_WORKER_VERSION
+                ):
+                    await client.delete_worker_script(account_id, WORKER_SCRIPT_NAME)
             except Exception as exc:
                 errors.append(type(exc).__name__)
-        if progress["hostname_route_id"] is not None:
+        if (
+            progress["hostname_route_id"] is not None
+            and progress["hostname_route_created"]
+        ):
             try:
                 await client.delete_hostname_route(
                     account_id, progress["hostname_route_id"]
@@ -1015,6 +1051,8 @@ class CloudflareService:
         if connection.public_metadata.get("cleanup_pending"):
             return connection
         client = await self._connection_client(connection_id)
+        credential = self.secrets.get(connection_id) or {}
+        mesh_ingress_key = credential.get("mesh_ingress_key")
         account_id = str(connection.account_id)
         prereq_report: dict[str, Any] | None = None
         prereq_error: str | None = None
@@ -1063,7 +1101,13 @@ class CloudflareService:
             elif observed_version != LNS_WORKER_VERSION:
                 # Our own outdated script: upgrade the drift and re-verify.
                 try:
-                    await client.deploy_proxy_worker(account_id, WORKER_SCRIPT_NAME)
+                    if not isinstance(mesh_ingress_key, str) or not mesh_ingress_key:
+                        raise CloudflareServiceError(
+                            "Cloudflare Mesh ingress credential is unavailable"
+                        )
+                    await client.deploy_proxy_worker(
+                        account_id, WORKER_SCRIPT_NAME, mesh_ingress_key
+                    )
                     deployed = await client.get_worker_script_content(
                         account_id, WORKER_SCRIPT_NAME
                     )
@@ -1289,12 +1333,13 @@ class CloudflareService:
             )
             connection = self._require_connection(connection.id)
             dns_record_id: str | None = None
-            dns_adopted = False
-            routes_touched = False
+            dns_created = False
+            routes_created: list[tuple[str, str]] = []
             try:
                 (
                     dns_record_id,
-                    dns_adopted,
+                    _dns_adopted,
+                    dns_created,
                 ) = await self._create_or_adopt_placeholder_dns(
                     client, zone_id, hostname
                 )
@@ -1311,23 +1356,26 @@ class CloudflareService:
                     ],
                 )
                 connection = self._require_connection(connection.id)
-                routes_touched = True
-                await client.ensure_workers_routes(zone_id, hostname, WORKER_SCRIPT_NAME)
+                routes_created = await client.ensure_workers_routes(
+                    zone_id, hostname, WORKER_SCRIPT_NAME
+                )
             except Exception as exc:
                 cleanup_errors: list[str] = []
-                if routes_touched:
+                for route_id, pattern in reversed(routes_created):
                     try:
-                        await client.remove_workers_routes(
-                            zone_id, hostname, WORKER_SCRIPT_NAME
+                        await client.remove_worker_route(
+                            zone_id,
+                            route_id,
+                            pattern,
+                            WORKER_SCRIPT_NAME,
                         )
                     except CloudflareAPIError as cleanup_exc:
-                        # 409: a foreign-owned route was preserved (expected
-                        # conflict path, not a cleanup failure).
+                        # 409: a route changed ownership and was preserved.
                         if cleanup_exc.status_code != 409:
                             cleanup_errors.append(type(cleanup_exc).__name__)
                     except Exception as cleanup_exc:
                         cleanup_errors.append(type(cleanup_exc).__name__)
-                if not dns_adopted and dns_record_id is not None:
+                if dns_created and dns_record_id is not None:
                     cleanup_errors.extend(
                         await self._cleanup_created_dns_record(
                             client,
@@ -1345,8 +1393,8 @@ class CloudflareService:
                         hostname,
                         zone_id,
                         dns_record_id,
-                        route_cleanup_pending=routes_touched,
-                        dns_cleanup_pending=not dns_adopted,
+                        route_cleanup_pending=bool(routes_created),
+                        dns_cleanup_pending=(dns_created or ambiguous_outcome),
                     )
                 else:
                     self.store.replace_domains(connection.id, original_domains)
@@ -1815,7 +1863,8 @@ class CloudflareService:
         """
 
         self.purge_expired_authorizations()
-        live_connection_ids = {item.id for item in self.store.list_connections()}
+        live_connections = self.store.list_connections()
+        live_connection_ids = {item.id for item in live_connections}
         for owner_id in self.secrets.list_owner_ids():
             if owner_id.startswith(_AUTHORIZATION_PREFIX):
                 continue
@@ -1824,6 +1873,50 @@ class CloudflareService:
                 and owner_id not in live_connection_ids
             ):
                 self.secrets.delete(owner_id)
+
+        # A crash after token publication but before commit must not leave the
+        # sidecar authenticated as a partially provisioned connector. Remove
+        # the local token before the sidecar health dependency can start it,
+        # then revoke only the exact node whose durable ID and name still match.
+        for connection in live_connections:
+            if connection.provider != "cloudflare" or connection.status != "provisioning":
+                continue
+            self._remove_node_token()
+            node_id = connection.public_metadata.get("mesh_node_id")
+            credential = self.secrets.get(connection.id)
+            last_error = (
+                "Interrupted Cloudflare provisioning could not be reconciled; "
+                "disconnect and retry"
+            )
+            if isinstance(node_id, str) and node_id and credential is not None:
+                try:
+                    client = await self._client_from_payload(connection.id, credential)
+                    node = await client.get_mesh_node(
+                        str(connection.account_id), node_id
+                    )
+                    if (
+                        isinstance(node, dict)
+                        and str(node.get("id", "")) == node_id
+                        and str(node.get("name", "")) == connection.external_id
+                    ):
+                        await client.delete_mesh_node(
+                            str(connection.account_id), node_id
+                        )
+                        last_error = (
+                            "Interrupted Cloudflare provisioning was revoked; "
+                            "disconnect and retry"
+                        )
+                except (CloudflareAPIError, CloudflareServiceError):
+                    pass
+            self.store.upsert_connection(
+                provider="cloudflare",
+                external_id=connection.external_id,
+                label=connection.label,
+                status="error",
+                account_id=connection.account_id,
+                public_metadata=connection.public_metadata,
+                last_error=last_error,
+            )
 
         for journal in self.store.list_provisioning_journals("cloudflare"):
             if journal.phase == "committed":
@@ -1883,7 +1976,7 @@ class CloudflareService:
         client: CloudflareClientProtocol,
         account_id: str,
         node_id: str,
-    ) -> str:
+    ) -> tuple[str, bool]:
         try:
             route = await client.create_hostname_route(account_id, node_id)
             route_id = str(route.get("id", ""))
@@ -1891,13 +1984,14 @@ class CloudflareService:
                 raise CloudflareServiceError(
                     "Cloudflare hostname route creation outcome could not be reconciled"
                 )
-            return route_id
+            return route_id, True
         except CloudflareAPIError as exc:
             routes = await client.list_hostname_routes(account_id)
             owned_id = cls._owned_hostname_route_id(routes, node_id)
             if owned_id is not None:
-                # Reconcile a successful create whose response was lost.
-                return owned_id
+                # The route may predate this operation, so adopt it without
+                # granting rollback permission to delete it.
+                return owned_id, False
             raise exc
 
     @classmethod
@@ -1906,8 +2000,8 @@ class CloudflareService:
         client: CloudflareClientProtocol,
         zone_id: str,
         hostname: str,
-    ) -> tuple[str | None, bool]:
-        """Return (owned placeholder record id, adopted-existing-DNS flag).
+    ) -> tuple[str | None, bool, bool]:
+        """Return (record id, adopted-operator-DNS, created-this-run).
 
         Any pre-existing record for the exact hostname is left untouched: the
         Workers Routes only intercept the two well-known paths, so operator
@@ -1917,9 +2011,9 @@ class CloudflareService:
         owned_id = cls._owned_placeholder_id(records, hostname)
         if owned_id is not None:
             # Already ours (idempotent retry after an interrupted run).
-            return owned_id, False
+            return owned_id, False, False
         if records:
-            return None, True
+            return None, True, False
         try:
             record = await client.create_placeholder_dns_record(zone_id, hostname)
             record_id = str(record.get("id", ""))
@@ -1927,17 +2021,17 @@ class CloudflareService:
                 raise CloudflareServiceError(
                     "Cloudflare DNS creation outcome could not be reconciled"
                 )
-            return record_id, False
+            return record_id, False, True
         except CloudflareAPIError as exc:
             records = await client.list_dns_records(zone_id, hostname)
             owned_id = cls._owned_placeholder_id(records, hostname)
             if owned_id is not None:
                 # Reconcile a successful create whose response was lost, rather
                 # than downgrading lnSwitchboard's record to adopted ownership.
-                return owned_id, False
+                return owned_id, False, False
             if records:
                 # An operator record appeared concurrently; leave it untouched.
-                return None, True
+                return None, True, False
             raise exc
 
     @staticmethod

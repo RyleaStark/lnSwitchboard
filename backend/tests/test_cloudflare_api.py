@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import pytest
+from httpx import ASGITransport, AsyncClient
+from fastapi import HTTPException
+
 from backend.app import deps
 from backend.app.cloudflare_client import CloudflareAPIError
+from backend.app.cloudflare_oauth import CloudflareOAuthGrantNotFoundError
 from backend.app.cloudflare_service import CloudflareUnavailableError
 from backend.app.main import admin_app
+from backend.app.routers import connections as connections_router
 
 ACCOUNT_ID = "a" * 32
 ZONE_ID = "b" * 32
@@ -142,6 +148,125 @@ def test_cloudflare_setup_documents_current_dashboard_permissions(test_client) -
         "Access: Apps and Policies Read and Write (access.read, access.write)",
     ]
     assert response.json()["authorization_method"] == "oauth"
+
+
+def test_cloudflare_oauth_validation_never_reflects_code_and_is_private(
+    test_client,
+) -> None:
+    sentinel = "oauth-code-must-not-be-reflected-" * 100
+
+    response = test_client.post(
+        "/api/cloudflare/oauth/complete",
+        json={"code": sentinel, "state": "valid-looking-state"},
+    )
+
+    assert response.status_code == 422
+    assert sentinel not in response.text
+    assert response.headers["cache-control"] == "no-store, private"
+    assert response.headers["pragma"] == "no-cache"
+
+
+def test_cloudflare_oauth_landing_route_is_served_by_the_spa(test_client) -> None:
+    response = test_client.get(
+        "/connections/cloudflare/?cloudflare=connected",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+
+
+def test_oauth_grant_in_use_by_connection_cannot_be_deleted(test_client) -> None:
+    store = deps._get_connection_store()
+    connection = store.upsert_connection(
+        provider="cloudflare",
+        external_id="lnswitchboard-test-mesh",
+        label="Cloudflare Mesh",
+        status="connected",
+        account_id=ACCOUNT_ID,
+        public_metadata={},
+    )
+    deps._get_connection_secret_store().set(
+        connection.id,
+        {"grant_id": "grant-in-use", "mesh_ingress_key": "test-key"},
+    )
+
+    response = test_client.delete(
+        "/api/cloudflare/oauth/grants/grant-in-use"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Cloudflare OAuth grant is in use by a connection; reconnect or disconnect it first"
+    )
+    assert response.headers["cache-control"] == "no-store, private"
+
+
+def test_oauth_grant_in_use_by_pending_authorization_cannot_be_deleted(
+    test_client,
+) -> None:
+    deps._get_connection_secret_store().set(
+        "cloudflare-authorization:" + "a" * 32,
+        {"grant_id": "grant-in-use", "created_at": 1.0},
+    )
+
+    response = test_client.delete(
+        "/api/cloudflare/oauth/grants/grant-in-use"
+    )
+
+    assert response.status_code == 409
+    assert response.headers["cache-control"] == "no-store, private"
+
+
+@pytest.mark.anyio
+async def test_missing_referenced_oauth_grant_maps_to_reconnect_contract() -> None:
+    async def missing_grant() -> None:
+        raise CloudflareOAuthGrantNotFoundError
+
+    with pytest.raises(HTTPException) as exc_info:
+        await connections_router._cloudflare_call(missing_grant)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == (
+        "Cloudflare authorization expired; reconnect Cloudflare"
+    )
+
+
+@pytest.mark.anyio
+async def test_unexpected_oauth_error_is_sanitized_and_private() -> None:
+    marker = "authorization-code-must-not-be-reflected"
+
+    class ExplodingOAuthManager:
+        async def complete_flow(self, *, state: str, code: str):
+            del state, code
+            raise RuntimeError(marker)
+
+    admin_app.dependency_overrides[deps.get_cloudflare_oauth_manager_dep] = (
+        ExplodingOAuthManager
+    )
+    try:
+        transport = ASGITransport(
+            app=admin_app,
+            raise_app_exceptions=False,
+            client=("192.168.1.10", 50000),
+        )
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+        ) as client:
+            response = await client.post(
+                "/api/cloudflare/oauth/complete",
+                json={"state": "valid-state", "code": marker},
+                headers={"host": "localhost", "origin": "http://localhost"},
+            )
+    finally:
+        admin_app.dependency_overrides.pop(
+            deps.get_cloudflare_oauth_manager_dep, None
+        )
+
+    assert response.status_code == 500
+    assert marker not in response.text
+    assert response.headers["cache-control"] == "no-store, private"
 
 
 def test_cloudflare_api_authorizes_with_grant_and_provisions_without_tunnel_ids(test_client) -> None:

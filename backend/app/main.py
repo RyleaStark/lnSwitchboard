@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import logging
 from contextlib import asynccontextmanager, suppress
 from ipaddress import IPv6Address, ip_address, ip_network
@@ -11,6 +12,8 @@ from urllib.parse import urlsplit
 
 import grpc
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -19,6 +22,7 @@ from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from .deps import (
     get_cloudflare_oauth_manager_dep,
     get_cloudflare_service_dep,
+    get_connection_secret_store_dep,
     get_connection_store_dep,
     get_ln_address_store_dep,
     get_ln_client_dep,
@@ -312,6 +316,34 @@ def _add_request_security(target_app: FastAPI) -> None:
             ]
         trusted_hosts = parse_trusted_hosts(settings.trusted_hosts)
         request_host = request.headers.get("host", "")
+        mesh_public_host: str | None = None
+        mesh_candidate = request.headers.get("x-lns-public-host", "")
+        mesh_key = request.headers.get("x-lns-mesh-key", "")
+        if _normalized_authority_hostname(request_host) == "lns.internal":
+            candidate_hostname = _normalized_authority_hostname(mesh_candidate)
+            if candidate_hostname is not None:
+                connection_store = await get_connection_store_dep()
+                secret_store = await get_connection_secret_store_dep()
+                for connection in connection_store.list_connections():
+                    if connection.provider != "cloudflare":
+                        continue
+                    if not any(
+                        domain.hostname == candidate_hostname
+                        and domain.status in {"pending", "active"}
+                        for domain in connection.domains
+                    ):
+                        continue
+                    credential = secret_store.get(connection.id) or {}
+                    expected_key = credential.get("mesh_ingress_key")
+                    if (
+                        isinstance(expected_key, str)
+                        and expected_key
+                        and secrets.compare_digest(mesh_key, expected_key)
+                    ):
+                        mesh_public_host = candidate_hostname
+                    break
+        if mesh_public_host is not None:
+            request.state.mesh_public_host = mesh_public_host
         public_host = get_public_host(request)
         request_hostname = _normalized_authority_hostname(request_host)
         public_hostname = _normalized_authority_hostname(public_host)
@@ -321,6 +353,7 @@ def _add_request_security(target_app: FastAPI) -> None:
         if not (
             _host_is_trusted(request_host, trusted_hosts)
             or connection_store.has_public_domain(request_hostname)
+            or mesh_public_host is not None
         ) or not (
             _host_is_trusted(public_host, trusted_hosts)
             or connection_store.has_public_domain(public_hostname)
@@ -367,7 +400,9 @@ def _add_admin_access_control(target_app: FastAPI) -> None:
 def _add_cloudflare_response_privacy(target_app: FastAPI) -> None:
     @target_app.middleware("http")
     async def prevent_cloudflare_admin_caching(request: Request, call_next):
-        is_cloudflare_admin = request.url.path.startswith("/api/connections/cloudflare")
+        is_cloudflare_admin = request.url.path.startswith(
+            ("/api/connections/cloudflare", "/api/cloudflare/oauth")
+        )
         try:
             response = await call_next(request)
         except Exception:
@@ -380,6 +415,7 @@ def _add_cloudflare_response_privacy(target_app: FastAPI) -> None:
             )
         if is_cloudflare_admin:
             response.headers["Cache-Control"] = "no-store, private"
+            response.headers["Pragma"] = "no-cache"
         return response
 
 
@@ -414,6 +450,20 @@ public_app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@admin_app.exception_handler(RequestValidationError)
+async def sanitize_cloudflare_oauth_validation(
+    request: Request, exc: RequestValidationError
+):
+    if request.url.path.startswith("/api/cloudflare/oauth"):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": "Invalid Cloudflare OAuth request"},
+        )
+    return await request_validation_exception_handler(request, exc)
+
+
 _add_admin_access_control(admin_app)
 _add_request_security(admin_app)
 _add_cloudflare_response_privacy(admin_app)
