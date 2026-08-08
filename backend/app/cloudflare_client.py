@@ -263,10 +263,18 @@ class CloudflareClient:
         ingress = config.get("ingress")
         if not isinstance(ingress, list):
             raise CloudflareAPIError(502)
+        managed_paths = {
+            r"^/\.well-known/lnurlp/.*$",
+            r"^/\.well-known/nostr\.json$",
+        }
+        normalized = hostname.lower().rstrip(".")
         retained = [
             dict(route) for route in ingress
             if isinstance(route, dict)
-            and str(route.get("hostname", "")).lower().rstrip(".") != hostname.lower().rstrip(".")
+            and not (
+                str(route.get("hostname", "")).lower().rstrip(".") == normalized
+                and route.get("path") in managed_paths
+            )
         ]
         if len(retained) == len(ingress):
             return

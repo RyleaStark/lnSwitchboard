@@ -814,7 +814,7 @@ function ProvisionForm({
         <select id="cloudflare-zone" value={zoneId} disabled={pending} onChange={(event) => onZoneChange(event.target.value)} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none md:text-sm">
           {zones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
         </select>
-        <FieldDescription>Lightning Addresses use this zone’s apex. lnSwitchboard adds only the two required Zero Trust Public Hostname paths: LNURL-pay and NIP-05.</FieldDescription>
+        <FieldDescription>Lightning Addresses use this zone’s apex. lnSwitchboard adds only the two required Zero Trust Public Hostname paths: LNURL-pay and NIP-05. An apex already routed through the selected tunnel is reused, not replaced.</FieldDescription>
       </Field>
       {selectedZone ? <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">Public hostname: <span className="font-medium text-foreground">{selectedZone.name}</span></p> : null}
       <div className="flex flex-wrap gap-2"><Button type="button" disabled={!selectedZone || pending} onClick={onSubmit}>{pending ? "Configuring tunnel…" : "Configure existing tunnel"}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onBack}>Back</Button></div>

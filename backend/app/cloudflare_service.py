@@ -310,14 +310,41 @@ class CloudflareService:
             raise CloudflareValidationError(
                 "Cloudflare Lightning Addresses must use the selected zone apex"
             )
-        if await client.list_dns_records(zone_id, hostname):
-            raise CloudflareConflictError(
-                "A DNS record already exists for this hostname; lnSwitchboard will not replace it"
-            )
+        existing_records = await client.list_dns_records(zone_id, hostname)
+        dns_adopted = False
+        if existing_records:
+            cname_targets = {
+                str(record.get("content", "")).lower().rstrip(".")
+                for record in existing_records
+                if str(record.get("type", "")).upper() == "CNAME"
+            }
+            if len(existing_records) == 1 and cname_targets == {
+                f"{tunnel_id}.cfargotunnel.com"
+            }:
+                # The apex already routes to the selected tunnel; reuse the
+                # record and only add the two well-known path routes.
+                dns_adopted = True
+            elif any(
+                target.endswith(".cfargotunnel.com") for target in cname_targets
+            ):
+                raise CloudflareConflictError(
+                    "This apex is already routed through a different Cloudflare Tunnel. "
+                    "Cloudflare routes a hostname to one tunnel only — select the tunnel "
+                    "that already serves this apex, and lnSwitchboard will add only the "
+                    "two well-known path routes to it."
+                )
+            else:
+                raise CloudflareConflictError(
+                    "A DNS record already exists for this hostname; lnSwitchboard will not replace it"
+                )
 
         await client.configure_tunnel(account_id, tunnel_id, hostname, self.origin_url)
-        dns_record_id = await self._create_or_find_dns_record(
-            client, zone_id, hostname, tunnel_id
+        dns_record_id = (
+            None
+            if dns_adopted
+            else await self._create_or_find_dns_record(
+                client, zone_id, hostname, tunnel_id
+            )
         )
         connector_token = await client.get_tunnel_token(account_id, tunnel_id)
         self._write_connector_token(connector_token)
@@ -327,7 +354,7 @@ class CloudflareService:
             label="Cloudflare Tunnel",
             status="provisioning",
             account_id=account_id,
-            public_metadata={"zone_id": zone_id, "zone_name": zone_name, "origin": self.origin_url},
+            public_metadata={"zone_id": zone_id, "zone_name": zone_name, "origin": self.origin_url, "dns_adopted": dns_adopted},
         )
         self.store.replace_domains(
             connection.id,

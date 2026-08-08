@@ -143,6 +143,39 @@ async def test_existing_tunnel_authorizes_when_account_enumeration_is_forbidden(
 
 
 @pytest.mark.anyio
+async def test_provision_adopts_apex_cname_pointing_at_selected_tunnel(service_parts) -> None:
+    service, store, _secrets, client, _token_path = service_parts
+    client.dns_records = [{"id": "apex", "type": "CNAME", "name": "example.com", "content": f"{TUNNEL_ID}.cfargotunnel.com"}]
+    authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
+    connection = await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="example.com")
+    call_names = [name for name, _ in client.calls]
+    assert "create_dns_record" not in call_names
+    assert "configure_tunnel" in call_names
+    assert connection.public_metadata["dns_adopted"] is True
+    refreshed = store.get_connection(connection.id)
+    assert refreshed is not None and refreshed.domains[0].external_id is None
+
+    client.calls.clear()
+    assert await service.disconnect(connection.id) is True
+    disconnect_calls = [name for name, _ in client.calls]
+    assert disconnect_calls == ["remove_tunnel_route"]
+    assert "delete_dns_record" not in disconnect_calls
+
+
+@pytest.mark.anyio
+async def test_provision_rejects_apex_routed_through_a_different_tunnel(service_parts) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    other_tunnel_cname = "99999999-8888-4777-8666-777777777777.cfargotunnel.com"
+    client.dns_records = [{"id": "apex", "type": "CNAME", "name": "example.com", "content": other_tunnel_cname}]
+    authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)
+    with pytest.raises(CloudflareConflictError, match="different Cloudflare Tunnel"):
+        await service.provision(authorization_id=str(authorization["authorization_id"]), account_id=ACCOUNT_ID, tunnel_id=TUNNEL_ID, zone_id=ZONE_ID, hostname="example.com")
+    call_names = [name for name, _ in client.calls]
+    assert "configure_tunnel" not in call_names
+    assert "create_dns_record" not in call_names
+
+
+@pytest.mark.anyio
 async def test_existing_tunnel_onboarding_preserves_existing_dns(service_parts) -> None:
     service, _store, _secrets, client, _token_path = service_parts
     authorization = await service.authorize(API_TOKEN, ACCOUNT_ID, TUNNEL_ID)

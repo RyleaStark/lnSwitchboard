@@ -4,6 +4,7 @@ import json
 
 import httpx
 import pytest
+from typing import Any
 
 from backend.app.cloudflare_client import CloudflareAPIError, CloudflareClient
 
@@ -85,6 +86,68 @@ def test_tunnel_ingress_override_preserves_unrelated_public_hostnames() -> None:
         {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
         {"service": "http_status:404"},
     ]
+
+
+@pytest.mark.anyio
+async def test_remove_tunnel_route_only_strips_managed_well_known_paths() -> None:
+    tunnel_config = {
+        "config": {
+            "ingress": [
+                {"hostname": "pay.example.com", "service": "http://site:8080"},
+                {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
+                {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
+                {"hostname": "other.example.com", "service": "http://other:8080"},
+                {"service": "http_status:404"},
+            ]
+        }
+    }
+    writes: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            writes.append(json.loads(request.content))
+            tunnel_config.update(writes[-1])
+        return httpx.Response(
+            200, json={"success": True, "errors": [], "result": tunnel_config}
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    await client.remove_tunnel_route("account-id", "tunnel-id", "pay.example.com")
+
+    assert writes == [{
+        "config": {
+            "ingress": [
+                {"hostname": "pay.example.com", "service": "http://site:8080"},
+                {"hostname": "other.example.com", "service": "http://other:8080"},
+                {"service": "http_status:404"},
+            ]
+        }
+    }]
+
+
+@pytest.mark.anyio
+async def test_remove_tunnel_route_is_noop_without_managed_paths() -> None:
+    tunnel_config = {
+        "config": {
+            "ingress": [
+                {"hostname": "pay.example.com", "service": "http://site:8080"},
+                {"service": "http_status:404"},
+            ]
+        }
+    }
+    writes: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            writes.append(json.loads(request.content))
+        return httpx.Response(
+            200, json={"success": True, "errors": [], "result": tunnel_config}
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    await client.remove_tunnel_route("account-id", "tunnel-id", "pay.example.com")
+
+    assert writes == []
 
 
 @pytest.mark.anyio
