@@ -728,6 +728,9 @@ def test_worker_source_privacy_and_version_marker() -> None:
     ]
     assert all("env.MESH.fetch" in line for line in fetch_lines)
     assert "X-LNS-Public-Host" in WORKER_SOURCE
+    assert "stripHopByHop(forwarded.headers)" in WORKER_SOURCE
+    assert "stripHopByHop(responseHeaders)" in WORKER_SOURCE
+    assert "new Response(upstream.body" in WORKER_SOURCE
     assert extract_worker_version(WORKER_SOURCE) == LNS_WORKER_VERSION
     # Failure mapping is a fixed sanitized 503 with no exception interpolation.
     assert re.search(r'catch \{', WORKER_SOURCE)

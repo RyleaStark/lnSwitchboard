@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 
 # Bump on every change to WORKER_SOURCE; the service upgrades drifted scripts.
-LNS_WORKER_VERSION = "2026.08.08.1"
+LNS_WORKER_VERSION = "2026.08.08.2"
 
 WORKER_SCRIPT_NAME = "lnswitchboard-proxy"
 INTERNAL_HOSTNAME = "lns.internal"
@@ -48,13 +48,26 @@ const HOP_BY_HOP_HEADERS = [
   "upgrade",
 ];
 
+function stripHopByHop(headers) {
+  const connection = headers.get("connection");
+  if (connection !== null) {
+    for (const value of connection.split(",")) {
+      const name = value.trim().toLowerCase();
+      if (/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(name)) {
+        headers.delete(name);
+      }
+    }
+  }
+  for (const name of HOP_BY_HOP_HEADERS) {
+    headers.delete(name);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const forwarded = new Request(INTERNAL_ORIGIN + url.pathname + url.search, request);
-    for (const name of HOP_BY_HOP_HEADERS) {
-      forwarded.headers.delete(name);
-    }
+    stripHopByHop(forwarded.headers);
     // Pass the public hostname explicitly; the mesh-side Host header is the
     // internal hostname, so the app cannot otherwise recover it.
     const publicHost = request.headers.get("Host");
@@ -62,7 +75,14 @@ export default {
       forwarded.headers.set("X-LNS-Public-Host", publicHost);
     }
     try {
-      return await env.MESH.fetch(forwarded);
+      const upstream = await env.MESH.fetch(forwarded);
+      const responseHeaders = new Headers(upstream.headers);
+      stripHopByHop(responseHeaders);
+      return new Response(upstream.body, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: responseHeaders,
+      });
     } catch {
       // Fixed sanitized failure: never surface exception text or internals.
       return new Response("lnSwitchboard origin unavailable", {
