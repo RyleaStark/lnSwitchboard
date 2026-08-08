@@ -350,6 +350,41 @@ class CloudflareService:
     def cancel_authorization(self, authorization_id: str) -> bool:
         return self.secrets.delete(f"{_AUTHORIZATION_PREFIX}{authorization_id}")
 
+    async def reauthorize(
+        self, connection_id: str, authorization_id: str
+    ) -> ProviderConnection:
+        """Replace an existing connection's expired grant without reprovisioning."""
+        async with self._provision_lock:
+            self._require_connector()
+            connection = self.store.get_connection(connection_id)
+            if connection is None or connection.provider != "cloudflare":
+                raise CloudflareNotFoundError("Cloudflare connection not found")
+            authorization_owner, payload, client = await self._pending_client(
+                authorization_id
+            )
+            if payload.get("account_id") != connection.account_id:
+                raise CloudflareValidationError(
+                    "account ID must match the existing Cloudflare connection"
+                )
+            await client.verify_token()
+            grant_id = payload.get("grant_id")
+            if not isinstance(grant_id, str) or not grant_id:
+                raise CloudflareValidationError(
+                    "Cloudflare OAuth authorization is required to reconnect"
+                )
+            previous = self.secrets.get(connection.id)
+            if previous is None:
+                raise CloudflareServiceError(
+                    "Cloudflare connection credentials are unavailable"
+                )
+            self.secrets.set(connection.id, {"grant_id": grant_id})
+            if not self.secrets.delete(authorization_owner):
+                self.secrets.set(connection.id, previous)
+                raise CloudflareServiceError(
+                    "Cloudflare authorization could not be consumed"
+                )
+            return connection
+
 
     def _authorization_payload(
         self, authorization_id: str

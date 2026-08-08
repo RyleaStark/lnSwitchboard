@@ -530,6 +530,11 @@ export const api = {
     request<ProviderConnection>(`api/connections/cloudflare/${connectionId}/status`, {
       method: "POST",
     }),
+  reauthorizeCloudflare: (connectionId: string) =>
+    request<ProviderConnection>(
+      `api/connections/cloudflare/${encodeURIComponent(connectionId)}/reauthorize`,
+      { method: "POST" },
+    ),
   disconnectCloudflare: (connectionId: string) =>
     request<{ disconnected: boolean }>(`api/connections/cloudflare/${connectionId}`, {
       method: "DELETE",

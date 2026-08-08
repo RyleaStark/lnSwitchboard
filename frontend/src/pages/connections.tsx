@@ -205,6 +205,15 @@ function CloudflareConnectionsPage() {
       const account = result.accounts.find((item) => item.id === selectedAccountId)
       if (!account) throw new Error("Cloudflare did not authorize the selected account.")
       queryClient.setQueryData(["cloudflare-authorization"], result)
+      if (cloudflareConnection && reconnectNotice !== null) {
+        await api.reauthorizeCloudflare(cloudflareConnection.id)
+        queryClient.removeQueries({ queryKey: ["cloudflare-authorization"] })
+        await queryClient.invalidateQueries({ queryKey: ["connections"] })
+        resetOnboarding("connect")
+        setReconnectNotice(null)
+        toast.success("Cloudflare authorization restored")
+        return
+      }
       setAccountId(account.id)
       setZoneId(account.zones[0]?.id ?? "")
       setHostname(account.zones[0]?.name ?? "")

@@ -471,6 +471,57 @@ async def test_oauth_grant_account_discovery_does_not_create_authorization(
 
 
 @pytest.mark.anyio
+async def test_oauth_reauthorization_replaces_grant_without_remote_mutation(
+    tmp_path: Path,
+) -> None:
+    store = ConnectionStore(tmp_path / "connections.db")
+    secrets = ConnectionSecretStore(
+        tmp_path / "connections.db", tmp_path / "secrets.key"
+    )
+    client = FakeCloudflareClient()
+
+    async def resolver(_grant_id: str) -> str:
+        return "replacement-access-token"
+
+    service = CloudflareService(
+        store=store,
+        secrets=secrets,
+        client_factory=lambda _token: client,
+        connector_enabled=True,
+        token_path=tmp_path / "mesh" / "node.env",
+        origin_url="http://app:21212",
+        token_gid=os.getgid(),
+        access_token_resolver=resolver,
+    )
+    connection = store.upsert_connection(
+        provider="cloudflare",
+        external_id="existing-node",
+        label="Cloudflare Mesh",
+        status="error",
+        account_id=ACCOUNT_ID,
+        public_metadata={},
+    )
+    secrets.set(connection.id, {"grant_id": "expired-grant"})
+    authorization_id = "a" * 32
+    authorization_owner = f"cloudflare-authorization:{authorization_id}"
+    secrets.set(
+        authorization_owner,
+        {
+            "grant_id": "replacement-grant",
+            "account_id": ACCOUNT_ID,
+            "created_at": time.time(),
+        },
+    )
+
+    result = await service.reauthorize(connection.id, authorization_id)
+
+    assert result.id == connection.id
+    assert secrets.get(connection.id) == {"grant_id": "replacement-grant"}
+    assert secrets.get(authorization_owner) is None
+    assert client.calls == [("verify_token", None)]
+
+
+@pytest.mark.anyio
 async def test_oauth_grant_flow_resolves_access_tokens_and_persists_grant_id(
     tmp_path: Path,
 ) -> None:

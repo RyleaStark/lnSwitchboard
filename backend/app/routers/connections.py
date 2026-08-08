@@ -389,6 +389,33 @@ async def get_cloudflare_authorization(
     return await _cloudflare_call(operation)
 
 
+@router.post("/cloudflare/{connection_id}/reauthorize")
+async def reauthorize_cloudflare(
+    connection_id: str,
+    request: Request,
+    response: Response,
+    service: CloudflareService = Depends(get_cloudflare_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    authorization_id = request.cookies.get(CLOUDFLARE_AUTHORIZATION_COOKIE)
+    if not authorization_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Authorize Cloudflare before reconnecting",
+            headers={"Cache-Control": _PRIVATE_NO_STORE, "Pragma": "no-cache"},
+        )
+
+    async def operation() -> ProviderConnection:
+        return await service.reauthorize(connection_id, authorization_id)
+
+    connection = await _cloudflare_call(operation)
+    response.delete_cookie(
+        CLOUDFLARE_AUTHORIZATION_COOKIE,
+        path="/api/connections/cloudflare",
+    )
+    return _serialize_connection(connection)
+
+
 @router.delete(
     "/cloudflare/authorization",
 )

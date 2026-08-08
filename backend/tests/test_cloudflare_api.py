@@ -14,6 +14,7 @@ class FakeCloudflareService:
     def __init__(self) -> None:
         self.authorize_request: tuple[str, str] | None = None
         self.discover_grant_request: str | None = None
+        self.reauthorize_request: tuple[str, str] | None = None
         self.provision_request: dict[str, str] | None = None
 
     async def authorize_grant(self, grant_id: str, account_id: str):
@@ -30,6 +31,12 @@ class FakeCloudflareService:
         connection = store.upsert_connection(provider="cloudflare", external_id="lnswitchboard-mesh-node", label="Cloudflare", status="provisioning", account_id=account_id, public_metadata={"origin": "http://lnswitchboard:21212"})
         store.replace_domains(connection.id, [{"hostname": hostname, "status": "pending", "zone_id": zone_id}])
         return store.get_connection(connection.id)
+
+    async def reauthorize(self, connection_id: str, authorization_id: str):
+        self.reauthorize_request = (connection_id, authorization_id)
+        connection = deps._get_connection_store().get_connection(connection_id)
+        assert connection is not None
+        return connection
 
     async def refresh_status(self, connection_id: str):
         return deps._get_connection_store().get_connection(connection_id)
@@ -154,6 +161,39 @@ def test_cloudflare_api_authorizes_with_grant_and_provisions_without_tunnel_ids(
     assert provisioned.headers["cache-control"] == "no-store, private"
     assert service.provision_request and "tunnel_id" not in service.provision_request
     assert secret not in provisioned.text
+
+
+def test_cloudflare_api_reauthorizes_existing_connection_without_reprovisioning(
+    test_client,
+) -> None:
+    service = FakeCloudflareService()
+    admin_app.dependency_overrides[deps.get_cloudflare_service_dep] = lambda: service
+    try:
+        provisioned = test_client.post(
+            "/api/connections/cloudflare/provision",
+            json={
+                "account_id": ACCOUNT_ID,
+                "zone_id": ZONE_ID,
+                "hostname": "pay.example.com",
+            },
+            cookies={"lnswitchboard_cloudflare_authorization": "initial-flow"},
+        )
+        connection_id = provisioned.json()["id"]
+        response = test_client.post(
+            f"/api/connections/cloudflare/{connection_id}/reauthorize",
+            cookies={
+                "lnswitchboard_cloudflare_authorization": "replacement-flow"
+            },
+        )
+    finally:
+        admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store, private"
+    assert service.reauthorize_request == (connection_id, "replacement-flow")
+    assert "lnswitchboard_cloudflare_authorization=\"\"" in response.headers[
+        "set-cookie"
+    ]
 
 
 def test_cloudflare_authorize_discovers_oauth_selected_accounts_without_account_id(test_client) -> None:

@@ -25,6 +25,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
     addCloudflareDomain: vi.fn(),
     removeCloudflareDomain: vi.fn(),
     refreshCloudflareStatus: vi.fn(),
+    reauthorizeCloudflare: vi.fn(),
     disconnectCloudflare: vi.fn(),
     tailscaleSetup: vi.fn(),
     beginTailscaleLogin: vi.fn(),
@@ -413,7 +414,7 @@ test("keeps connected management controls active when onboarding capability is u
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled()
 })
 
-test("guides back to the connect step when a domain operation requires reconnect", async () => {
+test("reconnects an existing connection without reprovisioning", async () => {
   const user = userEvent.setup()
   vi.mocked(api.connections).mockResolvedValue({
     providers: [
@@ -424,6 +425,15 @@ test("guides back to the connect step when a domain operation requires reconnect
   vi.mocked(api.refreshCloudflareStatus).mockRejectedValue(
     new ApiError(409, "Cloudflare authorization expired; reconnect Cloudflare", "Conflict"),
   )
+  vi.mocked(api.beginCloudflareOAuth).mockResolvedValue(oauthFlow())
+  vi.mocked(api.completeCloudflareOAuth).mockResolvedValue(oauthGrant())
+  vi.mocked(api.cloudflareOAuthGrants).mockResolvedValue({ grants: [oauthGrant()] })
+  vi.mocked(api.authorizeCloudflare)
+    .mockResolvedValueOnce({
+      accounts: [{ id: "a".repeat(32), name: "Example account", zones: [] }],
+    })
+    .mockResolvedValueOnce(cloudflareAuthorization())
+  vi.mocked(api.reauthorizeCloudflare).mockResolvedValue(cloudflareConnection())
 
   renderPage()
 
@@ -432,7 +442,16 @@ test("guides back to the connect step when a domain operation requires reconnect
   const alert = await screen.findByRole("alert")
   expect(alert).toHaveTextContent("Cloudflare authorization expired; reconnect Cloudflare")
   expect(alert).toHaveTextContent(/restore domain management/)
-  expect(screen.getByRole("button", { name: "Connect Cloudflare" })).toBeInTheDocument()
+  await user.click(screen.getByRole("button", { name: "Connect Cloudflare" }))
+  await user.type(await screen.findByLabelText("Authorization code"), "new-code")
+  await user.click(screen.getByRole("button", { name: "Complete authorization" }))
+  await user.click(await screen.findByRole("button", { name: "Use this authorization" }))
+  await user.click(await screen.findByRole("button", { name: "Example account" }))
+
+  await waitFor(() =>
+    expect(api.reauthorizeCloudflare).toHaveBeenCalledWith("connection-id"),
+  )
+  expect(screen.queryByRole("button", { name: "Create connection" })).not.toBeInTheDocument()
 })
 
 test("offers unused authorized zones and adds another Cloudflare domain", async () => {
