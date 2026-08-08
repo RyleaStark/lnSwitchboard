@@ -7,52 +7,48 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_compose_cloudflared_contract_is_isolated_and_digest_pinned() -> None:
+def test_compose_mesh_sidecar_contract_is_isolated_and_digest_pinned() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     services = compose["services"]
     app = services["lnswitchboard"]
-    cloudflared = services["cloudflared"]
+    mesh = services["cloudflare-mesh"]
 
-    image = cloudflared["image"]
+    image = mesh["image"]
     assert image == (
-        "cloudflare/cloudflared:2026.7.3@"
-        "sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf"
+        "cloudflare/mesh:2026.7.0@"
+        "sha256:18fad6d500e8ca48b7e4d5ae1905d65e8a50c1f5f5e21eba020d54d5cbf82571"
     )
     assert ":latest" not in image
-    assert cloudflared["entrypoint"] == ["cloudflared"]
-    assert cloudflared["user"] == "65532:${CLOUDFLARED_TOKEN_GID:-0}"
-    assert "ports" not in cloudflared
-    assert cloudflared.get("privileged") is not True
-    assert cloudflared.get("network_mode") != "host"
-    assert "cap_add" not in cloudflared
+    assert mesh["entrypoint"] == ["sh", "/opt/lnswitchboard/mesh-entrypoint.sh"]
+    assert "ports" not in mesh
+    assert mesh.get("privileged") is not True
+    assert mesh.get("network_mode") != "host"
+    # The mesh node requires TUN + forwarding by design (Cloudflare docs);
+    # exactly these capabilities and nothing more.
+    assert mesh["cap_add"] == ["NET_ADMIN", "NET_RAW"]
+    assert mesh["devices"] == ["/dev/net/tun:/dev/net/tun"]
+    assert mesh["sysctls"] == {
+        "net.ipv4.ip_forward": "1",
+        "net.ipv6.conf.all.forwarding": "1",
+        "net.ipv6.conf.default.forwarding": "1",
+    }
 
-    command = cloudflared["command"]
-    assert command == [
-        "tunnel",
-        "--autoupdate-freq",
-        "24h",
-        "--metrics",
-        "0.0.0.0:2000",
-        "run",
-        "--token-file",
-        "/run/lnswitchboard/tunnel.token",
-    ]
-    assert cloudflared["volumes"] == ["./secrets/cloudflared:/run/lnswitchboard:ro"]
+    assert mesh["environment"]["MESH_NODE_TOKEN_FILE"] == "/run/lnswitchboard/node.env"
+    assert "./secrets/cloudflare-mesh:/run/lnswitchboard:ro" in mesh["volumes"]
     assert app["environment"]["CLOUDFLARED_CONNECTOR_ENABLED"] == "true"
     assert app["environment"]["CLOUDFLARED_TOKEN_PATH"] == (
-        "/app/secrets/cloudflared/tunnel.token"
+        "/app/secrets/cloudflare-mesh/node.env"
     )
-    assert app["environment"]["CLOUDFLARED_METRICS_URL"] == "http://cloudflared:2000"
     assert app["environment"]["CLOUDFLARED_ORIGIN_URL"] == "http://lnswitchboard:21212"
     assert app["environment"]["CLOUDFLARED_TOKEN_GID"] == "${CLOUDFLARED_TOKEN_GID:-0}"
 
 
-def test_compose_never_exposes_docker_socket_or_admin_origin_to_cloudflared() -> None:
+def test_compose_never_exposes_docker_socket_or_admin_origin_to_mesh() -> None:
     raw = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    cloudflared_section = raw.split("  cloudflared:\n", 1)[1]
+    mesh_section = raw.split("  cloudflare-mesh:\n", 1)[1]
 
     assert "/var/run/docker.sock" not in raw
-    assert "22121" not in cloudflared_section
+    assert "22121" not in mesh_section
     assert "21212" in raw
 
 

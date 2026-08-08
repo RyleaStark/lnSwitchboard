@@ -160,11 +160,7 @@ class Settings(BaseSettings):
     )
     cloudflared_token_path: Path = _env_field(
         env="CLOUDFLARED_TOKEN_PATH",
-        default=Path("secrets/cloudflared/tunnel.token"),
-    )
-    cloudflared_metrics_url: str = _env_field(
-        env="CLOUDFLARED_METRICS_URL",
-        default="http://cloudflared:2000",
+        default=Path("secrets/cloudflare-mesh/node.env"),
     )
     cloudflared_origin_url: str = _env_field(
         env="CLOUDFLARED_ORIGIN_URL",
