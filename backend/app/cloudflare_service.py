@@ -1,4 +1,4 @@
-"""Cloudflare Tunnel onboarding and lifecycle orchestration."""
+"""Cloudflare Mesh + proxy Worker onboarding and lifecycle orchestration."""
 
 from __future__ import annotations
 
@@ -13,15 +13,22 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlsplit
 
+from .cloudflare_client import PLACEHOLDER_DNS_CONTENT, CloudflareAPIError
+from .cloudflare_worker_source import (
+    INTERNAL_HOSTNAME,
+    LNS_WORKER_VERSION,
+    MANAGED_COMMENT,
+    PUBLIC_PORT,
+    WORKER_SCRIPT_NAME,
+    extract_worker_version,
+)
 from .connection_secret_store import ConnectionSecretStore
 from .connection_store import ConnectedDomain, ConnectionStore, ProviderConnection
-from .cloudflare_client import CloudflareAPIError, CloudflareRollbackError
 
 _AUTHORIZATION_PREFIX = "cloudflare-authorization:"
 _AUTHORIZATION_ID = re.compile(r"^[A-Za-z0-9_-]{32}$")
 _AUTHORIZATION_TTL_SECONDS = 15 * 60
 _RESOURCE_ID = re.compile(r"^[a-fA-F0-9]{32}$")
-_TUNNEL_ID = re.compile(r"^(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{8}-(?:[a-fA-F0-9]{4}-){3}[a-fA-F0-9]{12})$")
 _CONNECTION_OWNER_ID = re.compile(
     r"^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$", re.IGNORECASE
 )
@@ -51,51 +58,58 @@ class CloudflareClientProtocol(Protocol):
     async def verify_token(self) -> None: ...
     async def list_accounts(self) -> list[dict[str, Any]]: ...
     async def list_zones(self, account_id: str) -> list[dict[str, Any]]: ...
-    async def get_tunnel(
-        self, account_id: str, tunnel_id: str
-    ) -> dict[str, Any] | None: ...
     async def get_zone(self, zone_id: str) -> dict[str, Any]: ...
+
+    async def create_mesh_node(self, account_id: str, name: str) -> dict[str, Any]: ...
+    async def find_mesh_node_by_name(
+        self, account_id: str, name: str
+    ) -> dict[str, Any] | None: ...
+    async def get_mesh_node(
+        self, account_id: str, node_id: str
+    ) -> dict[str, Any] | None: ...
+    async def get_mesh_node_token(self, account_id: str, node_id: str) -> str: ...
+    async def list_mesh_node_connections(
+        self, account_id: str, node_id: str
+    ) -> list[dict[str, Any]]: ...
+    async def delete_mesh_node(self, account_id: str, node_id: str) -> None: ...
+
+    async def create_hostname_route(
+        self, account_id: str, node_id: str
+    ) -> dict[str, Any]: ...
+    async def list_hostname_routes(
+        self, account_id: str
+    ) -> list[dict[str, Any]]: ...
+    async def get_hostname_route(
+        self, account_id: str, route_id: str
+    ) -> dict[str, Any] | None: ...
+    async def delete_hostname_route(self, account_id: str, route_id: str) -> None: ...
+
+    async def deploy_proxy_worker(self, account_id: str, script_name: str) -> None: ...
+    async def get_worker_script_content(
+        self, account_id: str, script_name: str
+    ) -> str | None: ...
+    async def delete_worker_script(self, account_id: str, script_name: str) -> None: ...
+
+    async def ensure_workers_routes(
+        self, zone_id: str, hostname: str, script_name: str
+    ) -> None: ...
+    async def verify_workers_routes(
+        self, zone_id: str, hostname: str, script_name: str
+    ) -> bool: ...
+    async def remove_workers_routes(
+        self, zone_id: str, hostname: str, script_name: str
+    ) -> None: ...
+
     async def list_dns_records(
         self, zone_id: str, hostname: str
     ) -> list[dict[str, Any]]: ...
-
-    async def configure_tunnel(
-        self,
-        account_id: str,
-        tunnel_id: str,
-        hostname: str,
-        origin_url: str,
-    ) -> tuple[dict[str, Any], dict[str, Any]]: ...
-    async def restore_tunnel_configuration(
-        self,
-        account_id: str,
-        tunnel_id: str,
-        original_config: dict[str, Any],
-        written_config: dict[str, Any],
-    ) -> None: ...
-    async def create_dns_record(
-        self, zone_id: str, hostname: str, tunnel_id: str
+    async def create_placeholder_dns_record(
+        self, zone_id: str, hostname: str
     ) -> dict[str, Any]: ...
-    async def get_tunnel_token(self, account_id: str, tunnel_id: str) -> str: ...
-    async def disable_tunnel(self, account_id: str, tunnel_id: str) -> None: ...
-    async def verify_tunnel_route(
-        self,
-        account_id: str,
-        tunnel_id: str,
-        hostname: str,
-        origin_url: str,
-    ) -> bool: ...
-    async def remove_tunnel_route(
-        self, account_id: str, tunnel_id: str, hostname: str, origin_url: str
-    ) -> None: ...
     async def get_dns_record(
         self, zone_id: str, record_id: str
     ) -> dict[str, Any] | None: ...
-    async def list_tunnel_connections(
-        self, account_id: str, tunnel_id: str
-    ) -> list[dict[str, Any]]: ...
     async def delete_dns_record(self, zone_id: str, record_id: str) -> None: ...
-
 
 
 class CloudflareService:
@@ -130,19 +144,6 @@ class CloudflareService:
         if not _RESOURCE_ID.fullmatch(normalized):
             raise CloudflareValidationError(f"{label} is invalid")
         return normalized
-
-    @staticmethod
-    def _normalize_tunnel_id(value: str) -> str:
-        normalized = value.strip()
-        if normalized.startswith("eyJ"):
-            raise CloudflareValidationError(
-                "A Cloudflared connector token was provided. Use the existing tunnel UUID instead."
-            )
-        if not _TUNNEL_ID.fullmatch(normalized):
-            raise CloudflareValidationError(
-                "Tunnel ID must be the existing tunnel UUID, not a connector token."
-            )
-        return normalized.lower()
 
     @staticmethod
     def _normalize_hostname(value: str) -> str:
@@ -194,7 +195,7 @@ class CloudflareService:
         if (
             parsed.scheme != "http"
             or not valid_hostname
-            or parsed.port != 21212
+            or parsed.port != PUBLIC_PORT
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path
@@ -202,30 +203,24 @@ class CloudflareService:
             or parsed.fragment
         ):
             raise CloudflareValidationError(
-                "Cloudflare origin must be an HTTP service on public port 21212"
+                f"Cloudflare origin must be an HTTP service on public port {PUBLIC_PORT}"
             )
         return normalized
 
-    async def authorize(
-        self, api_token: str, account_id: str, tunnel_id: str
-    ) -> dict[str, Any]:
+    async def authorize(self, api_token: str, account_id: str) -> dict[str, Any]:
         self._require_connector()
         token = api_token.strip()
         if not token:
             raise CloudflareValidationError("Cloudflare API token is required")
         account_id = self._normalize_resource_id(account_id, "account ID")
-        tunnel_id = self._normalize_tunnel_id(tunnel_id)
         client = self.client_factory(token)
         await client.verify_token()
-        tunnel = await client.get_tunnel(account_id, tunnel_id)
-        if not isinstance(tunnel, dict) or str(tunnel.get("id", "")) != tunnel_id:
-            raise CloudflareNotFoundError("Cloudflare tunnel was not found")
         try:
             accounts = await client.list_accounts()
         except CloudflareAPIError:
-            # A selected tunnel lookup has already proven access to this account.
-            # Listing every account is optional discovery and can be denied to a
-            # correctly scoped user token.
+            # Zone listing below has already proven access to this account.
+            # Listing every account is optional discovery and can be denied to
+            # a correctly scoped user token.
             accounts = []
         selected_account = next(
             (item for item in accounts if str(item.get("id", "")) == account_id),
@@ -254,7 +249,6 @@ class CloudflareService:
                 "api_token": token,
                 "created_at": time.time(),
                 "account_id": account_id,
-                "tunnel_id": tunnel_id,
             },
         )
         return {"authorization_id": authorization_id, "accounts": authorized_accounts}
@@ -296,7 +290,6 @@ class CloudflareService:
         *,
         authorization_id: str,
         account_id: str,
-        tunnel_id: str,
         zone_id: str,
         hostname: str,
     ) -> ProviderConnection:
@@ -304,36 +297,59 @@ class CloudflareService:
             return await self._provision_locked(
                 authorization_id=authorization_id,
                 account_id=account_id,
-                tunnel_id=tunnel_id,
                 zone_id=zone_id,
                 hostname=hostname,
             )
+
+    def _persist_provisioning(
+        self,
+        connection: ProviderConnection,
+        metadata: dict[str, Any],
+        hostname: str,
+        zone_id: str,
+        dns_record_id: str | None,
+    ) -> ProviderConnection:
+        updated = self.store.upsert_connection(
+            provider="cloudflare",
+            external_id=connection.external_id,
+            label=connection.label,
+            status="provisioning",
+            account_id=connection.account_id,
+            public_metadata=metadata,
+        )
+        self.store.replace_domains(
+            updated.id,
+            [
+                {
+                    "hostname": hostname,
+                    "status": "pending",
+                    "external_id": dns_record_id,
+                    "zone_id": zone_id,
+                }
+            ],
+        )
+        return updated
 
     async def _provision_locked(
         self,
         *,
         authorization_id: str,
         account_id: str,
-        tunnel_id: str,
         zone_id: str,
         hostname: str,
     ) -> ProviderConnection:
         self._require_connector()
         if any(item.provider == "cloudflare" for item in self.store.list_connections()):
-            raise CloudflareConflictError("A Cloudflare tunnel is already connected")
+            raise CloudflareConflictError("Cloudflare is already connected")
         account_id = self._normalize_resource_id(account_id, "account ID")
         zone_id = self._normalize_resource_id(zone_id, "zone ID")
         hostname = self._normalize_hostname(hostname)
-        tunnel_id = self._normalize_tunnel_id(tunnel_id)
         authorization_owner, credential_payload, client = await self._pending_client(
             authorization_id
         )
-        if (
-            credential_payload.get("account_id") != account_id
-            or credential_payload.get("tunnel_id") != tunnel_id
-        ):
+        if credential_payload.get("account_id") != account_id:
             raise CloudflareValidationError(
-                "account ID and tunnel ID must match the validated token"
+                "account ID must match the validated token"
             )
 
         zone = await client.get_zone(zone_id)
@@ -350,24 +366,25 @@ class CloudflareService:
             raise CloudflareValidationError(
                 "Cloudflare hostname must belong to the selected zone"
             )
-        # Persist the hostname intent before DNS mutation. If the process stops
-        # after Cloudflare creates DNS but before the record ID is stored,
-        # refresh/disconnect can reconcile the pending hostname by exact name,
-        # tunnel target, and lnSwitchboard ownership comment.
-        dns_adopted = False
-        dns_record_id: str | None = None
-        connection: ProviderConnection | None = None
-        metadata = {
+
+        # The mesh node name is generated before any remote mutation and used
+        # as the connection's durable external identity: unlike the node id, it
+        # is known up front and recoverable by name after a crash, so the
+        # intent row can always be reconciled.
+        node_name = self._mesh_node_name(hostname)
+        metadata: dict[str, Any] = {
             "zone_id": zone_id,
             "zone_name": zone_name,
             "origin": self.origin_url,
             "dns_adopted": False,
+            "mesh_node_name": node_name,
         }
+        connection: ProviderConnection | None = None
         try:
             connection = self.store.upsert_connection(
                 provider="cloudflare",
-                external_id=tunnel_id,
-                label="Cloudflare Tunnel",
+                external_id=node_name,
+                label="Cloudflare Mesh",
                 status="provisioning",
                 account_id=account_id,
                 public_metadata=metadata,
@@ -393,128 +410,198 @@ class CloudflareService:
                 self.store.delete_connection(connection.id)
             raise
 
+        progress: dict[str, Any] = {
+            "node_attempted": False,
+            "node_id": None,
+            "hostname_route_id": None,
+            "worker_touched": False,
+            "dns_attempted": False,
+            "dns_record_id": None,
+            "routes_touched": False,
+        }
+        dns_adopted = False
         try:
-            dns_record_id, dns_adopted = await self._create_or_adopt_dns_record(
-                client, zone_id, hostname, tunnel_id
+            progress["node_attempted"] = True
+            node_id = await self._create_or_recover_mesh_node(
+                client, account_id, node_name
             )
-            metadata["dns_adopted"] = dns_adopted
-            connection = self.store.upsert_connection(
-                provider="cloudflare",
-                external_id=tunnel_id,
-                label="Cloudflare Tunnel",
-                status="provisioning",
-                account_id=account_id,
-                public_metadata=metadata,
+            progress["node_id"] = node_id
+            metadata["mesh_node_id"] = node_id
+            connection = self._persist_provisioning(
+                connection, metadata, hostname, zone_id, None
             )
-            self.store.replace_domains(
-                connection.id,
-                [
-                    {
-                        "hostname": hostname,
-                        "status": "pending",
-                        "external_id": dns_record_id,
-                        "zone_id": zone_id,
-                    }
-                ],
-            )
-        except Exception as dns_error:
-            dns_cleanup_errors = await self._cleanup_created_dns_record(
-                client,
-                tunnel_id=tunnel_id,
-                zone_id=zone_id,
-                hostname=hostname,
-                dns_record_id=dns_record_id,
-            )
-            uncertain_dns_outcome = (
-                dns_record_id is None
-                and isinstance(dns_error, CloudflareAPIError)
-                and dns_error.status_code >= 500
-            )
-            if dns_cleanup_errors or uncertain_dns_outcome:
-                self._mark_rollback_review(
-                    connection,
-                    hostname,
-                    zone_id,
-                    dns_record_id,
-                    route_cleanup_pending=False,
-                    dns_cleanup_pending=True,
-                )
-            else:
-                self.secrets.delete(connection.id)
-                self.store.delete_connection(connection.id)
-            raise dns_error
-        try:
-            original_config, written_config = await client.configure_tunnel(
-                account_id, tunnel_id, hostname, self.origin_url
-            )
-        except Exception as exc:
-            dns_cleanup_errors = await self._cleanup_created_dns_record(
-                client,
-                tunnel_id=tunnel_id,
-                zone_id=zone_id,
-                hostname=hostname,
-                dns_record_id=dns_record_id,
-            )
-            route_cleanup_pending = isinstance(exc, CloudflareRollbackError)
-            if dns_cleanup_errors or route_cleanup_pending:
-                self._mark_rollback_review(
-                    connection,
-                    hostname,
-                    zone_id,
-                    dns_record_id,
-                    route_cleanup_pending=route_cleanup_pending,
-                    dns_cleanup_pending=bool(dns_cleanup_errors),
-                )
-                raise CloudflareServiceError(
-                    "Cloudflare provisioning rollback needs operator review"
-                ) from exc
-            self.secrets.delete(connection.id)
-            self.store.delete_connection(connection.id)
-            raise
 
-        try:
-            connector_token = await client.get_tunnel_token(account_id, tunnel_id)
-            self._write_connector_token(connector_token)
+            node_token = await client.get_mesh_node_token(account_id, node_id)
+            self._write_node_token(node_token)
+
+            hostname_route_id = await self._create_or_adopt_hostname_route(
+                client, account_id, node_id
+            )
+            progress["hostname_route_id"] = hostname_route_id
+            metadata["hostname_route_id"] = hostname_route_id
+            connection = self._persist_provisioning(
+                connection, metadata, hostname, zone_id, None
+            )
+
+            # Drift check before any PUT: a script carrying our version marker
+            # is ours to upgrade; a script without it is foreign and never
+            # overwritten.
+            content = await client.get_worker_script_content(
+                account_id, WORKER_SCRIPT_NAME
+            )
+            worker_version: str | None = None
+            if content is not None:
+                worker_version = extract_worker_version(content)
+                if worker_version is None:
+                    raise CloudflareConflictError(
+                        "A Worker script named lnswitchboard-proxy already exists "
+                        "and is not managed by lnSwitchboard"
+                    )
+            progress["worker_touched"] = True
+            if worker_version != LNS_WORKER_VERSION:
+                await client.deploy_proxy_worker(account_id, WORKER_SCRIPT_NAME)
+                deployed = await client.get_worker_script_content(
+                    account_id, WORKER_SCRIPT_NAME
+                )
+                if (
+                    deployed is None
+                    or extract_worker_version(deployed) != LNS_WORKER_VERSION
+                ):
+                    raise CloudflareAPIError(502)
+                worker_version = LNS_WORKER_VERSION
+            metadata["worker_version"] = worker_version
+            connection = self._persist_provisioning(
+                connection, metadata, hostname, zone_id, None
+            )
+
+            progress["dns_attempted"] = True
+            dns_record_id, dns_adopted = await self._create_or_adopt_placeholder_dns(
+                client, zone_id, hostname
+            )
+            progress["dns_record_id"] = dns_record_id
+            metadata["dns_adopted"] = dns_adopted
+            connection = self._persist_provisioning(
+                connection, metadata, hostname, zone_id, dns_record_id
+            )
+
+            progress["routes_touched"] = True
+            await client.ensure_workers_routes(zone_id, hostname, WORKER_SCRIPT_NAME)
+
+            if not dns_adopted and dns_record_id is not None:
+                record = await client.get_dns_record(zone_id, dns_record_id)
+                if record is None or not self._dns_record_is_owned(
+                    record, record_id=dns_record_id, hostname=hostname
+                ):
+                    raise CloudflareAPIError(502)
+            if not await client.verify_workers_routes(
+                zone_id, hostname, WORKER_SCRIPT_NAME
+            ):
+                raise CloudflareAPIError(502)
             self.secrets.delete(authorization_owner)
-        except Exception as provision_error:
-            dns_cleanup_errors = await self._cleanup_created_dns_record(
+        except Exception as exc:
+            cleanup_errors = await self._rollback_failed_provision(
                 client,
-                tunnel_id=tunnel_id,
+                account_id=account_id,
+                node_name=node_name,
                 zone_id=zone_id,
                 hostname=hostname,
-                dns_record_id=dns_record_id,
+                dns_adopted=dns_adopted,
+                progress=progress,
             )
-            route_cleanup_pending = False
-            try:
-                await client.restore_tunnel_configuration(
-                    account_id,
-                    tunnel_id,
-                    original_config,
-                    written_config,
-                )
-            except Exception:
-                route_cleanup_pending = True
-            try:
-                self._remove_connector_token()
-            except OSError:
-                pass
-            if dns_cleanup_errors or route_cleanup_pending:
+            ambiguous_outcome = (
+                isinstance(exc, CloudflareAPIError) and exc.status_code >= 500
+            )
+            if cleanup_errors or ambiguous_outcome:
                 self._mark_rollback_review(
                     connection,
                     hostname,
                     zone_id,
-                    dns_record_id,
-                    route_cleanup_pending=route_cleanup_pending,
-                    dns_cleanup_pending=bool(dns_cleanup_errors),
+                    progress["dns_record_id"],
+                    route_cleanup_pending=bool(progress["routes_touched"]),
+                    dns_cleanup_pending=(
+                        not dns_adopted
+                        and (
+                            progress["dns_record_id"] is not None
+                            or (ambiguous_outcome and progress["dns_attempted"])
+                        )
+                    ),
                 )
             else:
                 self.secrets.delete(connection.id)
                 self.store.delete_connection(connection.id)
-            raise provision_error
+            raise
 
         refreshed = self.store.get_connection(connection.id)
         assert refreshed is not None
         return refreshed
+
+    async def _rollback_failed_provision(
+        self,
+        client: CloudflareClientProtocol,
+        *,
+        account_id: str,
+        node_name: str,
+        zone_id: str,
+        hostname: str,
+        dns_adopted: bool,
+        progress: dict[str, Any],
+    ) -> list[str]:
+        """Best-effort reverse-order compensation for a failed provision.
+
+        Every step is ownership-checked and idempotent; a stage is only
+        touched when this run reached it, so foreign resources (for example a
+        Worker script that failed the drift check) are never deleted.
+        """
+        errors: list[str] = []
+        if progress["routes_touched"]:
+            try:
+                await client.remove_workers_routes(
+                    zone_id, hostname, WORKER_SCRIPT_NAME
+                )
+            except CloudflareAPIError as exc:
+                # A 409 here means a foreign-owned route was preserved, which
+                # is the expected conflict path rather than a cleanup failure.
+                if exc.status_code != 409:
+                    errors.append(type(exc).__name__)
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        if not dns_adopted and progress["dns_record_id"] is not None:
+            errors.extend(
+                await self._cleanup_created_dns_record(
+                    client,
+                    zone_id=zone_id,
+                    hostname=hostname,
+                    dns_record_id=progress["dns_record_id"],
+                )
+            )
+        if progress["worker_touched"]:
+            try:
+                await client.delete_worker_script(account_id, WORKER_SCRIPT_NAME)
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        if progress["hostname_route_id"] is not None:
+            try:
+                await client.delete_hostname_route(
+                    account_id, progress["hostname_route_id"]
+                )
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        if progress["node_attempted"]:
+            node_id = progress["node_id"]
+            try:
+                if node_id is None:
+                    found = await client.find_mesh_node_by_name(account_id, node_name)
+                    if isinstance(found, dict) and found.get("id"):
+                        node_id = str(found["id"])
+                if node_id is not None:
+                    await client.delete_mesh_node(account_id, node_id)
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        try:
+            self._remove_node_token()
+        except OSError:
+            errors.append("OSError")
+        return errors
 
     async def refresh_status(self, connection_id: str) -> ProviderConnection:
         async with self._provision_lock:
@@ -525,16 +612,73 @@ class CloudflareService:
         if connection.public_metadata.get("cleanup_pending"):
             return connection
         client = await self._connection_client(connection_id)
-        remote_connections = await client.list_tunnel_connections(
-            str(connection.account_id), connection.external_id
-        )
-        active = any(
+        account_id = str(connection.account_id)
+        node_id = await self._resolve_node_id(client, account_id, connection)
+        if (
+            node_id is not None
+            and connection.public_metadata.get("mesh_node_id") != node_id
+        ):
+            # The recovery above persisted the id; re-read so the final upsert
+            # does not overwrite it with stale metadata.
+            connection = self._require_connection(connection_id)
+        remote_connections: list[dict[str, Any]] = []
+        if node_id is not None:
+            node = await client.get_mesh_node(account_id, node_id)
+            if node is not None:
+                remote_connections = await client.list_mesh_node_connections(
+                    account_id, node_id
+                )
+        node_live = any(
             not item.get("is_pending_reconnect", False) for item in remote_connections
         )
-        if active:
+
+        transport_error: str | None = None
+        if node_id is None:
+            transport_error = "Managed mesh node is missing"
+        content = await client.get_worker_script_content(
+            account_id, WORKER_SCRIPT_NAME
+        )
+        if content is None:
+            transport_error = transport_error or "Managed proxy Worker is missing"
+        else:
+            observed_version = extract_worker_version(content)
+            if observed_version is None:
+                transport_error = transport_error or (
+                    "The lnswitchboard-proxy Worker is not managed by lnSwitchboard"
+                )
+            elif observed_version != LNS_WORKER_VERSION:
+                # Our own outdated script: upgrade the drift and re-verify.
+                try:
+                    await client.deploy_proxy_worker(account_id, WORKER_SCRIPT_NAME)
+                    deployed = await client.get_worker_script_content(
+                        account_id, WORKER_SCRIPT_NAME
+                    )
+                    if (
+                        deployed is None
+                        or extract_worker_version(deployed) != LNS_WORKER_VERSION
+                    ):
+                        transport_error = transport_error or (
+                            "Managed proxy Worker upgrade could not be verified"
+                        )
+                except CloudflareAPIError:
+                    transport_error = transport_error or (
+                        "Managed proxy Worker is outdated and could not be upgraded"
+                    )
+
+        hostname_route_ok = await self._verify_hostname_route(
+            client, account_id, node_id, connection
+        )
+        if not hostname_route_ok:
+            transport_error = transport_error or (
+                "Managed hostname route is missing or retargeted"
+            )
+
+        if node_live and transport_error is None:
             status = "connected"
             domain_status = "active"
-        elif connection.status == "connected":
+        elif transport_error is not None or connection.status == "connected":
+            # A missing/replaced/outdated managed resource is always an error
+            # state, even before the sidecar has ever connected.
             status = "degraded"
             domain_status = "error"
         else:
@@ -542,10 +686,12 @@ class CloudflareService:
             domain_status = "pending"
 
         domain_payloads: list[dict[str, Any]] = []
-        dns_mismatch = False
+        resource_mismatch = False
         for domain in connection.domains:
             current_status = domain_status
-            last_error: str | None = None
+            last_error: str | None = (
+                transport_error if domain_status == "error" else None
+            )
             external_id = domain.external_id
             if domain.zone_id:
                 if external_id is not None:
@@ -554,17 +700,16 @@ class CloudflareService:
                         record,
                         record_id=external_id,
                         hostname=domain.hostname,
-                        tunnel_id=connection.external_id,
                     ):
                         current_status = "error"
                         last_error = "Managed DNS record is missing or no longer owned"
-                        dns_mismatch = True
+                        resource_mismatch = True
                 else:
                     records = await client.list_dns_records(
                         domain.zone_id, domain.hostname
                     )
-                    recovered_owned_id = self._owned_dns_record_id(
-                        records, domain.hostname, connection.external_id
+                    recovered_owned_id = self._owned_placeholder_id(
+                        records, domain.hostname
                     )
                     if recovered_owned_id is not None:
                         external_id = recovered_owned_id
@@ -572,24 +717,23 @@ class CloudflareService:
                         last_error = (
                             "Cloudflare provisioning was interrupted; remove the domain or disconnect and retry"
                         )
-                        dns_mismatch = True
-                    elif not self._dns_points_to_tunnel(
-                        records, domain.hostname, connection.external_id
-                    ):
+                        resource_mismatch = True
+                    elif not records:
                         current_status = "error"
-                        last_error = "Existing DNS points to a different tunnel"
-                        dns_mismatch = True
-            if current_status == "active" and not await client.verify_tunnel_route(
-                str(connection.account_id),
-                connection.external_id,
+                        last_error = (
+                            "Hostname has no DNS record; the managed Workers Routes cannot activate it"
+                        )
+                        resource_mismatch = True
+            if current_status == "active" and not await client.verify_workers_routes(
+                domain.zone_id or str(connection.public_metadata.get("zone_id", "")),
                 domain.hostname,
-                self.origin_url,
+                WORKER_SCRIPT_NAME,
             ):
                 current_status = "error"
                 last_error = (
-                    "Managed tunnel ingress is missing, retargeted, duplicated, or shadowed"
+                    "Managed Workers Routes are missing, retargeted, duplicated, or owned by another script"
                 )
-                dns_mismatch = True
+                resource_mismatch = True
             domain_payloads.append(
                 {
                     "hostname": domain.hostname,
@@ -599,7 +743,7 @@ class CloudflareService:
                     "last_error": last_error,
                 }
             )
-        if dns_mismatch:
+        if resource_mismatch:
             status = "degraded"
 
         metadata = dict(connection.public_metadata)
@@ -613,7 +757,7 @@ class CloudflareService:
             public_metadata=metadata,
             last_error=(
                 "One or more Cloudflare hostnames need attention"
-                if dns_mismatch
+                if resource_mismatch
                 else None
             ),
         )
@@ -621,6 +765,54 @@ class CloudflareService:
         result = self.store.get_connection(updated.id)
         assert result is not None
         return result
+
+    async def _resolve_node_id(
+        self,
+        client: CloudflareClientProtocol,
+        account_id: str,
+        connection: ProviderConnection,
+    ) -> str | None:
+        node_id = connection.public_metadata.get("mesh_node_id")
+        if isinstance(node_id, str) and node_id:
+            return node_id
+        found = await client.find_mesh_node_by_name(
+            account_id, connection.external_id
+        )
+        if not isinstance(found, dict) or not found.get("id"):
+            return None
+        recovered = str(found["id"])
+        metadata = dict(connection.public_metadata)
+        metadata["mesh_node_id"] = recovered
+        self.store.upsert_connection(
+            provider="cloudflare",
+            external_id=connection.external_id,
+            label=connection.label,
+            status=connection.status,
+            account_id=connection.account_id,
+            public_metadata=metadata,
+            last_error=connection.last_error,
+        )
+        return recovered
+
+    async def _verify_hostname_route(
+        self,
+        client: CloudflareClientProtocol,
+        account_id: str,
+        node_id: str | None,
+        connection: ProviderConnection,
+    ) -> bool:
+        route_id = connection.public_metadata.get("hostname_route_id")
+        route: dict[str, Any] | None = None
+        if isinstance(route_id, str) and route_id:
+            route = await client.get_hostname_route(account_id, route_id)
+        else:
+            routes = await client.list_hostname_routes(account_id)
+            recovered = self._owned_hostname_route_id(routes, node_id)
+            if recovered is not None:
+                route = await client.get_hostname_route(account_id, recovered)
+        if route is None:
+            return False
+        return self._hostname_route_matches(route, node_id)
 
     async def available_zones(self, connection_id: str) -> list[dict[str, str]]:
         connection = self._require_connection(connection_id)
@@ -681,9 +873,14 @@ class CloudflareService:
             )
             connection = self._require_connection(connection.id)
             dns_record_id: str | None = None
+            dns_adopted = False
+            routes_touched = False
             try:
-                dns_record_id, _dns_adopted = await self._create_or_adopt_dns_record(
-                    client, zone_id, hostname, connection.external_id
+                (
+                    dns_record_id,
+                    dns_adopted,
+                ) = await self._create_or_adopt_placeholder_dns(
+                    client, zone_id, hostname
                 )
                 self.store.replace_domains(
                     connection.id,
@@ -698,56 +895,42 @@ class CloudflareService:
                     ],
                 )
                 connection = self._require_connection(connection.id)
-            except Exception as dns_error:
-                dns_cleanup_errors = await self._cleanup_created_dns_record(
-                    client,
-                    tunnel_id=connection.external_id,
-                    zone_id=zone_id,
-                    hostname=hostname,
-                    dns_record_id=dns_record_id,
-                )
-                uncertain_dns_outcome = (
-                    dns_record_id is None
-                    and isinstance(dns_error, CloudflareAPIError)
-                    and dns_error.status_code >= 500
-                )
-                if dns_cleanup_errors or uncertain_dns_outcome:
-                    self._mark_rollback_review(
-                        connection,
-                        hostname,
-                        zone_id,
-                        dns_record_id,
-                        route_cleanup_pending=False,
-                        dns_cleanup_pending=True,
-                    )
-                else:
-                    self.store.replace_domains(connection.id, original_domains)
-                raise dns_error
-
-            try:
-                await client.configure_tunnel(
-                    str(connection.account_id),
-                    connection.external_id,
-                    hostname,
-                    self.origin_url,
-                )
+                routes_touched = True
+                await client.ensure_workers_routes(zone_id, hostname, WORKER_SCRIPT_NAME)
             except Exception as exc:
-                dns_cleanup_errors = await self._cleanup_created_dns_record(
-                    client,
-                    tunnel_id=connection.external_id,
-                    zone_id=zone_id,
-                    hostname=hostname,
-                    dns_record_id=dns_record_id,
+                cleanup_errors: list[str] = []
+                if routes_touched:
+                    try:
+                        await client.remove_workers_routes(
+                            zone_id, hostname, WORKER_SCRIPT_NAME
+                        )
+                    except CloudflareAPIError as cleanup_exc:
+                        # 409: a foreign-owned route was preserved (expected
+                        # conflict path, not a cleanup failure).
+                        if cleanup_exc.status_code != 409:
+                            cleanup_errors.append(type(cleanup_exc).__name__)
+                    except Exception as cleanup_exc:
+                        cleanup_errors.append(type(cleanup_exc).__name__)
+                if not dns_adopted and dns_record_id is not None:
+                    cleanup_errors.extend(
+                        await self._cleanup_created_dns_record(
+                            client,
+                            zone_id=zone_id,
+                            hostname=hostname,
+                            dns_record_id=dns_record_id,
+                        )
+                    )
+                ambiguous_outcome = (
+                    isinstance(exc, CloudflareAPIError) and exc.status_code >= 500
                 )
-                route_cleanup_pending = isinstance(exc, CloudflareRollbackError)
-                if dns_cleanup_errors or route_cleanup_pending:
+                if cleanup_errors or ambiguous_outcome:
                     self._mark_rollback_review(
                         connection,
                         hostname,
                         zone_id,
                         dns_record_id,
-                        route_cleanup_pending=route_cleanup_pending,
-                        dns_cleanup_pending=bool(dns_cleanup_errors),
+                        route_cleanup_pending=routes_touched,
+                        dns_cleanup_pending=not dns_adopted,
                     )
                 else:
                     self.store.replace_domains(connection.id, original_domains)
@@ -764,7 +947,7 @@ class CloudflareService:
             connection = self._require_connection(connection_id)
             if len(connection.domains) <= 1:
                 raise CloudflareConflictError(
-                    "Disconnect the Cloudflare tunnel to remove its final domain"
+                    "Disconnect Cloudflare to remove its final domain"
                 )
             hostname = self._normalize_hostname(hostname)
             domain = next(
@@ -783,8 +966,8 @@ class CloudflareService:
             cleanup_domain = domain
             if domain.external_id is None:
                 records = await client.list_dns_records(zone_id, domain.hostname)
-                recovered_owned_id = self._owned_dns_record_id(
-                    records, domain.hostname, connection.external_id
+                recovered_owned_id = self._owned_placeholder_id(
+                    records, domain.hostname
                 )
                 if recovered_owned_id is not None:
                     cleanup_domain = ConnectedDomain(
@@ -799,24 +982,25 @@ class CloudflareService:
                 record = await client.get_dns_record(
                     zone_id, cleanup_domain.external_id
                 )
-                if record is not None and not self._owns_dns_record(
-                    connection, cleanup_domain, record
+                if record is not None and not self._dns_record_is_owned(
+                    record,
+                    record_id=cleanup_domain.external_id,
+                    hostname=cleanup_domain.hostname,
                 ):
                     raise CloudflareConflictError(
                         "The DNS record is no longer owned by lnSwitchboard and was preserved"
                     )
-            await client.remove_tunnel_route(
-                str(connection.account_id),
-                connection.external_id,
-                domain.hostname,
-                self.origin_url,
+            await client.remove_workers_routes(
+                zone_id, domain.hostname, WORKER_SCRIPT_NAME
             )
             if cleanup_domain.external_id and record is not None:
                 latest_record = await client.get_dns_record(
                     zone_id, cleanup_domain.external_id
                 )
-                if latest_record is not None and not self._owns_dns_record(
-                    connection, cleanup_domain, latest_record
+                if latest_record is not None and not self._dns_record_is_owned(
+                    latest_record,
+                    record_id=cleanup_domain.external_id,
+                    hostname=cleanup_domain.hostname,
                 ):
                     raise CloudflareConflictError(
                         "The DNS record changed during cleanup and was preserved"
@@ -844,8 +1028,26 @@ class CloudflareService:
     async def _disconnect_locked(self, connection_id: str) -> bool:
         connection = self._require_connection(connection_id)
         client = await self._connection_client(connection_id)
+        account_id = str(connection.account_id)
+        node_id = connection.public_metadata.get("mesh_node_id")
+        if not isinstance(node_id, str) or not node_id:
+            found = await client.find_mesh_node_by_name(
+                account_id, connection.external_id
+            )
+            node_id = (
+                str(found["id"])
+                if isinstance(found, dict) and found.get("id")
+                else None
+            )
+
         owned_records: list[tuple[ConnectedDomain, str]] = []
-        route_hostnames = {domain.hostname for domain in connection.domains}
+        route_targets: dict[str, str] = {}
+        for domain in connection.domains:
+            zone_id = domain.zone_id or str(
+                connection.public_metadata.get("zone_id", "")
+            )
+            if zone_id:
+                route_targets[domain.hostname] = zone_id
         dns_domains = list(connection.domains)
         pending = connection.public_metadata.get("cleanup_pending")
         if isinstance(pending, list):
@@ -858,15 +1060,17 @@ class CloudflareService:
                 )
                 dns_record_id = item.get("dns_record_id")
                 if item.get("route_cleanup_pending") is True:
-                    route_hostnames.add(hostname)
-                if item.get("dns_cleanup_pending") is True and isinstance(
-                    dns_record_id, str
-                ):
+                    route_targets[hostname] = zone_id
+                if item.get("dns_cleanup_pending") is True:
                     dns_domains.append(
                         ConnectedDomain(
                             hostname=hostname,
                             status="error",
-                            external_id=dns_record_id,
+                            external_id=(
+                                dns_record_id
+                                if isinstance(dns_record_id, str)
+                                else None
+                            ),
                             zone_id=zone_id,
                         )
                     )
@@ -880,8 +1084,8 @@ class CloudflareService:
                 cleanup_domain = domain
                 if domain.external_id is None:
                     records = await client.list_dns_records(zone_id, domain.hostname)
-                    recovered_owned_id = self._owned_dns_record_id(
-                        records, domain.hostname, connection.external_id
+                    recovered_owned_id = self._owned_placeholder_id(
+                        records, domain.hostname
                     )
                     if recovered_owned_id is None:
                         continue
@@ -896,35 +1100,65 @@ class CloudflareService:
                 record = await client.get_dns_record(
                     zone_id, cleanup_domain.external_id
                 )
-                if record is not None and not self._owns_dns_record(
-                    connection, cleanup_domain, record
+                if record is not None and not self._dns_record_is_owned(
+                    record,
+                    record_id=cleanup_domain.external_id,
+                    hostname=cleanup_domain.hostname,
                 ):
                     raise CloudflareConflictError(
                         "The DNS record is no longer owned by lnSwitchboard and was preserved"
                     )
                 if record is not None:
                     owned_records.append((cleanup_domain, zone_id))
-            for hostname in sorted(route_hostnames):
-                await client.remove_tunnel_route(
-                    str(connection.account_id),
-                    connection.external_id,
-                    hostname,
-                    self.origin_url,
+            for hostname, zone_id in sorted(route_targets.items()):
+                await client.remove_workers_routes(
+                    zone_id, hostname, WORKER_SCRIPT_NAME
                 )
-            self._remove_connector_token()
             for domain, zone_id in owned_records:
                 assert domain.external_id is not None
                 latest_record = await client.get_dns_record(
                     zone_id, domain.external_id
                 )
-                if latest_record is not None and not self._owns_dns_record(
-                    connection, domain, latest_record
+                if latest_record is not None and not self._dns_record_is_owned(
+                    latest_record,
+                    record_id=domain.external_id,
+                    hostname=domain.hostname,
                 ):
                     raise CloudflareConflictError(
                         "The DNS record changed during cleanup and was preserved"
                     )
                 if latest_record is not None:
                     await client.delete_dns_record(zone_id, domain.external_id)
+
+            route_id = connection.public_metadata.get("hostname_route_id")
+            if not isinstance(route_id, str) or not route_id:
+                route_id = self._owned_hostname_route_id(
+                    await client.list_hostname_routes(account_id), node_id
+                )
+            if route_id is not None:
+                route = await client.get_hostname_route(account_id, route_id)
+                if route is not None:
+                    if not self._hostname_route_is_owned(
+                        route, route_id=route_id, node_id=node_id
+                    ):
+                        raise CloudflareConflictError(
+                            "The hostname route is no longer owned by lnSwitchboard and was preserved"
+                        )
+                    await client.delete_hostname_route(account_id, route_id)
+
+            content = await client.get_worker_script_content(
+                account_id, WORKER_SCRIPT_NAME
+            )
+            if content is not None:
+                if extract_worker_version(content) is None:
+                    raise CloudflareConflictError(
+                        "The lnswitchboard-proxy Worker is not managed by lnSwitchboard and was preserved"
+                    )
+                await client.delete_worker_script(account_id, WORKER_SCRIPT_NAME)
+
+            if node_id is not None:
+                await client.delete_mesh_node(account_id, node_id)
+            self._remove_node_token()
         except Exception:
             self.store.upsert_connection(
                 provider="cloudflare",
@@ -963,7 +1197,6 @@ class CloudflareService:
         self,
         client: CloudflareClientProtocol,
         *,
-        tunnel_id: str,
         zone_id: str,
         hostname: str,
         dns_record_id: str | None,
@@ -978,7 +1211,6 @@ class CloudflareService:
                 record,
                 record_id=dns_record_id,
                 hostname=hostname,
-                tunnel_id=tunnel_id,
             ):
                 raise CloudflareConflictError(
                     "Created DNS record changed during rollback and was preserved"
@@ -1030,34 +1262,70 @@ class CloudflareService:
             pass
 
     @staticmethod
-    def _owns_dns_record(
-        connection: ProviderConnection,
-        domain: ConnectedDomain,
-        record: dict[str, Any],
-    ) -> bool:
-        return CloudflareService._dns_record_is_owned(
-            record,
-            record_id=domain.external_id,
-            hostname=domain.hostname,
-            tunnel_id=connection.external_id,
-        )
-
-    @staticmethod
     def _dns_record_is_owned(
         record: dict[str, Any],
         *,
         record_id: str | None,
         hostname: str,
-        tunnel_id: str,
     ) -> bool:
         return (
             record.get("id") == record_id
-            and str(record.get("type", "")).upper() == "CNAME"
-            and str(record.get("name", "")).lower().rstrip(".") == hostname
-            and str(record.get("content", "")).lower().rstrip(".")
-            == f"{tunnel_id}.cfargotunnel.com"
-            and record.get("comment") == "Managed by lnSwitchboard"
+            and CloudflareService._is_managed_placeholder(record, hostname)
         )
+
+    @staticmethod
+    def _is_managed_placeholder(record: dict[str, Any], hostname: str) -> bool:
+        try:
+            content_matches = ip_address(
+                str(record.get("content", "")).strip()
+            ) == ip_address(PLACEHOLDER_DNS_CONTENT)
+        except ValueError:
+            content_matches = False
+        return (
+            str(record.get("type", "")).upper() == "AAAA"
+            and str(record.get("name", "")).lower().rstrip(".") == hostname
+            and content_matches
+            and record.get("proxied") is True
+            and record.get("comment") == MANAGED_COMMENT
+        )
+
+    @staticmethod
+    def _owned_placeholder_id(
+        records: list[dict[str, Any]], hostname: str
+    ) -> str | None:
+        for record in records:
+            if CloudflareService._is_managed_placeholder(record, hostname):
+                record_id = str(record.get("id", ""))
+                return record_id or None
+        return None
+
+    @staticmethod
+    def _hostname_route_matches(
+        route: dict[str, Any], node_id: str | None
+    ) -> bool:
+        return (
+            str(route.get("hostname", "")).lower().rstrip(".") == INTERNAL_HOSTNAME
+            and route.get("comment") == MANAGED_COMMENT
+            and (node_id is None or str(route.get("tunnel_id", "")) == node_id)
+        )
+
+    @staticmethod
+    def _hostname_route_is_owned(
+        route: dict[str, Any], *, route_id: str, node_id: str | None
+    ) -> bool:
+        return route.get("id") == route_id and CloudflareService._hostname_route_matches(
+            route, node_id
+        )
+
+    @staticmethod
+    def _owned_hostname_route_id(
+        routes: list[dict[str, Any]], node_id: str | None
+    ) -> str | None:
+        for route in routes:
+            if CloudflareService._hostname_route_matches(route, node_id):
+                route_id = str(route.get("id", ""))
+                return route_id or None
+        return None
 
     @staticmethod
     def _domain_payload(domain: ConnectedDomain) -> dict[str, Any]:
@@ -1072,18 +1340,6 @@ class CloudflareService:
     @staticmethod
     def _hostname_in_zone(hostname: str, zone_name: str) -> bool:
         return hostname == zone_name or hostname.endswith(f".{zone_name}")
-
-    @staticmethod
-    def _dns_points_to_tunnel(
-        records: list[dict[str, Any]], hostname: str, tunnel_id: str
-    ) -> bool:
-        target = f"{tunnel_id}.cfargotunnel.com"
-        return any(
-            str(record.get("type", "")).upper() == "CNAME"
-            and str(record.get("name", "")).lower().rstrip(".") == hostname
-            and str(record.get("content", "")).lower().rstrip(".") == target
-            for record in records
-        )
 
     def _require_connection(self, connection_id: str) -> ProviderConnection:
         connection = self.store.get_connection(connection_id)
@@ -1129,11 +1385,11 @@ class CloudflareService:
     async def recover_incomplete_provisioning(self) -> None:
         """Quarantine incomplete journals from the legacy tunnel-creation flow.
 
-        Current provisioning records a durable provider connection before remote
-        ingress mutation and does not create these journals. A legacy journal is
-        not sufficient proof that its DNS record or tunnel is still owned: an
-        operator may have repurposed either resource after a crash. Recovery is
-        therefore deliberately non-destructive and requires operator review.
+        Current provisioning records a durable provider connection before any
+        remote mutation and does not create these journals. A legacy journal is
+        not sufficient proof that its resources are still owned: an operator
+        may have repurposed them after a crash. Recovery is therefore
+        deliberately non-destructive and requires operator review.
         """
 
         self.purge_expired_authorizations()
@@ -1173,17 +1429,77 @@ class CloudflareService:
                 last_error="legacy_recovery_requires_operator_review",
             )
 
+    @classmethod
+    async def _create_or_recover_mesh_node(
+        cls,
+        client: CloudflareClientProtocol,
+        account_id: str,
+        node_name: str,
+    ) -> str:
+        try:
+            node = await client.create_mesh_node(account_id, node_name)
+            node_id = str(node.get("id", ""))
+            if not node_id:
+                raise CloudflareServiceError(
+                    "Cloudflare mesh node creation outcome could not be reconciled"
+                )
+            return node_id
+        except CloudflareAPIError as exc:
+            # Reconcile a successful create whose response was lost; the node
+            # name was generated by this run, so a name match is ours.
+            try:
+                existing = await client.find_mesh_node_by_name(account_id, node_name)
+            except CloudflareAPIError:
+                existing = None
+            if isinstance(existing, dict) and existing.get("id"):
+                return str(existing["id"])
+            raise exc
 
     @classmethod
-    async def _create_or_adopt_dns_record(
+    async def _create_or_adopt_hostname_route(
+        cls,
+        client: CloudflareClientProtocol,
+        account_id: str,
+        node_id: str,
+    ) -> str:
+        try:
+            route = await client.create_hostname_route(account_id, node_id)
+            route_id = str(route.get("id", ""))
+            if not route_id:
+                raise CloudflareServiceError(
+                    "Cloudflare hostname route creation outcome could not be reconciled"
+                )
+            return route_id
+        except CloudflareAPIError as exc:
+            routes = await client.list_hostname_routes(account_id)
+            owned_id = cls._owned_hostname_route_id(routes, node_id)
+            if owned_id is not None:
+                # Reconcile a successful create whose response was lost.
+                return owned_id
+            raise exc
+
+    @classmethod
+    async def _create_or_adopt_placeholder_dns(
         cls,
         client: CloudflareClientProtocol,
         zone_id: str,
         hostname: str,
-        tunnel_id: str,
     ) -> tuple[str | None, bool]:
+        """Return (owned placeholder record id, adopted-existing-DNS flag).
+
+        Any pre-existing record for the exact hostname is left untouched: the
+        Workers Routes only intercept the two well-known paths, so operator
+        DNS keeps serving everything else.
+        """
+        records = await client.list_dns_records(zone_id, hostname)
+        owned_id = cls._owned_placeholder_id(records, hostname)
+        if owned_id is not None:
+            # Already ours (idempotent retry after an interrupted run).
+            return owned_id, False
+        if records:
+            return None, True
         try:
-            record = await client.create_dns_record(zone_id, hostname, tunnel_id)
+            record = await client.create_placeholder_dns_record(zone_id, hostname)
             record_id = str(record.get("id", ""))
             if not record_id:
                 raise CloudflareServiceError(
@@ -1192,55 +1508,26 @@ class CloudflareService:
             return record_id, False
         except CloudflareAPIError as exc:
             records = await client.list_dns_records(zone_id, hostname)
-            owned_id = cls._owned_dns_record_id(records, hostname, tunnel_id)
+            owned_id = cls._owned_placeholder_id(records, hostname)
             if owned_id is not None:
                 # Reconcile a successful create whose response was lost, rather
                 # than downgrading lnSwitchboard's record to adopted ownership.
                 return owned_id, False
-            if {81053, 81057, 81058} & set(exc.error_codes):
-                if cls._dns_points_to_tunnel(records, hostname, tunnel_id):
-                    return None, True
-                raise CloudflareConflictError(
-                    "Existing Cloudflare DNS points to a different tunnel; select that tunnel or use another hostname"
-                ) from exc
-            raise
-
-    @classmethod
-    async def _find_owned_dns_record_id(
-        cls,
-        client: CloudflareClientProtocol,
-        zone_id: str,
-        hostname: str,
-        tunnel_id: str,
-    ) -> str | None:
-        records = await client.list_dns_records(zone_id, hostname)
-        return cls._owned_dns_record_id(records, hostname, tunnel_id)
+            if records:
+                # An operator record appeared concurrently; leave it untouched.
+                return None, True
+            raise exc
 
     @staticmethod
-    def _owned_dns_record_id(
-        records: list[dict[str, Any]], hostname: str, tunnel_id: str
-    ) -> str | None:
-        target = f"{tunnel_id}.cfargotunnel.com"
-        for record in records:
-            if (
-                str(record.get("type", "")).upper() == "CNAME"
-                and str(record.get("name", "")).lower().rstrip(".") == hostname
-                and str(record.get("content", "")).lower().rstrip(".") == target
-                and record.get("comment") == "Managed by lnSwitchboard"
-            ):
-                record_id = str(record.get("id", ""))
-                return record_id or None
-        return None
-
-    @staticmethod
-    def _tunnel_name(hostname: str) -> str:
-        base = re.sub(r"[^a-z0-9-]+", "-", hostname).strip("-")[:70]
+    def _mesh_node_name(hostname: str) -> str:
+        base = re.sub(r"[^a-z0-9-]+", "-", hostname).strip("-")[:40]
         return f"lnswitchboard-{base}-{random_secrets.token_hex(4)}"
 
-    def _write_connector_token(self, token: str) -> None:
+    def _write_node_token(self, token: str) -> None:
         value = token.strip()
         if not value:
-            raise CloudflareServiceError("Cloudflare did not return a connector token")
+            raise CloudflareServiceError("Cloudflare did not return a mesh node token")
+        content = f"MESH_NODE_TOKEN={value}\n"
         parent = self.token_path.parent
         parent.mkdir(parents=True, exist_ok=True, mode=0o750)
         os.chown(parent, -1, self.token_gid)
@@ -1252,13 +1539,13 @@ class CloudflareService:
         try:
             os.fchown(descriptor, -1, self.token_gid)
             os.fchmod(descriptor, 0o640)
-            os.write(descriptor, value.encode("utf-8"))
+            os.write(descriptor, content.encode("utf-8"))
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
         os.replace(temporary, self.token_path)
 
-    def _remove_connector_token(self) -> None:
+    def _remove_node_token(self) -> None:
         try:
             self.token_path.unlink()
         except FileNotFoundError:
