@@ -45,6 +45,8 @@ services:
     depends_on:
       lnswitchboard:
         condition: service_healthy
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
       - NET_RAW

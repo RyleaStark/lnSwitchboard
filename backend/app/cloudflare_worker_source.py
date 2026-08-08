@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 
 # Bump on every change to WORKER_SOURCE; the service upgrades drifted scripts.
-LNS_WORKER_VERSION = "2026.08.08.3"
+LNS_WORKER_VERSION = "2026.08.08.4"
 
 WORKER_SCRIPT_NAME = "lnswitchboard-proxy"
 INTERNAL_HOSTNAME = "lns.internal"
@@ -66,6 +66,18 @@ function stripHopByHop(headers) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const publicHostname = url.hostname.toLowerCase();
+    const isWorkersDev =
+      publicHostname === "workers.dev" || publicHostname.endsWith(".workers.dev");
+    if (isWorkersDev || !(
+      url.pathname.startsWith("/.well-known/lnurlp/") ||
+      url.pathname === "/.well-known/nostr.json"
+    )) {
+      return new Response("Not found", {
+        status: 404,
+        headers: { "cache-control": "no-store" },
+      });
+    }
     const forwarded = new Request(INTERNAL_ORIGIN + url.pathname + url.search, request);
     stripHopByHop(forwarded.headers);
     // Pass the public hostname explicitly; the mesh-side Host header is the

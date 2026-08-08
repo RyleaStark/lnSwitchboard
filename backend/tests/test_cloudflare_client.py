@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from email.parser import BytesParser
 from typing import Any
@@ -24,6 +25,7 @@ from backend.app.cloudflare_worker_source import (
     WORKER_SOURCE,
     extract_worker_version,
 )
+from backend.app.logging_utils import configure_logging
 
 API_TOKEN = "do-not-leak-this-api-token"
 ACCOUNT_ID = "a" * 32
@@ -208,6 +210,32 @@ async def test_get_worker_script_content_returns_text_and_none_when_missing() ->
     assert extract_worker_version(content or "") == LNS_WORKER_VERSION
     assert await client.get_worker_script_content(ACCOUNT_ID, "missing") is None
     assert seen_paths[0].endswith(f"/workers/scripts/{SCRIPT}/content/v2")
+
+
+@pytest.mark.anyio
+async def test_worker_subdomain_and_preview_urls_are_explicitly_disabled() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _envelope({"enabled": False, "previews_enabled": False})
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    configured = await client.configure_worker_subdomain(ACCOUNT_ID, SCRIPT)
+    observed = await client.get_worker_subdomain(ACCOUNT_ID, SCRIPT)
+
+    assert configured == {"enabled": False, "previews_enabled": False}
+    assert observed == configured
+    post_request, get_request = requests
+    assert post_request.method == "POST"
+    assert get_request.method == "GET"
+    assert post_request.url.path.endswith(
+        f"/accounts/{ACCOUNT_ID}/workers/scripts/{SCRIPT}/subdomain"
+    )
+    assert json.loads(post_request.content) == {
+        "enabled": False,
+        "previews_enabled": False,
+    }
 
 
 @pytest.mark.anyio
@@ -552,6 +580,34 @@ async def test_client_error_surfaces_provider_message_verbatim_without_token() -
 
 
 @pytest.mark.anyio
+async def test_httpx_request_logging_never_records_cloudflare_resource_ids(
+    tmp_path, caplog
+) -> None:
+    account_sentinel = "account-resource-must-not-be-logged"
+    node_sentinel = "node-resource-must-not-be-logged"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "errors": [],
+                "messages": [],
+                "result": {"id": node_sentinel, "name": "managed-node"},
+            },
+        )
+
+    configure_logging(tmp_path)
+    caplog.set_level(logging.INFO)
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+
+    await client.get_mesh_node(account_sentinel, node_sentinel)
+
+    assert account_sentinel not in caplog.text
+    assert node_sentinel not in caplog.text
+
+
+@pytest.mark.anyio
 async def test_transport_failure_is_sanitized_fixed_message() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError(f"secret connection detail {API_TOKEN}")
@@ -802,6 +858,11 @@ def test_worker_source_privacy_and_version_marker() -> None:
     assert "stripHopByHop(forwarded.headers)" in WORKER_SOURCE
     assert "stripHopByHop(responseHeaders)" in WORKER_SOURCE
     assert "new Response(upstream.body" in WORKER_SOURCE
+    assert 'url.pathname.startsWith("/.well-known/lnurlp/")' in WORKER_SOURCE
+    assert 'url.pathname === "/.well-known/nostr.json"' in WORKER_SOURCE
+    assert 'publicHostname.endsWith(".workers.dev")' in WORKER_SOURCE
+    assert "if (isWorkersDev || !(" in WORKER_SOURCE
+    assert 'new Response("Not found"' in WORKER_SOURCE
     assert extract_worker_version(WORKER_SOURCE) == LNS_WORKER_VERSION
     # Failure mapping is a fixed sanitized 503 with no exception interpolation.
     assert re.search(r'catch \{', WORKER_SOURCE)

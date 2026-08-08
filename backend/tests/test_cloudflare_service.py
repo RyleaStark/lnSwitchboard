@@ -78,6 +78,9 @@ class FakeCloudflareClient:
     dns_records: list[dict[str, Any]] = field(default_factory=list)
     workers_routes: list[dict[str, Any]] = field(default_factory=list)
     worker_content: str | None = None
+    worker_subdomain: dict[str, Any] = field(
+        default_factory=lambda: {"enabled": False, "previews_enabled": False}
+    )
     mesh_nodes: dict[str, dict[str, Any]] = field(default_factory=dict)
     node_connections: list[dict[str, Any]] = field(default_factory=list)
     hostname_routes: list[dict[str, Any]] = field(default_factory=list)
@@ -278,6 +281,19 @@ class FakeCloudflareClient:
     ) -> str | None:
         await self._call("get_worker_script_content", (account_id, script_name))
         return self.worker_content
+
+    async def configure_worker_subdomain(
+        self, account_id: str, script_name: str
+    ) -> dict[str, Any]:
+        await self._call("configure_worker_subdomain", (account_id, script_name))
+        self.worker_subdomain = {"enabled": False, "previews_enabled": False}
+        return dict(self.worker_subdomain)
+
+    async def get_worker_subdomain(
+        self, account_id: str, script_name: str
+    ) -> dict[str, Any] | None:
+        await self._call("get_worker_subdomain", (account_id, script_name))
+        return dict(self.worker_subdomain)
 
     async def delete_worker_script(self, account_id: str, script_name: str) -> None:
         await self._call("delete_worker_script", (account_id, script_name))
@@ -850,7 +866,9 @@ async def test_mesh_provision_creates_node_worker_routes_and_dns(service_parts) 
     assert connection.public_metadata["mesh_node_id"] == NODE_ID
     assert connection.public_metadata["hostname_route_id"] == ROUTE_ID
     assert connection.public_metadata["worker_version"] == LNS_WORKER_VERSION
-    assert token_path.read_text() == f"MESH_NODE_TOKEN={NODE_TOKEN}\n"
+    assert token_path.read_text() == (
+        f"MESH_NODE_ID={NODE_ID}\nMESH_NODE_TOKEN={NODE_TOKEN}\n"
+    )
     assert token_path.stat().st_mode & 0o777 == 0o640
     assert token_path.stat().st_gid == os.getgid()
     credential = secrets.get(connection.id)
@@ -873,6 +891,8 @@ async def test_mesh_provision_creates_node_worker_routes_and_dns(service_parts) 
         "get_worker_script_content",
         "deploy_proxy_worker",
         "get_worker_script_content",
+        "configure_worker_subdomain",
+        "get_worker_subdomain",
         "list_dns_records",
         "create_placeholder_dns_record",
         "ensure_workers_routes",
@@ -884,6 +904,28 @@ async def test_mesh_provision_creates_node_worker_routes_and_dns(service_parts) 
     assert client.worker_content == WORKER_SOURCE
     assert len(client.workers_routes) == 2
     assert len(client.dns_records) == 1
+
+
+@pytest.mark.anyio
+async def test_provision_fails_closed_if_worker_public_subdomains_remain_enabled(
+    service_parts, monkeypatch
+) -> None:
+    service, store, _secrets, client, _token_path = service_parts
+    client.worker_subdomain = {"enabled": True, "previews_enabled": True}
+
+    async def refuse_disable(
+        _account_id: str, _script_name: str
+    ) -> dict[str, Any]:
+        await client._call("configure_worker_subdomain")
+        return dict(client.worker_subdomain)
+
+    monkeypatch.setattr(client, "configure_worker_subdomain", refuse_disable)
+
+    with pytest.raises(CloudflareConflictError, match="subdomains"):
+        await authorize_and_provision(service)
+
+    assert store.list_connections() == []
+    assert client.worker_content is None
 
 
 PREREQ_WRITE_CALLS = {
@@ -1384,8 +1426,9 @@ async def test_failed_rollback_is_persisted_for_disconnect_retry(
     names = call_names(client)
     assert "remove_workers_routes" in names
     assert "delete_dns_record" in names
-    assert "delete_mesh_node" in names
-    # The worker script and hostname route were already rolled back after the
+    assert "get_mesh_node" in names
+    assert "delete_mesh_node" not in names
+    # The worker script, hostname route, and Mesh node were already rolled back
     # failed provision, so disconnect only has to finish the pending residue.
     assert client.worker_content is None
     assert client.hostname_routes == []
@@ -1523,6 +1566,34 @@ async def test_failed_provision_revalidates_created_hostname_route_before_delete
         }
     ]
     assert "delete_hostname_route" not in call_names(client)
+
+
+@pytest.mark.anyio
+async def test_failed_provision_preserves_mesh_node_renamed_before_rollback(
+    service_parts, monkeypatch
+) -> None:
+    service, _store, _secrets, client, _token_path = service_parts
+    client.ensure_routes_error = CloudflareAPIError(500)
+    original_get = client.get_mesh_node
+
+    async def rename_before_rollback(
+        account_id: str, node_id: str
+    ) -> dict[str, Any] | None:
+        node = await original_get(account_id, node_id)
+        if node is not None:
+            node["name"] = "operator-renamed-node"
+        return node
+
+    monkeypatch.setattr(client, "get_mesh_node", rename_before_rollback)
+
+    with pytest.raises(CloudflareAPIError):
+        await authorize_and_provision(service)
+
+    assert any(
+        node["id"] == NODE_ID and node["name"] == "operator-renamed-node"
+        for node in client.mesh_nodes.values()
+    )
+    assert "delete_mesh_node" not in call_names(client)
 
 
 @pytest.mark.anyio
@@ -1702,6 +1773,7 @@ async def test_disconnect_removes_routes_dns_route_worker_node_and_token(
         "delete_hostname_route",
         "get_worker_script_content",
         "delete_worker_script",
+        "get_mesh_node",
         "delete_mesh_node",
     ]
     assert store.get_connection(connection.id) is None
@@ -1712,6 +1784,26 @@ async def test_disconnect_removes_routes_dns_route_worker_node_and_token(
     assert client.dns_records == []
     assert client.worker_content is None
     assert client.hostname_routes == []
+
+
+@pytest.mark.anyio
+async def test_disconnect_preserves_mesh_node_that_changed_ownership(
+    service_parts,
+) -> None:
+    service, store, _secrets, client, _token_path = service_parts
+    connection = await authorize_and_provision(service)
+    node = await client.get_mesh_node(ACCOUNT_ID, NODE_ID)
+    assert node is not None
+    node["name"] = "operator-renamed-node"
+    client.calls.clear()
+
+    with pytest.raises(CloudflareConflictError, match="changed ownership"):
+        await service.disconnect(connection.id)
+
+    assert "delete_mesh_node" not in call_names(client)
+    retained = store.get_connection(connection.id)
+    assert retained is not None
+    assert retained.status == "error"
 
 
 @pytest.mark.anyio

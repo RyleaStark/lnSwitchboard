@@ -11,16 +11,53 @@
 set -eu
 
 TOKEN_FILE="${MESH_NODE_TOKEN_FILE:-/run/lnswitchboard/node.env}"
+STATE_DIR="/var/lib/cloudflare-warp"
+IDENTITY_FILE="$STATE_DIR/.lnswitchboard-node-id"
+
+read_token_field() {
+    field="$1"
+    { sed -n "s/^${field}=//p" "$TOKEN_FILE" 2>/dev/null || true; } |
+        tr -d '[:space:]'
+}
+
+clear_mesh_state() {
+    # Keep destructive cleanup pinned to the image's dedicated state mount.
+    [ "$STATE_DIR" = "/var/lib/cloudflare-warp" ] || exit 1
+    mkdir -p "$STATE_DIR"
+    for entry in "$STATE_DIR"/* "$STATE_DIR"/.[!.]* "$STATE_DIR"/..?*; do
+        if [ -e "$entry" ] || [ -L "$entry" ]; then
+            rm -rf -- "$entry"
+        fi
+    done
+}
+
+record_mesh_identity() {
+    temporary="$IDENTITY_FILE.tmp.$$"
+    umask 077
+    printf '%s\n' "$NODE_ID" > "$temporary"
+    mv -f "$temporary" "$IDENTITY_FILE"
+}
 
 if [ ! -s "$TOKEN_FILE" ]; then
     echo "mesh node token not provisioned yet; waiting for lnSwitchboard" >&2
     exit 1
 fi
 
-TOKEN="$(sed -n 's/^MESH_NODE_TOKEN=//p' "$TOKEN_FILE" | tr -d '[:space:]')"
-if [ -z "$TOKEN" ]; then
-    echo "mesh node token file has no MESH_NODE_TOKEN entry yet" >&2
+NODE_ID="$(read_token_field MESH_NODE_ID)"
+TOKEN="$(read_token_field MESH_NODE_TOKEN)"
+if [ -z "$NODE_ID" ] || [ -z "$TOKEN" ]; then
+    echo "mesh node token file is incomplete; waiting for lnSwitchboard" >&2
     exit 1
+fi
+
+mkdir -p "$STATE_DIR"
+PREVIOUS_NODE_ID="$(
+    { sed -n '1p' "$IDENTITY_FILE" 2>/dev/null || true; } |
+        tr -d '[:space:]'
+)"
+if [ "$PREVIOUS_NODE_ID" != "$NODE_ID" ]; then
+    clear_mesh_state
+    record_mesh_identity
 fi
 
 export MESH_NODE_TOKEN="$TOKEN"
@@ -36,13 +73,12 @@ trap 'terminate_child; exit 143' HUP INT TERM
 
 while kill -0 "$CHILD_PID" 2>/dev/null; do
     sleep 2
-    CURRENT_TOKEN="$(
-        { sed -n 's/^MESH_NODE_TOKEN=//p' "$TOKEN_FILE" 2>/dev/null || true; } |
-            tr -d '[:space:]'
-    )"
-    if [ "$CURRENT_TOKEN" != "$TOKEN" ]; then
+    CURRENT_NODE_ID="$(read_token_field MESH_NODE_ID)"
+    CURRENT_TOKEN="$(read_token_field MESH_NODE_TOKEN)"
+    if [ "$CURRENT_NODE_ID" != "$NODE_ID" ] || [ "$CURRENT_TOKEN" != "$TOKEN" ]; then
         echo "mesh node authorization was withdrawn; stopping connector" >&2
         terminate_child
+        clear_mesh_state
         exit 1
     fi
 done

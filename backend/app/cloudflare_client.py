@@ -437,6 +437,28 @@ class CloudflareClient:
             allow_not_found=True,
         )
 
+    async def configure_worker_subdomain(
+        self, account_id: str, script_name: str
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "POST",
+            f"/accounts/{account_id}/workers/scripts/{script_name}/subdomain",
+            json={"enabled": False, "previews_enabled": False},
+        )
+        return result if isinstance(result, dict) else {}
+
+    async def get_worker_subdomain(
+        self, account_id: str, script_name: str
+    ) -> dict[str, Any] | None:
+        result = await self._request(
+            "GET",
+            f"/accounts/{account_id}/workers/scripts/{script_name}/subdomain",
+            allow_not_found=True,
+        )
+        if result is None:
+            return None
+        return result if isinstance(result, dict) else {}
+
     async def delete_worker_script(self, account_id: str, script_name: str) -> None:
         await self._request(
             "DELETE",

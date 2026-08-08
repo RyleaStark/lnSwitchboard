@@ -89,6 +89,14 @@ class ConflictingCloudflareService(FakeCloudflareService):
         raise CloudflareAPIError(409)
 
 
+class ProviderErrorCloudflareService(FakeCloudflareService):
+    async def authorize_grant(self, grant_id: str, account_id: str):
+        raise CloudflareAPIError(
+            403,
+            messages=[f"provider rejected account {account_id} and grant {grant_id}"],
+        )
+
+
 def test_cloudflare_configuration_conflict_is_returned_as_retryable_409(test_client) -> None:
     admin_app.dependency_overrides[deps.get_cloudflare_service_dep] = (
         lambda: ConflictingCloudflareService()
@@ -106,6 +114,28 @@ def test_cloudflare_configuration_conflict_is_returned_as_retryable_409(test_cli
     assert response.json() == {
         "detail": "Cloudflare configuration changed; retry the operation"
     }
+
+
+def test_cloudflare_provider_body_is_never_reflected_or_logged(test_client, caplog) -> None:
+    sentinel_grant = "provider-body-sentinel-grant"
+    admin_app.dependency_overrides[deps.get_cloudflare_service_dep] = (
+        lambda: ProviderErrorCloudflareService()
+    )
+    try:
+        response = test_client.post(
+            "/api/connections/cloudflare/authorize",
+            json={"grant_id": sentinel_grant, "account_id": ACCOUNT_ID},
+        )
+    finally:
+        admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Cloudflare provider request failed"}
+    assert sentinel_grant not in response.text
+    assert ACCOUNT_ID not in response.text
+    assert sentinel_grant not in caplog.text
+    assert ACCOUNT_ID not in caplog.text
+    assert response.headers["cache-control"] == "no-store, private"
 
 
 def test_unhandled_cloudflare_error_is_sanitized_and_never_cached(test_client, caplog) -> None:
@@ -149,6 +179,14 @@ def test_cloudflare_setup_documents_current_dashboard_permissions(test_client) -
         "Access: Apps and Policies Read and Write (access.read, access.write)",
     ]
     assert response.json()["authorization_method"] == "oauth"
+
+
+def test_connection_inventory_with_cloudflare_metadata_is_private(test_client) -> None:
+    response = test_client.get("/api/connections")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store, private"
+    assert response.headers["pragma"] == "no-cache"
 
 
 def test_cloudflare_oauth_validation_never_reflects_code_and_is_private(

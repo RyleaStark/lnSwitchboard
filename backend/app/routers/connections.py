@@ -151,7 +151,7 @@ async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Resu
             ) from exc
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
+            detail="Cloudflare provider request failed",
         ) from exc
     except (
         CloudflareOAuthGrantNotFoundError,
@@ -171,9 +171,11 @@ async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Resu
 @router.get("")
 async def list_connections(
     request: Request,
+    response: Response,
     store: ConnectionStore = Depends(get_connection_store_dep),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
+    _set_private_no_store(response)
     connector_available = settings.cloudflared_connector_enabled
     tailscale_available = settings.tailscale_connector_enabled
     tailscale_reason = (

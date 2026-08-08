@@ -130,6 +130,12 @@ class CloudflareClientProtocol(Protocol):
     async def deploy_proxy_worker(
         self, account_id: str, script_name: str, mesh_ingress_key: str
     ) -> None: ...
+    async def configure_worker_subdomain(
+        self, account_id: str, script_name: str
+    ) -> dict[str, Any]: ...
+    async def get_worker_subdomain(
+        self, account_id: str, script_name: str
+    ) -> dict[str, Any] | None: ...
     async def get_worker_script_content(
         self, account_id: str, script_name: str
     ) -> str | None: ...
@@ -905,7 +911,7 @@ class CloudflareService:
             )
 
             node_token = await client.get_mesh_node_token(account_id, node_id)
-            self._write_node_token(node_token)
+            self._write_node_token(node_token, node_id)
 
             (
                 hostname_route_id,
@@ -949,6 +955,19 @@ class CloudflareService:
                 or extract_worker_version(deployed) != LNS_WORKER_VERSION
             ):
                 raise CloudflareAPIError(502)
+            await client.configure_worker_subdomain(
+                account_id, WORKER_SCRIPT_NAME
+            )
+            worker_subdomain = await client.get_worker_subdomain(
+                account_id, WORKER_SCRIPT_NAME
+            )
+            if not isinstance(worker_subdomain, dict) or not (
+                worker_subdomain.get("enabled") is False
+                and worker_subdomain.get("previews_enabled") is False
+            ):
+                raise CloudflareConflictError(
+                    "Worker public subdomains could not be disabled"
+                )
             worker_version = LNS_WORKER_VERSION
             metadata["worker_version"] = worker_version
             connection = self._persist_provisioning(
@@ -1102,10 +1121,23 @@ class CloudflareService:
             try:
                 if node_id is None:
                     found = await client.find_mesh_node_by_name(account_id, node_name)
-                    if isinstance(found, dict) and found.get("id"):
+                    if (
+                        isinstance(found, dict)
+                        and str(found.get("name", "")) == node_name
+                        and found.get("id")
+                    ):
                         node_id = str(found["id"])
                 if node_id is not None:
-                    await client.delete_mesh_node(account_id, node_id)
+                    await self._delete_owned_mesh_node(
+                        client,
+                        account_id=account_id,
+                        node_id=node_id,
+                        node_name=node_name,
+                    )
+            except CloudflareConflictError:
+                # The exact node was renamed or otherwise repurposed after our
+                # create. It is no longer conclusively ours, so preserve it.
+                pass
             except Exception as exc:
                 errors.append(type(exc).__name__)
         try:
@@ -1193,6 +1225,33 @@ class CloudflareService:
                 except CloudflareAPIError:
                     transport_error = transport_error or (
                         "Managed proxy Worker is outdated and could not be upgraded"
+                    )
+
+            if observed_version is not None:
+                try:
+                    worker_subdomain = await client.get_worker_subdomain(
+                        account_id, WORKER_SCRIPT_NAME
+                    )
+                    if not isinstance(worker_subdomain, dict) or not (
+                        worker_subdomain.get("enabled") is False
+                        and worker_subdomain.get("previews_enabled") is False
+                    ):
+                        await client.configure_worker_subdomain(
+                            account_id, WORKER_SCRIPT_NAME
+                        )
+                        worker_subdomain = await client.get_worker_subdomain(
+                            account_id, WORKER_SCRIPT_NAME
+                        )
+                    if not isinstance(worker_subdomain, dict) or not (
+                        worker_subdomain.get("enabled") is False
+                        and worker_subdomain.get("previews_enabled") is False
+                    ):
+                        transport_error = transport_error or (
+                            "Managed proxy Worker public subdomains remain enabled"
+                        )
+                except CloudflareAPIError:
+                    transport_error = transport_error or (
+                        "Managed proxy Worker public subdomains could not be disabled"
                     )
 
         hostname_route_ok = await self._verify_hostname_route(
@@ -1697,7 +1756,12 @@ class CloudflareService:
                 await client.delete_worker_script(account_id, WORKER_SCRIPT_NAME)
 
             if node_id is not None:
-                await client.delete_mesh_node(account_id, node_id)
+                await self._delete_owned_mesh_node(
+                    client,
+                    account_id=account_id,
+                    node_id=node_id,
+                    node_name=connection.external_id,
+                )
             self._remove_node_token()
         except Exception:
             self.store.upsert_connection(
@@ -1838,6 +1902,29 @@ class CloudflareService:
                 record_id = str(record.get("id", ""))
                 return record_id or None
         return None
+
+    @staticmethod
+    async def _delete_owned_mesh_node(
+        client: CloudflareClientProtocol,
+        *,
+        account_id: str,
+        node_id: str,
+        node_name: str,
+    ) -> bool:
+        """Delete only the exact Mesh node while its durable name still matches."""
+
+        node = await client.get_mesh_node(account_id, node_id)
+        if node is None:
+            return False
+        if not (
+            str(node.get("id", "")) == node_id
+            and str(node.get("name", "")) == node_name
+        ):
+            raise CloudflareConflictError(
+                "Cloudflare Mesh node changed ownership and was preserved"
+            )
+        await client.delete_mesh_node(account_id, node_id)
+        return True
 
     @staticmethod
     def _hostname_route_matches(
@@ -2160,11 +2247,14 @@ class CloudflareService:
         base = re.sub(r"[^a-z0-9-]+", "-", hostname).strip("-")[:40]
         return f"lnswitchboard-{base}-{random_secrets.token_hex(4)}"
 
-    def _write_node_token(self, token: str) -> None:
+    def _write_node_token(self, token: str, node_id: str) -> None:
         value = token.strip()
-        if not value:
+        identity = node_id.strip()
+        if not value or "\n" in value or "\r" in value:
             raise CloudflareServiceError("Cloudflare did not return a mesh node token")
-        content = f"MESH_NODE_TOKEN={value}\n"
+        if not identity or "\n" in identity or "\r" in identity:
+            raise CloudflareServiceError("Cloudflare did not return a mesh node identity")
+        content = f"MESH_NODE_ID={identity}\nMESH_NODE_TOKEN={value}\n"
         parent = self.token_path.parent
         parent.mkdir(parents=True, exist_ok=True, mode=0o750)
         os.chown(parent, -1, self.token_gid)
