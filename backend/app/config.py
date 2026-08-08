@@ -185,6 +185,7 @@ class Settings(BaseSettings):
     trusted_hosts: str = _env_field(env="TRUSTED_HOSTS", default="localhost,127.0.0.1,[::1]")
     allow_private_nostr_relays: bool = _env_field(env="ALLOW_PRIVATE_NOSTR_RELAYS", default=False)
     allow_private_webhooks: bool = _env_field(env="ALLOW_PRIVATE_WEBHOOKS", default=False)
+    allow_private_forwarding: bool = _env_field(env="ALLOW_PRIVATE_FORWARDING", default=False)
     ui_poll_seconds: int = _env_field(env="UI_POLL_SECONDS", default=10)
     macaroon_store_path: Path = _env_field(env="MACAROON_STORE_PATH", default=Path("secrets/macaroon.hex"))
     lnd_macaroon_path: Optional[Path] = _env_field(env="LND_MACAROON_PATH", default=None)

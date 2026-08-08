@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import quote, urlsplit
 
-import httpx
+from .config import get_settings
+from .outbound_security import (
+    OutboundHTTPStatusError,
+    UnsafeOutboundTarget,
+    ensure_public_endpoint,
+    get_json_from_pinned_endpoint,
+)
 
 
 LOCAL_PART_PATTERN = re.compile(r"^[a-z0-9._+-]+$")
@@ -127,19 +134,37 @@ async def _fetch_json(
     params: Any = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> Any:
+    """Fetch JSON through the pinned outbound policy.
+
+    The URL is resolved and rejected when it reaches credentials or
+    non-public networks (unless ALLOW_PRIVATE_FORWARDING opts in), then the
+    request connects to the validated address directly — no redirects, no
+    second DNS lookup, and a bounded response size.
+    """
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPStatusError as exc:
-        raise ForwardingTargetError(f"Forwarding target returned HTTP {exc.response.status_code}") from exc
-    except httpx.TimeoutException as exc:
+        connect_host = await ensure_public_endpoint(
+            url,
+            allowed_schemes=("http", "https"),
+            allow_private=get_settings().allow_private_forwarding,
+        )
+        return await get_json_from_pinned_endpoint(
+            url,
+            connect_host=connect_host,
+            params=params,
+            timeout=timeout_seconds,
+        )
+    except UnsafeOutboundTarget as exc:
+        raise ForwardingTargetError(
+            "Forwarding target is not an allowed public endpoint"
+        ) from exc
+    except OutboundHTTPStatusError as exc:
+        raise ForwardingTargetError(
+            f"Forwarding target returned HTTP {exc.status_code}"
+        ) from exc
+    except (TimeoutError, socket.timeout) as exc:
         raise ForwardingTargetError("Forwarding target timed out") from exc
-    except httpx.RequestError as exc:
+    except OSError as exc:
         raise ForwardingTargetError("Forwarding target could not be reached") from exc
-    except ValueError as exc:
-        raise ForwardingTargetError("Forwarding target did not return valid JSON") from exc
 
 
 async def fetch_forwarding_discovery(forward_to: str) -> ForwardingTarget:

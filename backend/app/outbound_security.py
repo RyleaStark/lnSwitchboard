@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import json
 import socket
 from ipaddress import ip_address
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 
 class UnsafeOutboundTarget(ValueError):
@@ -101,3 +102,64 @@ async def post_to_pinned_endpoint(
             connection.close()
 
     await asyncio.to_thread(send)
+
+
+async def get_json_from_pinned_endpoint(
+    url: str,
+    *,
+    connect_host: str,
+    params: Any = None,
+    timeout: float,
+    max_bytes: int = 65_536,
+) -> Any:
+    """GET JSON without redirects or a second DNS lookup, preserving TLS SNI.
+
+    The socket connects to the already-validated ``connect_host`` address while
+    the HTTP Host and TLS SNI keep the original hostname, closing the
+    resolve-then-connect DNS rebinding gap. Responses larger than
+    ``max_bytes`` are rejected instead of buffered.
+    """
+
+    parsed = urlsplit(url)
+    hostname = parsed.hostname
+    if hostname is None:
+        raise UnsafeOutboundTarget("outbound URL is missing a hostname")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    query = parsed.query
+    if params:
+        extra = urlencode(params)
+        query = f"{query}&{extra}" if query else extra
+    path = urlunsplit(("", "", parsed.path or "/", query, ""))
+
+    def send() -> Any:
+        connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        connection = connection_class(hostname, port, timeout=timeout)
+
+        def connect_pinned(
+            _address: tuple[str, int],
+            connection_timeout: Any = None,
+            source_address: tuple[str, int] | None = None,
+        ) -> socket.socket:
+            return socket.create_connection(
+                (connect_host, port),
+                connection_timeout,
+                source_address,
+            )
+
+        setattr(connection, "_create_connection", connect_pinned)
+        try:
+            connection.request("GET", path, headers={"Accept": "application/json"})
+            response = connection.getresponse()
+            body = response.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                raise UnsafeOutboundTarget("outbound response exceeded the size limit")
+            if response.status >= 300:
+                raise OutboundHTTPStatusError(response.status, body.decode("utf-8", errors="replace"))
+            try:
+                return json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise UnsafeOutboundTarget("outbound response was not valid JSON") from exc
+        finally:
+            connection.close()
+
+    return await asyncio.to_thread(send)
