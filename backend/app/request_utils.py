@@ -90,38 +90,57 @@ def _collect_header_values(request: Request) -> Dict[str, str]:
 def _resolve_client_ip(
     request: Request,
 ) -> Tuple[str, str, List[Dict[str, Optional[str]]]]:
-    headers = request.headers
-    forwarded_raw = headers.get("forwarded")
-    forwarded = _parse_forwarded_header(forwarded_raw)
+    """Resolve the client IP by walking X-Forwarded-For right-to-left.
 
-    candidate_specs: List[Tuple[str, Optional[str], Optional[str]]] = [
-        ("Forwarded for", forwarded.get("for"), forwarded_raw),
-        ("cf-connecting-ip", headers.get("cf-connecting-ip"), None),
-        ("true-client-ip", headers.get("true-client-ip"), None),
-        ("x-forwarded-for", headers.get("x-forwarded-for"), headers.get("x-forwarded-for")),
-        ("x-real-ip", headers.get("x-real-ip"), None),
-    ]
+    The immediate peer is trusted only when it sits inside TRUSTED_PROXY_CIDRS
+    (the security middleware has already stripped forwarding headers from
+    untrusted peers). Each hop leftward is accepted only while the current hop
+    is itself a trusted proxy, so the leftmost client-supplied entries — which
+    Cloudflare and other edges preserve but do not vouch for — can no longer
+    spoof the rate-limit identity.
+    """
+    from ipaddress import ip_address
+
+    from .config import get_settings, parse_trusted_proxy_cidrs
+
+    headers = request.headers
+    peer = request.client.host if request.client else None
+
+    def _trusted(value: Optional[str]) -> bool:
+        if not value:
+            return False
+        try:
+            address = ip_address(value)
+        except ValueError:
+            return False
+        networks = parse_trusted_proxy_cidrs(get_settings().trusted_proxy_cidrs)
+        return any(
+            address in network for network in networks if address.version == network.version
+        )
 
     candidates: List[Dict[str, Optional[str]]] = []
-    for label, raw_value, raw_header in candidate_specs:
-        cleaned_value = _clean_ip(
-            raw_value if label != "x-forwarded-for" else _first_forwarded_value(raw_value)
-        )
-        record: Dict[str, Optional[str]] = {"source": label, "value": cleaned_value}
-        if raw_value and raw_value != cleaned_value:
-            record["raw"] = raw_value
-        if label == "x-forwarded-for" and raw_header:
-            record["raw"] = raw_header
-        if label == "Forwarded for" and forwarded_raw:
-            record["raw_header"] = forwarded_raw
-        candidates.append(record)
-        if cleaned_value:
-            return cleaned_value, label, candidates
+    xff_raw = headers.get("x-forwarded-for")
+    hops = [part.strip() for part in xff_raw.split(",") if part.strip()] if xff_raw else []
+    if xff_raw:
+        candidates.append({"source": "x-forwarded-for", "value": hops[-1] if hops else None, "raw": xff_raw})
 
-    client_host = request.client.host if request.client else None
-    candidates.append({"source": "request.client", "value": client_host})
-    if client_host:
-        return client_host, "request.client", candidates
+    current = peer
+    for hop in reversed(hops):
+        if not _trusted(current):
+            break
+        cleaned = _clean_ip(hop)
+        if not cleaned:
+            break
+        try:
+            ip_address(cleaned)
+        except ValueError:
+            break
+        current = cleaned
+
+    if current:
+        source = "x-forwarded-for" if current != peer else "request.client"
+        candidates.append({"source": source, "value": current})
+        return current, source, candidates
 
     candidates.append({"source": "default", "value": "unknown"})
     return "unknown", "default", candidates
