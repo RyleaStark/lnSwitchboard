@@ -115,8 +115,14 @@ class CloudflareService:
     @staticmethod
     def _normalize_tunnel_id(value: str) -> str:
         normalized = value.strip()
+        if normalized.startswith("eyJ"):
+            raise CloudflareValidationError(
+                "A Cloudflared connector token was provided. Use the existing tunnel UUID instead."
+            )
         if not _TUNNEL_ID.fullmatch(normalized):
-            raise CloudflareValidationError("tunnel ID is invalid")
+            raise CloudflareValidationError(
+                "Tunnel ID must be the existing tunnel UUID, not a connector token."
+            )
         return normalized
 
     @staticmethod
