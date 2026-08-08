@@ -40,13 +40,14 @@ _Result = TypeVar("_Result")
 CLOUDFLARE_AUTHORIZATION_COOKIE = "lnswitchboard_cloudflare_authorization"
 TAILSCALE_LOGIN_COOKIE = "lnswitchboard_tailscale_login"
 _REQUIRED_PERMISSIONS = [
-    "Account / Account Settings / Read",
-    "Account / Workers Scripts / Edit",
-    "Account / Zero Trust / Edit",
-    "Account / Access: Apps and Policies / Edit",
-    "Zone / Workers Routes / Edit",
-    "Zone / DNS / Edit",
-    "Zone / Zone / Read",
+    "Account Settings Read (account-settings.read)",
+    "Zone Read (zone.read)",
+    "DNS Read and Write (dns.read, dns.write)",
+    "Workers Scripts Read, Write, and Bind (workers-scripts.read, workers-scripts.write, workers-scripts.bind)",
+    "Workers Routes Read and Write (workers-routes.read, workers-routes.write)",
+    "Cloudflare One Connector: WARP Read and Write (teams-connector-warp.read, teams-connector-warp.write)",
+    "Zero Trust Read and Write (teams.read, teams.write)",
+    "Access: Apps and Policies Read and Write (access.read, access.write)",
 ]
 _SENSITIVE_METADATA_KEY_PARTS = ("authorization", "credential", "secret", "token")
 _PRIVATE_NO_STORE = "no-store, private"

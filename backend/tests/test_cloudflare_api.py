@@ -132,13 +132,14 @@ def test_cloudflare_setup_documents_current_dashboard_permissions(test_client) -
         "configured for this deployment."
     )
     assert response.json()["required_permissions"] == [
-        "Account / Account Settings / Read",
-        "Account / Workers Scripts / Edit",
-        "Account / Zero Trust / Edit",
-        "Account / Access: Apps and Policies / Edit",
-        "Zone / Workers Routes / Edit",
-        "Zone / DNS / Edit",
-        "Zone / Zone / Read",
+        "Account Settings Read (account-settings.read)",
+        "Zone Read (zone.read)",
+        "DNS Read and Write (dns.read, dns.write)",
+        "Workers Scripts Read, Write, and Bind (workers-scripts.read, workers-scripts.write, workers-scripts.bind)",
+        "Workers Routes Read and Write (workers-routes.read, workers-routes.write)",
+        "Cloudflare One Connector: WARP Read and Write (teams-connector-warp.read, teams-connector-warp.write)",
+        "Zero Trust Read and Write (teams.read, teams.write)",
+        "Access: Apps and Policies Read and Write (access.read, access.write)",
     ]
     assert response.json()["authorization_method"] == "oauth"
 

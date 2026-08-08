@@ -183,11 +183,18 @@ class Settings(BaseSettings):
         env="CLOUDFLARE_OAUTH_TOKEN_URL",
         default="https://dash.cloudflare.com/oauth2/token",
     )
-    # Cloudflare grants the API permissions configured on the registered OAuth
-    # application. The runtime scope requests refresh support only.
+    # Public OAuth scope IDs are listed by Cloudflare's authenticated
+    # GET /client/v4/oauth/scopes endpoint. Keep this request synchronized with
+    # the permissions selected on the registered public client.
     cloudflare_oauth_scope: str = _env_field(
         env="CLOUDFLARE_OAUTH_SCOPE",
-        default="offline_access",
+        default=(
+            "offline_access account-settings.read zone.read dns.read dns.write "
+            "workers-scripts.read workers-scripts.write workers-scripts.bind "
+            "workers-routes.read workers-routes.write "
+            "teams-connector-warp.read teams-connector-warp.write "
+            "teams.read teams.write access.read access.write"
+        ),
     )
     cloudflare_oauth_redirect_loopback: str = _env_field(
         env="CLOUDFLARE_OAUTH_REDIRECT_LOOPBACK",

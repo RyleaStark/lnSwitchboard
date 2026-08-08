@@ -153,6 +153,33 @@ def test_invalid_trusted_proxy_setting_is_rejected(monkeypatch) -> None:
         Settings()
 
 
+def test_default_cloudflare_oauth_scope_matches_registered_capabilities(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("CLOUDFLARE_OAUTH_SCOPE", raising=False)
+
+    scopes = set(Settings().cloudflare_oauth_scope.split())
+
+    assert scopes == {
+        "offline_access",
+        "account-settings.read",
+        "zone.read",
+        "dns.read",
+        "dns.write",
+        "workers-scripts.read",
+        "workers-scripts.write",
+        "workers-scripts.bind",
+        "workers-routes.read",
+        "workers-routes.write",
+        "teams-connector-warp.read",
+        "teams-connector-warp.write",
+        "teams.read",
+        "teams.write",
+        "access.read",
+        "access.write",
+    }
+
+
 def test_outbound_endpoint_validation_returns_a_pinned_public_address() -> None:
     address = asyncio.run(
         ensure_public_endpoint(

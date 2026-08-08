@@ -87,17 +87,19 @@ lnSwitchboard starts Tailscale's interactive browser login and shows its short-l
 
 Open **Connections → Cloudflare** to onboard a hostname through Cloudflare OAuth. There is no manual API-token path and no OAuth client secret. Authorization uses PKCE S256 directly between the local lnSwitchboard instance and Cloudflare; access and refresh grants are encrypted in the local connection secret store and are never returned to the browser after exchange.
 
-The project OAuth application is a public client (`token_endpoint_auth_method: none`). Choose these permission labels when registering it:
+The project OAuth application is a public client (`token_endpoint_auth_method: none`). Register it with these exact Cloudflare OAuth scope IDs, which were verified against the authenticated `GET /client/v4/oauth/scopes` catalog:
 
-- Account / Account Settings / Read
-- Account / Workers Scripts / Edit
-- Account / Zero Trust / Edit
-- Account / Access: Apps and Policies / Edit
-- Zone / Workers Routes / Edit
-- Zone / DNS / Edit
-- Zone / Zone / Read
+- `account-settings.read` — Account Settings Read
+- `zone.read` — Zone Read
+- `dns.read`, `dns.write` — DNS Read/Write
+- `workers-scripts.read`, `workers-scripts.write`, `workers-scripts.bind` — Worker source and the `vpc_network` binding
+- `workers-routes.read`, `workers-routes.write` — path-specific Workers Routes
+- `teams-connector-warp.read`, `teams-connector-warp.write` — Mesh/WARP connector lifecycle
+- `teams.read`, `teams.write` — Cloudflare One device and Gateway prerequisites
+- `access.read`, `access.write` — Access enrollment application and policy prerequisites
+- `offline_access` — local refresh-token support
 
-Cloudflare's OAuth client editor and `GET /client/v4/oauth/scopes` expose the corresponding scope IDs. Configure those exact IDs plus `offline_access` in `CLOUDFLARE_OAUTH_SCOPE`. The default `offline_access`-only value intentionally keeps onboarding disabled because it cannot authorize provisioning.
+Configure the same space-separated list in `CLOUDFLARE_OAUTH_SCOPE`. The setup API keeps onboarding disabled until a non-placeholder client ID and callback page are configured.
 
 Register both exact redirect URIs: `http://127.0.0.1:22121/api/cloudflare/oauth/callback` for direct loopback completion and the HTTPS URL where `oauth-callback/index.html` is hosted for paste-back completion. The static callback uses fragment delivery, a hash-restricted CSP, no analytics or external resources, and no network requests. Configure `CLOUDFLARE_OAUTH_CLIENT_ID` and `CLOUDFLARE_OAUTH_REDIRECT_PAGE`. Never configure or ship a client secret.
 
