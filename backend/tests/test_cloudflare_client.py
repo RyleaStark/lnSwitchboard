@@ -70,6 +70,52 @@ async def test_client_builds_remote_tunnel_dns_and_public_only_ingress() -> None
     assert dns_body["proxied"] is True
 
 
+@pytest.mark.anyio
+async def test_configure_tunnel_initializes_cloudflare_null_config() -> None:
+    """A new remotely managed tunnel has result.config=null until its first PUT."""
+    tunnel_config: dict[str, Any] = {"config": None}
+    writes: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            body = json.loads(request.content)
+            writes.append(body)
+            tunnel_config.update(body)
+        return httpx.Response(
+            200,
+            json={"success": True, "errors": [], "result": tunnel_config},
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+
+    await client.configure_tunnel(
+        "account-id",
+        "tunnel-id",
+        "example.com",
+        "http://app:21212",
+    )
+
+    assert writes == [
+        {
+            "config": {
+                "ingress": [
+                    {
+                        "hostname": "example.com",
+                        "path": r"^/\.well-known/lnurlp/.*$",
+                        "service": "http://app:21212",
+                    },
+                    {
+                        "hostname": "example.com",
+                        "path": r"^/\.well-known/nostr\.json$",
+                        "service": "http://app:21212",
+                    },
+                    {"service": "http_status:404"},
+                ]
+            }
+        }
+    ]
+
+
 def test_tunnel_ingress_override_preserves_unrelated_public_hostnames() -> None:
     ingress = [
         {"hostname": "other.example.com", "service": "http://other:8080"},

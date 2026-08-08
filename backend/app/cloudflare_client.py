@@ -173,9 +173,17 @@ class CloudflareClient:
         current = await self._request(
             "GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
         )
-        if not isinstance(current, dict) or not isinstance(current.get("config"), dict):
+        if not isinstance(current, dict):
             raise CloudflareAPIError(502)
-        config = dict(current["config"])
+        current_config = current.get("config")
+        if current_config is None:
+            # Cloudflare represents a valid, not-yet-configured remote tunnel
+            # as result.config=null until its first configuration PUT.
+            config: dict[str, Any] = {}
+        elif isinstance(current_config, dict):
+            config = dict(current_config)
+        else:
+            raise CloudflareAPIError(502)
         ingress = self._override_ingress_routes(
             config.get("ingress"), hostname, origin_url
         )
