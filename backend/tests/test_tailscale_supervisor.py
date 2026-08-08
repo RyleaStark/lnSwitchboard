@@ -54,7 +54,11 @@ while :; do sleep 1; done
 printf 'tailscale %s\\n' "$*" >> "$TS_TEST_COMMAND_LOG"
 case "${1:-}" in --socket=*) shift ;; esac
 if [ "${1:-}" = "status" ]; then
-  printf '%s\\n' '{"BackendState":"NeedsLogin","AuthURL":"REDACTED","Self":{"DNSName":""}}'
+  if [ -f "$TS_TEST_RUNNING_FILE" ]; then
+    printf '%s\n' '{"BackendState":"Running","Self":{"DNSName":"lns.tailnet.example.ts.net."}}'
+  else
+    printf '%s\n' '{"BackendState":"NeedsLogin","AuthURL":"REDACTED","Self":{"DNSName":""}}'
+  fi
 elif [ "${1:-}" = "up" ]; then
   printf '%s\\n' '{"AuthURL":"REDACTED","BackendState":"NeedsLogin"}'
   if [ -f "$TS_TEST_COMPLETE_LOGIN_FILE" ]; then
@@ -86,6 +90,7 @@ fi
             "TS_TEST_COMMAND_LOG": str(command_log),
             "TS_TEST_FAIL_FUNNEL_STATUS_FILE": str(tmp_path / "fail-funnel-status"),
             "TS_TEST_FAIL_FUNNEL_RESET_FILE": str(tmp_path / "fail-funnel-reset"),
+            "TS_TEST_RUNNING_FILE": str(tmp_path / "node-running"),
             "TS_TEST_COMPLETE_LOGIN_FILE": str(tmp_path / "complete-login"),
             "TS_LOGIN_RETENTION_SECONDS": "2",
         }
@@ -211,6 +216,7 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
     supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
 ) -> None:
     control_dir, status_dir, state_dir, command_log, env = supervisor_runtime
+    Path(env["TS_TEST_RUNNING_FILE"]).touch()
     process = subprocess.Popen(
         [str(SUPERVISOR)],
         env=env,
@@ -260,6 +266,41 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
             i for i, line in enumerate(lines) if line.endswith(" logout")
         )
         assert reset_index < logout_index
+        assert sum(line.startswith("tailscaled ") for line in lines) >= 2
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_supervisor_disconnect_survives_funnel_reset_failure(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    """Expired key (NeedsLogin): reset/logout cannot run; disconnect must not jam."""
+    control_dir, status_dir, state_dir, command_log, env = supervisor_runtime
+    Path(env["TS_TEST_FAIL_FUNNEL_RESET_FILE"]).touch()
+    process = subprocess.Popen(
+        [str(SUPERVISOR)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        _wait_for(lambda: (status_dir / "node.json").exists())
+        (state_dir / "owned-node-state").write_text("private", encoding="utf-8")
+
+        (control_dir / "disconnect").touch()
+        _wait_for(
+            lambda: (
+                (status_dir / "command.json").exists()
+                and '"command":"disconnect"' in (status_dir / "command.json").read_text(encoding="utf-8")
+            )
+        )
+        command_status = (status_dir / "command.json").read_text(encoding="utf-8")
+        assert '"state":"complete"' in command_status
+        _wait_for(lambda: not (state_dir / "owned-node-state").exists())
+        # The daemon is restarted after teardown even though reset failed.
+        lines = command_log.read_text(encoding="utf-8").splitlines()
         assert sum(line.startswith("tailscaled ") for line in lines) >= 2
     finally:
         process.terminate()
@@ -342,10 +383,12 @@ def test_supervisor_expires_login_artifact_left_by_previous_process(
         process.wait(timeout=3)
 
 
-def test_supervisor_disconnect_preserves_state_when_funnel_reset_fails(
+def test_supervisor_disconnect_stays_fail_closed_when_running_and_reset_fails(
     supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
 ) -> None:
+    """A live node may still be funneling: failed reset must block disconnect."""
     control_dir, status_dir, state_dir, command_log, env = supervisor_runtime
+    Path(env["TS_TEST_RUNNING_FILE"]).touch()
     Path(env["TS_TEST_FAIL_FUNNEL_RESET_FILE"]).touch()
     owned_state = state_dir / "owned-node-state"
     owned_state.write_text("private", encoding="utf-8")
