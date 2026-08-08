@@ -54,9 +54,7 @@ export function LogsPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Request trail"
         title="Request Logs"
-        description="Search LNURL discovery, invoice, verification, webhook delivery, and rate-limit events with raw JSON context when needed."
         action={
           <AlertDialog>
             <AlertDialogTrigger asChild>

@@ -273,9 +273,7 @@ export function AddressesPage() {
   return (
     <>
       <PageHeader
-        eyebrow="LNURL handles"
         title="LN Addresses"
-        description="Create handle-specific min/max amounts, invoice templates, success messages, and webhook automation."
         action={(
           <div className="flex flex-wrap justify-end gap-2">
             <Button variant="outline" onClick={openForwardCreate}><ForwardIcon data-icon="inline-start" /> Add forwarding address</Button>

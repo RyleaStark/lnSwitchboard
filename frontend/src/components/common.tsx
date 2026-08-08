@@ -15,25 +15,17 @@ import { copyText, formatTimestamp } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
 export function PageHeader({
-  eyebrow,
   title,
-  description,
   action,
   actionAlign = "end",
 }: {
-  eyebrow: string
   title: string
-  description: string
   action?: React.ReactNode
   actionAlign?: "start" | "end"
 }) {
   return (
     <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-      <div className="flex max-w-3xl flex-col gap-2">
-        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{eyebrow}</p>
-        <h1 className="text-3xl font-semibold tracking-normal text-foreground md:text-4xl">{title}</h1>
-        <p className="text-sm leading-6 text-muted-foreground">{description}</p>
-      </div>
+      <h1 className="text-3xl font-semibold tracking-normal text-foreground md:text-4xl">{title}</h1>
       {action ? <div className={cn("flex w-full flex-wrap items-center gap-2 sm:w-auto", actionAlign === "start" && "md:self-start")}>{action}</div> : null}
     </div>
   )

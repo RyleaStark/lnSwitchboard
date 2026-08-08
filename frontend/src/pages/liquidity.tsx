@@ -21,9 +21,7 @@ export function LiquidityPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Inbound capacity"
         title="Liquidity"
-        description="See the largest single receivable invoice size and the channel table that backs LNURL max sendable."
       />
       {channels.isLoading ? <LoadingRows rows={3} /> : null}
       {channels.isError ? <PageError message="Unable to load channel liquidity." onRetry={() => void channels.refetch()} retrying={channels.isFetching} /> : null}

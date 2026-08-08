@@ -108,9 +108,7 @@ export function IdentitiesPage() {
   return (
     <>
       <PageHeader
-        eyebrow="NIP-05 publisher"
         title="Nostr Identities"
-        description="Map local handles to npub keys and relay hints served from the well-known NIP-05 endpoint."
         action={<Button onClick={openCreate}><PlusIcon data-icon="inline-start" /> Add mapping</Button>}
       />
       <Card>

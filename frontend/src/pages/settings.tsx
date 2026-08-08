@@ -103,9 +103,7 @@ export function SettingsPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Configuration"
         title="Settings"
-        description="Rotate the invoice macaroon and edit safe environment settings."
       />
       <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as SettingsTab)} className="flex flex-col gap-6">
         <div className="max-w-full overflow-x-auto overflow-y-hidden pb-2">
