@@ -18,6 +18,7 @@ from backend.app import config
 from backend.app.cloudflare_oauth import (
     FLOW_PREFIX,
     GRANT_PREFIX,
+    CloudflareOAuthExchangeError,
     CloudflareOAuthManager,
     CloudflareOAuthReauthRequiredError,
     CloudflareOAuthStateError,
@@ -200,6 +201,23 @@ def test_state_is_single_use(oauth_settings, secret_store):
     with pytest.raises(CloudflareOAuthStateError):
         run(manager.complete_flow(state=flow_payload["state"], code=CODE))
     assert len(server.token_requests) == 1
+
+
+def test_success_response_without_access_token_is_rejected(
+    oauth_settings, secret_store
+):
+    server = FakeCloudflareOAuthServer(
+        [httpx.Response(200, json={"token_type": "Bearer", "scope": "offline_access"})]
+    )
+    manager = make_manager(oauth_settings, secret_store, server)
+    _flow, flow_payload, _query = begin_and_extract(manager, secret_store)
+
+    with pytest.raises(CloudflareOAuthExchangeError, match="did not return an access token"):
+        run(manager.complete_flow(state=flow_payload["state"], code=CODE))
+
+    assert not any(
+        owner.startswith(GRANT_PREFIX) for owner in secret_store.list_owner_ids()
+    )
 
 
 def test_expired_state_is_rejected_and_purged(oauth_settings, secret_store):

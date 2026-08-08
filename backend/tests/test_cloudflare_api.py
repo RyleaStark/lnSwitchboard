@@ -13,11 +13,16 @@ SECOND_ZONE_ID = "d" * 32
 class FakeCloudflareService:
     def __init__(self) -> None:
         self.authorize_request: tuple[str, str] | None = None
+        self.discover_grant_request: str | None = None
         self.provision_request: dict[str, str] | None = None
 
     async def authorize_grant(self, grant_id: str, account_id: str):
         self.authorize_request = (grant_id, account_id)
         return {"authorization_id": "authorization-flow-id", "accounts": [{"id": account_id, "name": "Example account", "zones": [{"id": ZONE_ID, "name": "example.com"}]}]}
+
+    async def discover_grant_accounts(self, grant_id: str):
+        self.discover_grant_request = grant_id
+        return [{"id": ACCOUNT_ID, "name": "Example account"}]
 
     async def provision(self, *, authorization_id: str, account_id: str, zone_id: str, hostname: str):
         self.provision_request = {"authorization_id": authorization_id, "account_id": account_id, "zone_id": zone_id, "hostname": hostname}
@@ -116,9 +121,11 @@ def test_cloudflare_setup_documents_current_dashboard_permissions(test_client) -
     assert response.json()["oauth_configured"] is False
     assert response.json()["available"] is False
     assert response.json()["configuration_error"] == (
-        "Cloudflare OAuth is not configured for this deployment."
+        "Cloudflare OAuth client, callback, and approved scope IDs are not "
+        "configured for this deployment."
     )
     assert response.json()["required_permissions"] == [
+        "Account / Account Settings / Read",
         "Account / Workers Scripts / Edit",
         "Account / Zero Trust / Edit",
         "Account / Access: Apps and Policies / Edit",
@@ -149,11 +156,23 @@ def test_cloudflare_api_authorizes_with_grant_and_provisions_without_tunnel_ids(
     assert secret not in provisioned.text
 
 
-def test_cloudflare_authorize_requires_grant_and_account(test_client) -> None:
-    response = test_client.post("/api/connections/cloudflare/authorize", json={"grant_id": "test-grant"})
-    assert response.status_code == 422
+def test_cloudflare_authorize_discovers_oauth_selected_accounts_without_account_id(test_client) -> None:
+    service = FakeCloudflareService()
+    admin_app.dependency_overrides[deps.get_cloudflare_service_dep] = lambda: service
+    try:
+        response = test_client.post(
+            "/api/connections/cloudflare/authorize", json={"grant_id": "test-grant"}
+        )
+    finally:
+        admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
+
+    assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store, private"
-    assert "secret" not in response.text
+    assert response.json() == {
+        "accounts": [{"id": ACCOUNT_ID, "name": "Example account", "zones": []}]
+    }
+    assert service.discover_grant_request == "test-grant"
+    assert "set-cookie" not in response.headers
 
 
 def test_cloudflare_api_lists_adds_and_removes_authorized_domains(test_client) -> None:

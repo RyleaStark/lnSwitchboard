@@ -496,7 +496,7 @@ export const api = {
     request<null>(`api/cloudflare/oauth/grants/${encodeURIComponent(grantId)}`, {
       method: "DELETE",
     }),
-  authorizeCloudflare: (payload: { grant_id: string; account_id: string }) =>
+  authorizeCloudflare: (payload: { grant_id: string; account_id?: string }) =>
     request<CloudflareAuthorization>("api/connections/cloudflare/authorize", {
       method: "POST",
       body: JSON.stringify(payload),

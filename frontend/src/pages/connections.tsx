@@ -52,7 +52,9 @@ export function ConnectionsPage() {
   )
 }
 
-type CloudflareStep = "connect" | "authorize" | "grant" | "provision"
+type CloudflareStep = "connect" | "authorize" | "grant" | "account" | "provision"
+
+type CloudflareAccount = { id: string; name: string }
 
 function cloudflareFlowState(authorizeUrl: string): string {
   try {
@@ -88,6 +90,8 @@ function CloudflareConnectionsPage() {
   const [accountId, setAccountId] = useState("")
   const [zoneId, setZoneId] = useState("")
   const [hostname, setHostname] = useState("")
+  const [selectedGrantId, setSelectedGrantId] = useState("")
+  const [discoveredAccounts, setDiscoveredAccounts] = useState<CloudflareAccount[]>([])
   const [pending, setPending] = useState<"begin" | "complete" | "authorize" | null>(null)
   const [reconnectNotice, setReconnectNotice] = useState<string | null>(null)
 
@@ -174,17 +178,32 @@ function CloudflareConnectionsPage() {
 
   const selectGrant = async (grant: CloudflareOAuthGrant) => {
     if (pending !== null) return
-    const grantAccountId =
-      typeof grant.account_metadata.account_id === "string" ? grant.account_metadata.account_id : ""
-    if (!grantAccountId) {
-      toast.error("This authorization is missing its Cloudflare account. Delete it and reconnect Cloudflare.")
-      return
-    }
     setPending("authorize")
     try {
-      const result = await api.authorizeCloudflare({ grant_id: grant.grant_id, account_id: grantAccountId })
-      const account = result.accounts.find((item) => item.id === grantAccountId) ?? result.accounts[0]
-      if (!account) throw new Error("Cloudflare returned no accounts for this authorization.")
+      const result = await api.authorizeCloudflare({ grant_id: grant.grant_id })
+      if (result.accounts.length === 0) {
+        throw new Error("Cloudflare returned no accounts for this authorization.")
+      }
+      setSelectedGrantId(grant.grant_id)
+      setDiscoveredAccounts(result.accounts)
+      setStep("account")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cloudflare authorization failed")
+    } finally {
+      setPending(null)
+    }
+  }
+
+  const selectAccount = async (selectedAccountId: string) => {
+    if (pending !== null || !selectedGrantId) return
+    setPending("authorize")
+    try {
+      const result = await api.authorizeCloudflare({
+        grant_id: selectedGrantId,
+        account_id: selectedAccountId,
+      })
+      const account = result.accounts.find((item) => item.id === selectedAccountId)
+      if (!account) throw new Error("Cloudflare did not authorize the selected account.")
       queryClient.setQueryData(["cloudflare-authorization"], result)
       setAccountId(account.id)
       setZoneId(account.zones[0]?.id ?? "")
@@ -202,6 +221,8 @@ function CloudflareConnectionsPage() {
     setFlow(null)
     setCode("")
     setStateValue("")
+    setSelectedGrantId("")
+    setDiscoveredAccounts([])
     setStep(nextStep)
   }
 
@@ -410,6 +431,13 @@ function CloudflareConnectionsPage() {
                       hostname,
                     })
                   }}
+                />
+              ) : step === "account" ? (
+                <CloudflareAccountPicker
+                  accounts={discoveredAccounts}
+                  pending={pending !== null}
+                  onSelect={(selectedAccountId) => void selectAccount(selectedAccountId)}
+                  onBack={() => resetOnboarding("grant")}
                 />
               ) : step === "grant" ? (
                 <CloudflareGrantPicker
@@ -1071,6 +1099,46 @@ function CloudflareAwaitingAuthorization({
         </Button>
       </div>
     </FieldGroup>
+  )
+}
+
+function CloudflareAccountPicker({
+  accounts,
+  pending,
+  onSelect,
+  onBack,
+}: {
+  accounts: CloudflareAccount[]
+  pending: boolean
+  onSelect: (accountId: string) => void
+  onBack: () => void
+}) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="font-medium">Choose a Cloudflare account</h3>
+        <p className="mt-1 max-w-xl text-sm leading-normal text-pretty text-muted-foreground">
+          Cloudflare returned only the accounts you selected during consent. Choose the account that owns your DNS zone.
+        </p>
+      </div>
+      <div className="grid max-w-2xl gap-3">
+        {accounts.map((account) => (
+          <Button
+            key={account.id}
+            type="button"
+            variant="outline"
+            className="h-auto min-h-12 justify-start px-4 py-3 text-left"
+            disabled={pending}
+            onClick={() => onSelect(account.id)}
+          >
+            {account.name}
+          </Button>
+        ))}
+      </div>
+      <Button type="button" variant="ghost" disabled={pending} onClick={onBack}>
+        Back
+      </Button>
+    </div>
   )
 }
 

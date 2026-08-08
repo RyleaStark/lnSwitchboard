@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import logging
 import secrets
 import time
@@ -152,7 +151,10 @@ class CloudflareOAuthManager:
             if self._is_expired(payload):
                 self._secrets.delete(owner)
                 continue
-            if payload.get("state") == state:
+            stored_state = payload.get("state")
+            if isinstance(stored_state, str) and secrets.compare_digest(
+                stored_state, state
+            ):
                 return owner, payload
         return None
 
@@ -237,15 +239,20 @@ class CloudflareOAuthManager:
         except ValueError:
             body = None
         if response.is_error or not isinstance(body, dict):
-            if isinstance(body, (dict, list)):
-                detail = json.dumps(body)
+            if isinstance(body, dict):
+                detail = "; ".join(
+                    str(body[key])
+                    for key in ("error", "error_description")
+                    if isinstance(body.get(key), str)
+                )
             else:
-                detail = response.text[:500]
+                detail = ""
             detail = _scrub(detail, sensitive)
             logger.warning("cloudflare oauth token request rejected")
+            suffix = f": {detail[:500]}" if detail else ""
             raise CloudflareOAuthExchangeError(
                 f"Cloudflare OAuth token endpoint returned HTTP "
-                f"{response.status_code}: {detail[:500]}"
+                f"{response.status_code}{suffix}"
             )
         return body
 
@@ -297,6 +304,11 @@ class CloudflareOAuthManager:
         grant_id: str | None = None,
     ) -> str:
         now = time.time()
+        access_token = token_payload.get("access_token")
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise CloudflareOAuthExchangeError(
+                "Cloudflare OAuth token endpoint did not return an access token"
+            )
         expires_in = token_payload.get("expires_in")
         try:
             expires_at = now + float(expires_in) if expires_in is not None else None
@@ -304,7 +316,7 @@ class CloudflareOAuthManager:
             expires_at = None
         record: dict[str, Any] = {
             "refresh_token": token_payload.get("refresh_token"),
-            "access_token": token_payload.get("access_token"),
+            "access_token": access_token,
             "access_token_expires_at": expires_at,
             "scopes": str(token_payload.get("scope") or ""),
             "updated_at": now,

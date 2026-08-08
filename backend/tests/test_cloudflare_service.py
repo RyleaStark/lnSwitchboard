@@ -434,6 +434,43 @@ def call_names(client: FakeCloudflareClient) -> list[str]:
 
 
 @pytest.mark.anyio
+async def test_oauth_grant_account_discovery_does_not_create_authorization(
+    tmp_path: Path,
+) -> None:
+    store = ConnectionStore(tmp_path / "connections.db")
+    secrets = ConnectionSecretStore(
+        tmp_path / "connections.db", tmp_path / "secrets.key"
+    )
+    client = FakeCloudflareClient()
+    resolved: list[str] = []
+
+    async def resolver(grant_id: str) -> str:
+        resolved.append(grant_id)
+        return "access-token"
+
+    service = CloudflareService(
+        store=store,
+        secrets=secrets,
+        client_factory=lambda _token: client,
+        connector_enabled=True,
+        token_path=tmp_path / "mesh" / "node.env",
+        origin_url="http://app:21212",
+        token_gid=os.getgid(),
+        access_token_resolver=resolver,
+    )
+
+    accounts = await service.discover_grant_accounts("grant-123")
+
+    assert accounts == [{"id": ACCOUNT_ID, "name": "Example account"}]
+    assert resolved == ["grant-123"]
+    assert not any(
+        owner.startswith("cloudflare-authorization:")
+        for owner in secrets.list_owner_ids()
+    )
+    assert client.calls == [("verify_token", None), ("list_accounts", None)]
+
+
+@pytest.mark.anyio
 async def test_oauth_grant_flow_resolves_access_tokens_and_persists_grant_id(
     tmp_path: Path,
 ) -> None:

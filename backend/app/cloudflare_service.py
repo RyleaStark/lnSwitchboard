@@ -274,6 +274,29 @@ class CloudflareService:
             {"grant_id": grant_id, "account_id": account_id}, authorized_accounts
         )
 
+    async def discover_grant_accounts(self, grant_id: str) -> list[dict[str, str]]:
+        """List the accounts selected during OAuth consent without storing a capability."""
+        self._require_connector()
+        grant_id = grant_id.strip()
+        if not grant_id:
+            raise CloudflareValidationError("Cloudflare authorization grant is required")
+        if self.access_token_resolver is None:
+            raise CloudflareServiceError("Cloudflare OAuth access is unavailable")
+        access_token = await self.access_token_resolver(grant_id)
+        client = self.client_factory(access_token)
+        await client.verify_token()
+        accounts = await client.list_accounts()
+        discovered = [
+            {"id": str(account.get("id", "")), "name": str(account.get("name", ""))}
+            for account in accounts
+            if str(account.get("id", "")) and str(account.get("name", ""))
+        ]
+        if not discovered:
+            raise CloudflareValidationError(
+                "Cloudflare returned no accounts for this authorization"
+            )
+        return discovered
+
     async def _verify_and_list(
         self, client: CloudflareClientProtocol, account_id: str
     ) -> list[dict[str, Any]]:

@@ -40,6 +40,7 @@ _Result = TypeVar("_Result")
 CLOUDFLARE_AUTHORIZATION_COOKIE = "lnswitchboard_cloudflare_authorization"
 TAILSCALE_LOGIN_COOKIE = "lnswitchboard_tailscale_login"
 _REQUIRED_PERMISSIONS = [
+    "Account / Account Settings / Read",
     "Account / Workers Scripts / Edit",
     "Account / Zero Trust / Edit",
     "Account / Access: Apps and Policies / Edit",
@@ -78,7 +79,7 @@ class CloudflareAuthorizeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     grant_id: str = Field(min_length=1, max_length=256)
-    account_id: str = Field(min_length=1, max_length=64)
+    account_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class CloudflareDomainRequest(BaseModel):
@@ -309,6 +310,8 @@ async def cloudflare_setup(
         settings.cloudflare_oauth_client_id != "placeholder-client-id"
         and settings.cloudflare_oauth_redirect_page
         != "https://placeholder.invalid/oauth/callback"
+        and len(settings.cloudflare_oauth_scope.split()) > 1
+        and "replace-with" not in settings.cloudflare_oauth_scope
     )
     return {
         "available": settings.cloudflared_connector_enabled and oauth_configured,
@@ -316,7 +319,10 @@ async def cloudflare_setup(
         "configuration_error": (
             None
             if oauth_configured
-            else "Cloudflare OAuth is not configured for this deployment."
+            else (
+                "Cloudflare OAuth client, callback, and approved scope IDs are not "
+                "configured for this deployment."
+            )
         ),
         "origin": settings.cloudflared_origin_url,
         "required_permissions": _REQUIRED_PERMISSIONS,
@@ -333,8 +339,19 @@ async def authorize_cloudflare(
     service: CloudflareService = Depends(get_cloudflare_service_dep),
 ) -> dict[str, object]:
     _set_private_no_store(response)
+    account_id = request.account_id
+    if account_id is None:
+        accounts = await _cloudflare_call(
+            lambda: service.discover_grant_accounts(request.grant_id)
+        )
+        return {
+            "accounts": [
+                {"id": account["id"], "name": account["name"], "zones": []}
+                for account in accounts
+            ],
+        }
     authorization = await _cloudflare_call(
-        lambda: service.authorize_grant(request.grant_id, request.account_id)
+        lambda: service.authorize_grant(request.grant_id, account_id)
     )
     response.set_cookie(
         CLOUDFLARE_AUTHORIZATION_COOKIE,

@@ -299,7 +299,11 @@ test("selects grant, account, and zone, then provisions a hostname", async () =>
   vi.mocked(api.beginCloudflareOAuth).mockResolvedValue(oauthFlow())
   vi.mocked(api.completeCloudflareOAuth).mockResolvedValue(oauthGrant())
   vi.mocked(api.cloudflareOAuthGrants).mockResolvedValue({ grants: [oauthGrant()] })
-  vi.mocked(api.authorizeCloudflare).mockResolvedValue(cloudflareAuthorization())
+  vi.mocked(api.authorizeCloudflare)
+    .mockResolvedValueOnce({
+      accounts: [{ id: "a".repeat(32), name: "Example account", zones: [] }],
+    })
+    .mockResolvedValueOnce(cloudflareAuthorization())
   vi.mocked(api.provisionCloudflare).mockResolvedValue({
     ...cloudflareConnection([
       {
@@ -320,7 +324,13 @@ test("selects grant, account, and zone, then provisions a hostname", async () =>
 
   await user.click(await screen.findByRole("button", { name: "Use this authorization" }))
   await waitFor(() =>
-    expect(api.authorizeCloudflare).toHaveBeenCalledWith({
+    expect(api.authorizeCloudflare).toHaveBeenNthCalledWith(1, {
+      grant_id: "grant-1",
+    }),
+  )
+  await user.click(await screen.findByRole("button", { name: "Example account" }))
+  await waitFor(() =>
+    expect(api.authorizeCloudflare).toHaveBeenNthCalledWith(2, {
       grant_id: "grant-1",
       account_id: "a".repeat(32),
     }),
