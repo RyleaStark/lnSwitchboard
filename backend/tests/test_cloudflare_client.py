@@ -1,18 +1,34 @@
 from __future__ import annotations
 
 import json
+import re
+from email.parser import BytesParser
+from typing import Any
 
 import httpx
 import pytest
-from typing import Any
 
 from backend.app.cloudflare_client import (
     CloudflareAPIError,
     CloudflareClient,
-    CloudflareRollbackError,
+)
+from backend.app.cloudflare_worker_source import (
+    INTERNAL_HOSTNAME,
+    LNS_WORKER_VERSION,
+    MANAGED_COMMENT,
+    MESH_BINDING_NAME,
+    MESH_NETWORK_ID,
+    PUBLIC_PORT,
+    WORKER_COMPATIBILITY_DATE,
+    WORKER_SOURCE,
+    extract_worker_version,
 )
 
 API_TOKEN = "do-not-leak-this-api-token"
+ACCOUNT_ID = "a" * 32
+ZONE_ID = "b" * 32
+NODE_ID = "11111111-2222-4333-8444-555555555555"
+SCRIPT = "lnswitchboard-proxy"
 
 
 @pytest.fixture
@@ -20,565 +36,434 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+def _envelope(result: Any) -> httpx.Response:
+    return httpx.Response(
+        200, json={"success": True, "errors": [], "result": result}
+    )
+
+
 @pytest.mark.anyio
-async def test_client_builds_remote_tunnel_dns_and_public_only_ingress() -> None:
+async def test_mesh_node_lifecycle_uses_warp_connector_endpoints() -> None:
     requests: list[httpx.Request] = []
-    tunnel_config = {"config": {"ingress": []}}
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        if request.url.path.endswith("/cfd_tunnel"):
-            result = {"id": "tunnel-id", "name": "tunnel"}
-        elif request.url.path.endswith("/configurations") and request.method == "GET":
-            result = tunnel_config
-        elif request.url.path.endswith("/configurations") and request.method == "PUT":
-            tunnel_config.update(json.loads(request.content))
-            result = tunnel_config
-        elif request.url.path.endswith("/dns_records"):
-            result = {"id": "dns-id"}
-        else:
-            raise AssertionError(request.url)
-        return httpx.Response(
-            200, json={"success": True, "errors": [], "result": result}
-        )
+        path = request.url.path
+        if path.endswith("/warp_connector") and request.method == "POST":
+            return _envelope({"id": NODE_ID, "name": "lnswitchboard-example-com-deadbeef"})
+        if path.endswith("/token"):
+            return _envelope({"token": "mesh-node-token"})
+        if path.endswith("/connections"):
+            return _envelope([{"id": "conn-1"}])
+        if request.method == "DELETE":
+            return _envelope({"id": NODE_ID})
+        raise AssertionError(request.url)
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    await client.create_tunnel("account-id", "tunnel")
-    await client.configure_tunnel(
-        "account-id",
-        "tunnel-id",
-        "pay.example.com",
-        "http://app:21212",
-    )
-    await client.create_dns_record("zone-id", "pay.example.com", "tunnel-id")
+    node = await client.create_mesh_node(ACCOUNT_ID, "lnswitchboard-example-com-deadbeef")
+    assert node["id"] == NODE_ID
+    assert await client.get_mesh_node_token(ACCOUNT_ID, NODE_ID) == "mesh-node-token"
+    assert await client.list_mesh_node_connections(ACCOUNT_ID, NODE_ID) == [
+        {"id": "conn-1"}
+    ]
+    await client.delete_mesh_node(ACCOUNT_ID, NODE_ID)
 
     assert all(
         request.headers["authorization"] == f"Bearer {API_TOKEN}"
         for request in requests
     )
-    tunnel_body = json.loads(requests[0].content)
-    assert tunnel_body == {"name": "tunnel", "config_src": "cloudflare"}
-    config_request = next(
-        request
-        for request in requests
-        if request.method == "PUT" and request.url.path.endswith("/configurations")
-    )
-    config_body = json.loads(config_request.content)
-    assert config_body == {
-        "config": {
-            "ingress": [
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
-                {"service": "http_status:404"},
-            ]
-        }
+    create_request = requests[0]
+    assert json.loads(create_request.content) == {
+        "name": "lnswitchboard-example-com-deadbeef"
     }
-    assert "22121" not in config_request.content.decode()
-    dns_request = next(
-        request
-        for request in requests
-        if request.method == "POST" and request.url.path.endswith("/dns_records")
+    assert requests[1].url.path.endswith(
+        f"/accounts/{ACCOUNT_ID}/warp_connector/{NODE_ID}/token"
     )
-    dns_body = json.loads(dns_request.content)
-    assert dns_body["content"] == "tunnel-id.cfargotunnel.com"
-    assert dns_body["proxied"] is True
+    assert requests[2].url.path.endswith(
+        f"/accounts/{ACCOUNT_ID}/warp_connector/{NODE_ID}/connections"
+    )
+    assert requests[3].method == "DELETE"
+    assert requests[3].url.path.endswith(
+        f"/accounts/{ACCOUNT_ID}/warp_connector/{NODE_ID}"
+    )
 
 
 @pytest.mark.anyio
-async def test_configure_tunnel_initializes_cloudflare_null_config() -> None:
-    """A new remotely managed tunnel has result.config=null until its first PUT."""
-    tunnel_config: dict[str, Any] = {"config": None}
-    writes: list[dict[str, Any]] = []
-
+async def test_find_mesh_node_by_name_matches_exact_name() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT":
-            body = json.loads(request.content)
-            writes.append(body)
-            tunnel_config.update(body)
-        return httpx.Response(
-            200,
-            json={"success": True, "errors": [], "result": tunnel_config},
-        )
+        assert request.url.params["name"] == "wanted"
+        return _envelope([{"id": "other", "name": "wanted-2"}, {"id": "hit", "name": "wanted"}])
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    found = await client.find_mesh_node_by_name(ACCOUNT_ID, "wanted")
+    assert found == {"id": "hit", "name": "wanted"}
 
-    await client.configure_tunnel(
-        "account-id",
-        "tunnel-id",
-        "example.com",
-        "http://app:21212",
+
+@pytest.mark.anyio
+async def test_hostname_route_lifecycle_uses_zerotrust_routes_hostname() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        path = request.url.path
+        if path.endswith("/zerotrust/routes/hostname") and request.method == "POST":
+            return _envelope({"id": "route-1"})
+        if path.endswith("/zerotrust/routes/hostname"):
+            return _envelope([{"id": "route-1", "hostname": INTERNAL_HOSTNAME}])
+        if path.endswith("/zerotrust/routes/hostname/route-1"):
+            if request.method == "DELETE":
+                return _envelope({"id": "route-1"})
+            return _envelope({"id": "route-1", "hostname": INTERNAL_HOSTNAME})
+        raise AssertionError(request.url)
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    created = await client.create_hostname_route(ACCOUNT_ID, NODE_ID)
+    assert created["id"] == "route-1"
+    routes = await client.list_hostname_routes(ACCOUNT_ID, INTERNAL_HOSTNAME)
+    assert routes == [{"id": "route-1", "hostname": INTERNAL_HOSTNAME}]
+    assert await client.get_hostname_route(ACCOUNT_ID, "route-1") == {
+        "id": "route-1",
+        "hostname": INTERNAL_HOSTNAME,
+    }
+    await client.delete_hostname_route(ACCOUNT_ID, "route-1")
+
+    create_body = json.loads(requests[0].content)
+    assert create_body == {
+        "hostname": INTERNAL_HOSTNAME,
+        "tunnel_id": NODE_ID,
+        "comment": MANAGED_COMMENT,
+    }
+    assert requests[1].url.params["hostname"] == INTERNAL_HOSTNAME
+
+
+def _parse_multipart(request: httpx.Request) -> dict[str, tuple[str | None, bytes]]:
+    content_type = request.headers["content-type"]
+    message = BytesParser().parsebytes(
+        b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + request.content
     )
+    parts: dict[str, tuple[str | None, bytes]] = {}
+    for part in message.get_payload():
+        name = part.get_param("name", header="content-disposition")
+        filename = part.get_filename()
+        parts[str(name)] = (filename, part.get_payload(decode=True))
+    return parts
 
-    assert writes == [
-        {
-            "config": {
-                "ingress": [
-                    {
-                        "hostname": "example.com",
-                        "path": r"^/\.well-known/lnurlp/.*$",
-                        "service": "http://app:21212",
-                    },
-                    {
-                        "hostname": "example.com",
-                        "path": r"^/\.well-known/nostr\.json$",
-                        "service": "http://app:21212",
-                    },
-                    {"service": "http_status:404"},
-                ]
+
+@pytest.mark.anyio
+async def test_deploy_proxy_worker_uploads_module_with_vpc_binding() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _envelope({"id": SCRIPT})
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    await client.deploy_proxy_worker(ACCOUNT_ID, SCRIPT)
+
+    [request] = requests
+    assert request.method == "PUT"
+    assert request.url.path.endswith(f"/accounts/{ACCOUNT_ID}/workers/scripts/{SCRIPT}")
+    assert request.headers["content-type"].startswith("multipart/form-data")
+    parts = _parse_multipart(request)
+    metadata = json.loads(parts["metadata"][1])
+    assert metadata == {
+        "main_module": "worker.js",
+        "bindings": [
+            {
+                "name": MESH_BINDING_NAME,
+                "type": "vpc_network",
+                "network_id": MESH_NETWORK_ID,
             }
-        }
-    ]
-
-
-@pytest.mark.anyio
-async def test_configure_tunnel_rejects_duplicate_managed_routes() -> None:
-    tunnel_config = {"config": {"ingress": []}}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT":
-            tunnel_config.update(json.loads(request.content))
-            duplicate = dict(tunnel_config["config"]["ingress"][0])
-            tunnel_config["config"]["ingress"].insert(1, duplicate)
-        return httpx.Response(
-            200, json={"success": True, "errors": [], "result": tunnel_config}
-        )
-
-    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-
-    with pytest.raises(CloudflareRollbackError):
-        await client.configure_tunnel(
-            "account-id", "tunnel-id", "example.com", "http://app:21212"
-        )
-
-
-@pytest.mark.anyio
-async def test_restore_tunnel_configuration_refuses_concurrent_operator_change() -> None:
-    operator_config = {
-        "ingress": [
-            {"hostname": "operator.example.com", "service": "http://operator:8080"},
-            {"service": "http_status:404"},
-        ]
+        ],
+        "compatibility_date": WORKER_COMPATIBILITY_DATE,
     }
-    writes: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT":
-            writes.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={"success": True, "errors": [], "result": {"config": operator_config}},
-        )
-
-    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-
-    with pytest.raises(CloudflareAPIError) as captured:
-        await client.restore_tunnel_configuration(
-            "account-id",
-            "tunnel-id",
-            {"ingress": [{"service": "http_status:404"}]},
-            {"ingress": [{"hostname": "example.com", "service": "http://app"}]},
-        )
-
-    assert captured.value.status_code == 409
-    assert writes == []
+    filename, source = parts["worker.js"]
+    assert filename == "worker.js"
+    assert source.decode() == WORKER_SOURCE
+    assert metadata["bindings"][0]["network_id"] == "cf1:network"
 
 
 @pytest.mark.anyio
-async def test_restore_tunnel_configuration_rechecks_immediately_before_put() -> None:
-    written = {"ingress": [{"hostname": "example.com", "service": "http://app"}]}
-    operator = {
-        "ingress": [
-            {"hostname": "operator.example.com", "service": "http://operator:8080"},
-            {"service": "http_status:404"},
-        ]
-    }
-    snapshots = [written, operator]
-    writes: list[dict[str, Any]] = []
+async def test_get_worker_script_content_returns_text_and_none_when_missing() -> None:
+    seen_paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT":
-            writes.append(json.loads(request.content))
-            result = {"config": operator}
-        else:
-            result = {"config": snapshots.pop(0)}
-        return httpx.Response(200, json={"success": True, "errors": [], "result": result})
-
-    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    with pytest.raises(CloudflareAPIError) as captured:
-        await client.restore_tunnel_configuration(
-            "account-id",
-            "tunnel-id",
-            {"ingress": [{"service": "http_status:404"}]},
-            written,
-        )
-
-    assert captured.value.status_code == 409
-    assert writes == []
-
-
-@pytest.mark.anyio
-async def test_configure_tunnel_refuses_unstable_prewrite_snapshot() -> None:
-    snapshots = [
-        {"config": {"ingress": [{"service": "http_status:404"}]}},
-        {
-            "config": {
-                "ingress": [
-                    {"hostname": "operator.example.com", "service": "http://operator:8080"},
-                    {"service": "http_status:404"},
-                ]
-            }
-        },
-    ]
-    writes: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT":
-            writes.append(json.loads(request.content))
-            result = snapshots[-1]
-        else:
-            result = snapshots.pop(0)
-        return httpx.Response(200, json={"success": True, "errors": [], "result": result})
-
-    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    with pytest.raises(CloudflareAPIError) as captured:
-        await client.configure_tunnel(
-            "account-id", "tunnel-id", "example.com", "http://app:21212"
-        )
-
-    assert captured.value.status_code == 409
-    assert writes == []
-
-
-@pytest.mark.anyio
-async def test_configure_tunnel_rejects_verification_that_drops_unrelated_route() -> None:
-    original = {
-        "config": {
-            "ingress": [
-                {"hostname": "operator.example.com", "service": "http://operator:8080"},
-                {"service": "http_status:404"},
-            ]
-        }
-    }
-    writes: list[dict[str, Any]] = []
-    get_count = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal get_count
-        if request.method == "PUT":
-            writes.append(json.loads(request.content))
-            result = writes[-1]
-        else:
-            get_count += 1
-            if get_count <= 2:
-                result = original
-            else:
-                result = {
-                    "config": {
-                        "ingress": [
-                            {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                            {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
-                            {"service": "http_status:404"},
-                        ]
-                    }
-                }
-        return httpx.Response(200, json={"success": True, "errors": [], "result": result})
-
-    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    with pytest.raises(CloudflareRollbackError):
-        await client.configure_tunnel(
-            "account-id", "tunnel-id", "pay.example.com", "http://app:21212"
-        )
-
-    assert len(writes) == 1
-
-
-def test_tunnel_ingress_override_refuses_preexisting_exact_route() -> None:
-    ingress = [
-        {
-            "hostname": "pay.example.com",
-            "path": r"^/\.well-known/lnurlp/.*$",
-            "service": "http://app:21212",
-        },
-        {"service": "http_status:404"},
-    ]
-
-    with pytest.raises(CloudflareAPIError) as captured:
-        CloudflareClient._override_ingress_routes(
-            ingress, "pay.example.com", "http://app:21212"
-        )
-
-    assert captured.value.status_code == 409
-
-
-@pytest.mark.anyio
-async def test_verify_tunnel_route_requires_exact_unshadowed_routes() -> None:
-    configs = [
-        {
-            "ingress": [
-                {"hostname": "other.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
-                {"hostname": "pay.example.com", "service": "http://site:8080"},
-                {"service": "http_status:404"},
-            ]
-        },
-        {
-            "ingress": [
-                {"hostname": "*.example.com", "service": "http://operator:8080"},
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
-                {"service": "http_status:404"},
-            ]
-        },
-    ]
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"success": True, "errors": [], "result": {"config": configs.pop(0)}},
-        )
-
-    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    assert await client.verify_tunnel_route(
-        "account-id", "tunnel-id", "pay.example.com", "http://app:21212"
-    )
-    assert not await client.verify_tunnel_route(
-        "account-id", "tunnel-id", "pay.example.com", "http://app:21212"
-    )
-
-
-def test_tunnel_ingress_override_preserves_unrelated_public_hostnames() -> None:
-    ingress = [
-        {"hostname": "other.example.com", "service": "http://other:8080"},
-        {"hostname": "pay.example.com", "path": "/other", "service": "http://old:21212"},
-        {"service": "http_status:404"},
-    ]
-
-    assert CloudflareClient._override_ingress_routes(
-        ingress, "pay.example.com", "http://app:21212"
-    ) == [
-        {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-        {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
-        {"hostname": "other.example.com", "service": "http://other:8080"},
-        {"hostname": "pay.example.com", "path": "/other", "service": "http://old:21212"},
-        {"service": "http_status:404"},
-    ]
-
-
-@pytest.mark.anyio
-async def test_remove_tunnel_route_preserves_operator_changed_service() -> None:
-    tunnel_config = {
-        "config": {
-            "ingress": [
-                {
-                    "hostname": "pay.example.com",
-                    "path": r"^/\.well-known/lnurlp/.*$",
-                    "service": "http://operator:8080",
-                },
-                {"service": "http_status:404"},
-            ]
-        }
-    }
-    writes: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT":
-            writes.append(json.loads(request.content))
-        return httpx.Response(
-            200, json={"success": True, "errors": [], "result": tunnel_config}
-        )
-
-    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    with pytest.raises(CloudflareAPIError) as captured:
-        await client.remove_tunnel_route(
-            "account-id", "tunnel-id", "pay.example.com", "http://app:21212"
-        )
-
-    assert captured.value.status_code == 409
-    assert writes == []
-
-
-@pytest.mark.anyio
-async def test_remove_tunnel_route_only_strips_managed_well_known_paths() -> None:
-    tunnel_config = {
-        "config": {
-            "ingress": [
-                {"hostname": "pay.example.com", "service": "http://site:8080"},
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
-                {"hostname": "second.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"hostname": "second.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
-                {"hostname": "other.example.com", "service": "http://other:8080"},
-                {"service": "http_status:404"},
-            ]
-        }
-    }
-    writes: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT":
-            writes.append(json.loads(request.content))
-            tunnel_config.update(writes[-1])
-        return httpx.Response(
-            200, json={"success": True, "errors": [], "result": tunnel_config}
-        )
-
-    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    await client.remove_tunnel_route(
-        "account-id", "tunnel-id", "pay.example.com", "http://app:21212"
-    )
-
-    assert writes == [{
-        "config": {
-            "ingress": [
-                {"hostname": "pay.example.com", "service": "http://site:8080"},
-                {"hostname": "second.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"hostname": "second.example.com", "path": r"^/\.well-known/nostr\.json$", "service": "http://app:21212"},
-                {"hostname": "other.example.com", "service": "http://other:8080"},
-                {"service": "http_status:404"},
-            ]
-        }
-    }]
-
-
-@pytest.mark.anyio
-async def test_remove_tunnel_route_rejects_verification_that_drops_unrelated_route() -> None:
-    original = {
-        "config": {
-            "ingress": [
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"hostname": "operator.example.com", "service": "http://operator:8080"},
-                {"service": "http_status:404"},
-            ]
-        }
-    }
-    get_count = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal get_count
-        if request.method == "GET":
-            get_count += 1
-            result = (
-                original
-                if get_count <= 2
-                else {"config": {"ingress": [{"service": "http_status:404"}]}}
+        seen_paths.append(request.url.path)
+        if "missing" in request.url.path:
+            return httpx.Response(
+                404,
+                json={"success": False, "errors": [{"code": 10007}], "result": None},
             )
-        else:
-            result = json.loads(request.content)
-        return httpx.Response(200, json={"success": True, "errors": [], "result": result})
+        return httpx.Response(200, text=WORKER_SOURCE)
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    with pytest.raises(CloudflareAPIError) as captured:
-        await client.remove_tunnel_route(
-            "account-id", "tunnel-id", "pay.example.com", "http://app:21212"
-        )
-
-    assert captured.value.status_code == 502
+    content = await client.get_worker_script_content(ACCOUNT_ID, SCRIPT)
+    assert content == WORKER_SOURCE
+    assert extract_worker_version(content or "") == LNS_WORKER_VERSION
+    assert await client.get_worker_script_content(ACCOUNT_ID, "missing") is None
+    assert seen_paths[0].endswith(f"/workers/scripts/{SCRIPT}/content/v2")
 
 
 @pytest.mark.anyio
-async def test_remove_tunnel_route_refuses_unstable_prewrite_snapshot() -> None:
-    original = {
-        "config": {
-            "ingress": [
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"service": "http_status:404"},
-            ]
-        }
-    }
-    changed = {
-        "config": {
-            "ingress": [
-                {"hostname": "pay.example.com", "path": r"^/\.well-known/lnurlp/.*$", "service": "http://app:21212"},
-                {"hostname": "operator.example.com", "service": "http://operator:8080"},
-                {"service": "http_status:404"},
-            ]
-        }
-    }
-    snapshots = [original, changed]
-    writes: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT":
-            writes.append(json.loads(request.content))
-            result = changed
-        else:
-            result = snapshots.pop(0)
-        return httpx.Response(200, json={"success": True, "errors": [], "result": result})
-
-    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    with pytest.raises(CloudflareAPIError) as captured:
-        await client.remove_tunnel_route(
-            "account-id", "tunnel-id", "pay.example.com", "http://app:21212"
-        )
-
-    assert captured.value.status_code == 409
-    assert writes == []
-
-
-@pytest.mark.anyio
-async def test_remove_tunnel_route_rejects_residual_managed_routes() -> None:
-    tunnel_config = {
-        "config": {
-            "ingress": [
-                {
-                    "hostname": "pay.example.com",
-                    "path": r"^/\.well-known/lnurlp/.*$",
-                    "service": "http://app:21212",
-                },
-                {"service": "http_status:404"},
-            ]
-        }
-    }
-
+async def test_worker_content_error_surfaces_provider_message_verbatim() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            200, json={"success": True, "errors": [], "result": tunnel_config}
+            403,
+            json={
+                "success": False,
+                "errors": [{"code": 10000, "message": "Not allowed to edit workers"}],
+                "result": None,
+            },
         )
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-
-    with pytest.raises(CloudflareAPIError):
-        await client.remove_tunnel_route(
-            "account-id",
-            "tunnel-id",
-            "pay.example.com",
-            "http://app:21212",
-        )
+    with pytest.raises(CloudflareAPIError) as captured:
+        await client.get_worker_script_content(ACCOUNT_ID, SCRIPT)
+    assert "Not allowed to edit workers" in str(captured.value)
 
 
 @pytest.mark.anyio
-async def test_remove_tunnel_route_is_noop_without_managed_paths() -> None:
-    tunnel_config = {
-        "config": {
-            "ingress": [
-                {"hostname": "pay.example.com", "service": "http://site:8080"},
-                {"service": "http_status:404"},
-            ]
-        }
-    }
-    writes: list[dict[str, Any]] = []
+async def test_ensure_workers_routes_creates_exactly_the_two_managed_patterns() -> None:
+    requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT":
-            writes.append(json.loads(request.content))
-        return httpx.Response(
-            200, json={"success": True, "errors": [], "result": tunnel_config}
-        )
+        requests.append(request)
+        if request.method == "GET":
+            return _envelope([])
+        return _envelope({"id": f"route-{len(requests)}"})
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-    await client.remove_tunnel_route(
-        "account-id", "tunnel-id", "pay.example.com", "http://app:21212"
-    )
+    await client.ensure_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
 
-    assert writes == []
+    posts = [request for request in requests if request.method == "POST"]
+    assert [json.loads(request.content) for request in posts] == [
+        {
+            "pattern": "pay.example.com/.well-known/lnurlp/*",
+            "script": SCRIPT,
+        },
+        {
+            "pattern": "pay.example.com/.well-known/nostr.json",
+            "script": SCRIPT,
+        },
+    ]
+    assert all(
+        request.url.path.endswith(f"/zones/{ZONE_ID}/workers/routes")
+        for request in posts
+    )
 
 
 @pytest.mark.anyio
-async def test_client_error_is_sanitized_and_never_echoes_token_or_provider_message() -> (
-    None
-):
-    provider_message = f"invalid token {API_TOKEN}"
+async def test_ensure_workers_routes_refuses_identical_pattern_on_foreign_script() -> None:
+    posts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            posts.append(request)
+        return _envelope(
+            [
+                {
+                    "id": "foreign-1",
+                    "pattern": "pay.example.com/.well-known/nostr.json",
+                    "script": "operator-script",
+                }
+            ]
+            if request.method == "GET"
+            else {"id": "unused"}
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(CloudflareAPIError) as captured:
+        await client.ensure_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+
+    assert captured.value.status_code == 409
+    # The non-conflicting lnurlp pattern may be created, but the conflicting
+    # nostr.json pattern is never overwritten.
+    assert all(
+        json.loads(request.content)["pattern"]
+        != "pay.example.com/.well-known/nostr.json"
+        for request in posts
+    )
+
+
+@pytest.mark.anyio
+async def test_ensure_workers_routes_ignores_foreign_wildcard_routes() -> None:
+    """Most-specific-wins: our exact path patterns beat operator host/* routes."""
+    posts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            posts.append(request)
+            return _envelope({"id": f"route-{len(posts)}"})
+        return _envelope(
+            [
+                {"id": "wild", "pattern": "pay.example.com/*", "script": "operator-script"},
+                {"id": "other", "pattern": "other.example.com/.well-known/nostr.json", "script": "operator-script"},
+            ]
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    await client.ensure_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+
+    assert len(posts) == 2
+
+
+@pytest.mark.anyio
+async def test_ensure_workers_routes_adopts_patterns_already_on_our_script() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            raise AssertionError("must not recreate adopted routes")
+        return _envelope(
+            [
+                {
+                    "id": f"route-{index}",
+                    "pattern": pattern,
+                    "script": SCRIPT,
+                }
+                for index, pattern in enumerate(
+                    CloudflareClient.workers_route_patterns("pay.example.com")
+                )
+            ]
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    await client.ensure_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+
+
+@pytest.mark.anyio
+async def test_ensure_workers_routes_reconciles_ambiguous_create() -> None:
+    routes: list[dict[str, Any]] = []
+    posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        if request.method == "POST":
+            posts += 1
+            body = json.loads(request.content)
+            routes.append({"id": f"route-{posts}", **body})
+            # The create succeeded but the response is lost.
+            return httpx.Response(
+                500,
+                json={"success": False, "errors": [{"code": 1}], "result": None},
+            )
+        return _envelope(list(routes))
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    await client.ensure_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+
+    assert posts == 2
+    assert {route["pattern"] for route in routes} == set(
+        CloudflareClient.workers_route_patterns("pay.example.com")
+    )
+
+
+@pytest.mark.anyio
+async def test_verify_workers_routes_requires_exact_pattern_and_script() -> None:
+    patterns = CloudflareClient.workers_route_patterns("pay.example.com")
+    scenarios = [
+        ([{"id": "1", "pattern": patterns[0], "script": SCRIPT}, {"id": "2", "pattern": patterns[1], "script": SCRIPT}], True),
+        ([{"id": "1", "pattern": patterns[0], "script": SCRIPT}], False),
+        ([{"id": "1", "pattern": patterns[0], "script": SCRIPT}, {"id": "2", "pattern": patterns[1], "script": "other"}], False),
+        ([{"id": "1", "pattern": patterns[0], "script": SCRIPT}, {"id": "2", "pattern": patterns[1], "script": SCRIPT}, {"id": "3", "pattern": patterns[1], "script": SCRIPT}], False),
+    ]
+    responses = [
+        _envelope(routes) for routes, _expected in scenarios
+    ]
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return responses.pop(0)
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    for _routes, expected in scenarios:
+        assert (
+            await client.verify_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+        ) is expected
+
+
+@pytest.mark.anyio
+async def test_remove_workers_routes_deletes_only_exact_pattern_and_our_script() -> None:
+    patterns = CloudflareClient.workers_route_patterns("pay.example.com")
+    routes = [
+        {"id": "ours-1", "pattern": patterns[0], "script": SCRIPT},
+        {"id": "ours-2", "pattern": patterns[1], "script": SCRIPT},
+        {"id": "wild", "pattern": "pay.example.com/*", "script": "operator-script"},
+        {"id": "other-host", "pattern": "other.example.com/.well-known/nostr.json", "script": SCRIPT},
+    ]
+    deleted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            deleted.append(request.url.path.rsplit("/", 1)[-1])
+            return _envelope({"id": "deleted"})
+        return _envelope(routes)
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    await client.remove_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+
+    assert sorted(deleted) == ["ours-1", "ours-2"]
+
+
+@pytest.mark.anyio
+async def test_remove_workers_routes_preserves_foreign_identical_pattern() -> None:
+    patterns = CloudflareClient.workers_route_patterns("pay.example.com")
+    routes = [{"id": "foreign", "pattern": patterns[0], "script": "operator-script"}]
+    deleted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            deleted.append(request.url.path)
+            return _envelope({"id": "deleted"})
+        return _envelope(routes)
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(CloudflareAPIError) as captured:
+        await client.remove_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+
+    assert captured.value.status_code == 409
+    assert deleted == []
+
+
+@pytest.mark.anyio
+async def test_remove_workers_routes_is_noop_without_managed_patterns() -> None:
+    writes = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal writes
+        if request.method != "GET":
+            writes += 1
+            return _envelope({"id": "unused"})
+        return _envelope(
+            [{"id": "wild", "pattern": "pay.example.com/*", "script": "operator-script"}]
+        )
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    await client.remove_workers_routes(ZONE_ID, "pay.example.com", SCRIPT)
+    assert writes == 0
+
+
+@pytest.mark.anyio
+async def test_create_placeholder_dns_record_is_originless_proxied_aaaa() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _envelope({"id": "dns-1"})
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    created = await client.create_placeholder_dns_record(ZONE_ID, "pay.example.com")
+    assert created["id"] == "dns-1"
+    [request] = requests
+    assert json.loads(request.content) == {
+        "type": "AAAA",
+        "name": "pay.example.com",
+        "content": "100::",
+        "proxied": True,
+        "comment": MANAGED_COMMENT,
+    }
+
+
+@pytest.mark.anyio
+async def test_client_error_surfaces_provider_message_verbatim_without_token() -> None:
+    provider_message = "Actor requires permission com.cloudflare.api.account.workers"
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -591,36 +476,43 @@ async def test_client_error_is_sanitized_and_never_echoes_token_or_provider_mess
         )
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-
     with pytest.raises(CloudflareAPIError) as captured:
         await client.verify_token()
 
     rendered = str(captured.value)
-    assert rendered == "Cloudflare rejected the request with HTTP 403 (codes: 10000)"
+    assert provider_message in rendered
+    assert "10000" in rendered
     assert API_TOKEN not in rendered
-    assert provider_message not in rendered
+
+
+@pytest.mark.anyio
+async def test_transport_failure_is_sanitized_fixed_message() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(f"secret connection detail {API_TOKEN}")
+
+    client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(CloudflareAPIError) as captured:
+        await client.verify_token()
+
+    rendered = str(captured.value)
+    assert rendered == "Cloudflare rejected the request with HTTP 503"
+    assert API_TOKEN not in rendered
+    assert "secret connection detail" not in rendered
 
 
 @pytest.mark.anyio
 async def test_delete_operations_are_idempotent_when_resource_is_already_gone() -> None:
-    requests: list[httpx.Request] = []
-
     def handler(_request: httpx.Request) -> httpx.Response:
-        requests.append(_request)
         return httpx.Response(
             404,
             json={"success": False, "errors": [{"code": 81044}], "result": None},
         )
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-
-    await client.delete_dns_record("zone-id", "record-id")
-    await client.cleanup_tunnel_connections("account-id", "tunnel-id")
-    await client.delete_tunnel("account-id", "tunnel-id")
-
-    cleanup_request = requests[1]
-    assert cleanup_request.headers["content-type"] == "application/json"
-    assert cleanup_request.content == b"{}"
+    await client.delete_dns_record(ZONE_ID, "record-id")
+    await client.delete_mesh_node(ACCOUNT_ID, NODE_ID)
+    await client.delete_hostname_route(ACCOUNT_ID, "route-id")
+    await client.delete_worker_script(ACCOUNT_ID, SCRIPT)
 
 
 @pytest.mark.anyio
@@ -635,13 +527,28 @@ async def test_account_discovery_paginates_until_short_page() -> None:
             if page == 1
             else [{"id": "last"}]
         )
-        return httpx.Response(
-            200, json={"success": True, "errors": [], "result": result}
-        )
+        return _envelope(result)
 
     client = CloudflareClient(API_TOKEN, transport=httpx.MockTransport(handler))
-
     accounts = await client.list_accounts()
 
     assert len(accounts) == 51
     assert pages == [1, 2]
+
+
+def test_worker_source_privacy_and_version_marker() -> None:
+    # Privacy (hard owner requirement): no logging, no telemetry, no external
+    # requests beyond the mesh binding to the internal target.
+    assert "console" not in WORKER_SOURCE
+    assert "https://" not in WORKER_SOURCE
+    assert f"http://{INTERNAL_HOSTNAME}:{PUBLIC_PORT}" in WORKER_SOURCE
+    assert "env.MESH.fetch" in WORKER_SOURCE
+    fetch_lines = [
+        line.strip() for line in WORKER_SOURCE.splitlines() if ".fetch(" in line
+    ]
+    assert all("env.MESH.fetch" in line for line in fetch_lines)
+    assert "X-LNS-Public-Host" in WORKER_SOURCE
+    assert extract_worker_version(WORKER_SOURCE) == LNS_WORKER_VERSION
+    # Failure mapping is a fixed sanitized 503 with no exception interpolation.
+    assert re.search(r'catch \{', WORKER_SOURCE)
+    assert "lnSwitchboard origin unavailable" in WORKER_SOURCE
