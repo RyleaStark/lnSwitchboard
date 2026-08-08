@@ -170,7 +170,7 @@ class CloudflareOAuthManager:
                 if self._secrets.delete(owner):
                     purged += 1
         if purged:
-            logger.info("purged %d expired cloudflare oauth flow(s)", purged)
+            logger.info("purged expired cloudflare oauth flows")
         return purged
 
     def begin_flow(self, redirect_mode: RedirectMode) -> OAuthFlowBegin:

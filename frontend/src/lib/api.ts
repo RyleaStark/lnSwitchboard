@@ -278,6 +278,8 @@ export type ConnectionsResponse = {
 
 export type CloudflareSetup = {
   available: boolean
+  oauth_configured: boolean
+  configuration_error: string | null
   origin: string
   required_permissions: string[]
   authorization_method: "oauth"

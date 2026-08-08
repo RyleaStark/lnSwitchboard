@@ -183,9 +183,8 @@ class Settings(BaseSettings):
         env="CLOUDFLARE_OAUTH_TOKEN_URL",
         default="https://dash.cloudflare.com/oauth2/token",
     )
-    # Space-separated scope string; scope names correspond to Cloudflare API
-    # token permission names (e.g. "workers-platform.read"). offline_access
-    # requests a refresh token.
+    # Cloudflare grants the API permissions configured on the registered OAuth
+    # application. The runtime scope requests refresh support only.
     cloudflare_oauth_scope: str = _env_field(
         env="CLOUDFLARE_OAUTH_SCOPE",
         default="offline_access",

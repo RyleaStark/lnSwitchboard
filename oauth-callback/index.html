@@ -4,14 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<!--
-  Privacy: this page runs entirely in your browser. It loads no external
-  resources, makes no network requests except an optional best-effort
-  completion POST to your own lnSwitchboard on this machine
-  (http://127.0.0.1:22121 / http://localhost:22121), and tracks nothing.
-  connect-src is restricted to exactly those two loopback origins.
--->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src http://127.0.0.1:22121 http://localhost:22121; base-uri 'none'; form-action 'none'">
+<!-- Privacy: this static page loads nothing, sends nothing, and tracks nothing. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-N3HTihqR9p/jGOTPcDuP3aeaTQZ0uc2mG26dHGfNuRw='; style-src 'sha256-KxyoN0SOEhIi7z4/QQZZ9tQXnQncBfjKvxKpcPOqBDA='; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <title>lnSwitchboard — Cloudflare authorization</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e8eaf0; }
@@ -55,10 +49,8 @@
     </div>
   </div>
   <p class="privacy">
-    Privacy: this page runs entirely in your browser; nothing is sent anywhere except
-    your own lnSwitchboard when reachable on this machine (an optional, best-effort
-    automatic completion). It loads no external resources, sets no cookies, and
-    collects no analytics.
+    Privacy: this page runs entirely in your browser. It makes no network requests,
+    loads no external resources, sets no cookies, and collects no analytics.
   </p>
 </main>
 <script>
@@ -130,43 +122,6 @@
     }
   });
 
-  // Best-effort automatic completion: if lnSwitchboard is served from this
-  // same machine, hand the code directly to it. Fully tolerant of failure —
-  // manual copy above is the primary path.
-  function tryAutoComplete() {
-    var endpoints = [
-      "http://127.0.0.1:22121/api/cloudflare/oauth/complete",
-      "http://localhost:22121/api/cloudflare/oauth/complete"
-    ];
-    var body = JSON.stringify({ code: code, state: state });
-    var attempts = endpoints.map(function (url) {
-      var controller = new AbortController();
-      var timer = setTimeout(function () { controller.abort(); }, 1500);
-      return fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: body,
-        signal: controller.signal,
-        credentials: "omit",
-        referrerPolicy: "no-referrer"
-      }).then(function (response) {
-        clearTimeout(timer);
-        return response.ok;
-      }, function () {
-        clearTimeout(timer);
-        return false;
-      });
-    });
-    Promise.all(attempts).then(function (results) {
-      if (results.indexOf(true) !== -1) {
-        statusEl.textContent =
-          "Done — your lnSwitchboard on this machine received the code automatically. You can close this tab.";
-        statusEl.className = "ok";
-      }
-    });
-  }
-
-  tryAutoComplete();
 })();
 </script>
 </body>

@@ -33,11 +33,6 @@ NEW_ACCESS_TOKEN = "cf-access-token-new444"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STATIC_PAGE = REPO_ROOT / "oauth-callback" / "index.html"
-LOOPBACK_COMPLETE_URLS = (
-    "http://127.0.0.1:22121/api/cloudflare/oauth/complete",
-    "http://localhost:22121/api/cloudflare/oauth/complete",
-)
-
 
 def run(coro):
     return asyncio.run(coro)
@@ -525,18 +520,13 @@ def test_logs_never_contain_codes_verifiers_or_tokens(
 def test_static_callback_page_has_no_external_resources():
     html = STATIC_PAGE.read_text(encoding="utf-8")
 
-    # Every absolute URL must sit on one of the two loopback origins (the
-    # completion endpoints themselves or their CSP/comment mentions).
-    loopback_origins = ("http://127.0.0.1:22121", "http://localhost:22121")
+    # This page is a display-only fragment receiver. It must not contain any
+    # absolute destination or make any network request, including loopback.
     urls = re.findall(r"https?://[^\s\"'<>\])}]+", html)
-    assert urls, "expected the loopback endpoints to be present"
-    for url in urls:
-        cleaned = url.rstrip(".;,")
-        assert cleaned.startswith(loopback_origins), (
-            f"unexpected URL in static page: {url}"
-        )
-    for endpoint in LOOPBACK_COMPLETE_URLS:
-        assert endpoint in html
+    assert urls == []
+    assert "fetch(" not in html
+    assert "XMLHttpRequest" not in html
+    assert "sendBeacon" not in html
 
     # No externally-loaded resources of any kind.
     assert "<img" not in html
@@ -551,6 +541,13 @@ def test_static_callback_page_has_no_external_resources():
     assert "no-referrer" in html
     assert "Content-Security-Policy" in html
     assert "default-src 'none'" in html
+    assert "connect-src 'none'" in html
+    assert "'unsafe-inline'" not in html
+    for tag in ("style", "script"):
+        body = re.search(rf"<{tag}>(.*?)</{tag}>", html, re.DOTALL)
+        assert body is not None
+        digest = base64.b64encode(hashlib.sha256(body.group(1).encode()).digest()).decode()
+        assert f"sha256-{digest}" in html
     assert "form-action 'none'" in html
     assert "base-uri 'none'" in html
     # Fragment-first reading with query fallback.

@@ -112,6 +112,12 @@ def test_unhandled_cloudflare_error_is_sanitized_and_never_cached(test_client, c
 def test_cloudflare_setup_documents_current_dashboard_permissions(test_client) -> None:
     response = test_client.get("/api/connections/cloudflare/setup")
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store, private"
+    assert response.json()["oauth_configured"] is False
+    assert response.json()["available"] is False
+    assert response.json()["configuration_error"] == (
+        "Cloudflare OAuth is not configured for this deployment."
+    )
     assert response.json()["required_permissions"] == [
         "Account / Workers Scripts / Edit",
         "Account / Zero Trust / Edit",

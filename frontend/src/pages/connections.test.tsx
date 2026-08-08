@@ -37,6 +37,8 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 
 const setup = {
   available: true,
+  oauth_configured: true,
+  configuration_error: null,
   origin: "http://lnswitchboard:21212",
   required_permissions: [
     "Account: Workers Scripts Edit",
@@ -184,6 +186,23 @@ test("keeps Cloudflare visible but disabled when the connector is unavailable", 
   expect(screen.queryByLabelText(/API token/i)).not.toBeInTheDocument()
   expect(screen.getAllByText(/tokens never leave this device/)).not.toHaveLength(0)
   expect(document.body.textContent).not.toContain("22121")
+})
+
+test("explains when the deployment has not configured its OAuth client", async () => {
+  vi.mocked(api.cloudflareSetup).mockResolvedValue({
+    ...setup,
+    available: false,
+    oauth_configured: false,
+    configuration_error: "Cloudflare OAuth is not configured for this deployment.",
+  })
+
+  renderPage()
+
+  expect(await screen.findByText("OAuth not configured")).toBeVisible()
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Cloudflare OAuth is not configured for this deployment.",
+  )
+  expect(screen.getByRole("button", { name: "Connect Cloudflare" })).toBeDisabled()
 })
 
 test("shows the OAuth scopes the consent screen will request without token guidance", async () => {

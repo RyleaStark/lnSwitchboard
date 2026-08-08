@@ -329,13 +329,18 @@ function CloudflareConnectionsPage() {
               <Badge variant="outline">Ready to connect</Badge>
             ) : (
               <Badge variant="secondary">
-                Connector not installed
+                {setup.data?.oauth_configured === false ? "OAuth not configured" : "Connector not installed"}
               </Badge>
             )}
           </div>
         </div>
 
         <div className="mt-6">
+          {setup.data?.configuration_error ? (
+            <p role="alert" className="mb-4 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {setup.data.configuration_error}
+            </p>
+          ) : null}
           {cloudflareConnection && reconnectNotice === null ? (
             <ConnectedCloudflare
               connection={cloudflareConnection}
