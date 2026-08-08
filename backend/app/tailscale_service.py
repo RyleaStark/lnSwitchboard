@@ -7,6 +7,7 @@ import re
 import secrets
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlsplit
 
@@ -18,6 +19,25 @@ FUNNEL_PORT = 443
 FUNNEL_PORT_CAPABILITY = "https://tailscale.com/cap/funnel-ports"
 _DEVICE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def key_expiry_metadata(self_status: Mapping[str, Any]) -> dict[str, object]:
+    """Return safe, user-facing key-expiry metadata from Tailscale status."""
+    raw_expiry = self_status.get("KeyExpiry")
+    if not isinstance(raw_expiry, str) or not raw_expiry:
+        return {"key_expiry_enabled": False}
+    try:
+        expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+    except ValueError:
+        return {"key_expiry_enabled": False}
+    if expiry.year <= 1:
+        return {"key_expiry_enabled": False}
+    remaining_seconds = max(0, (expiry - datetime.now(timezone.utc)).total_seconds())
+    return {
+        "key_expiry_enabled": True,
+        "key_expiry_at": expiry.isoformat(),
+        "key_expiry_days_remaining": int((remaining_seconds + 86399) // 86400),
+    }
 
 
 class TailscaleServiceError(RuntimeError):
@@ -586,7 +606,7 @@ class TailscaleService:
             external_id=external_id,
             label="Tailscale Funnel",
             status="error",
-            public_metadata={"device_name": device_name, "origin": _FIXED_ORIGIN},
+            public_metadata={"device_name": device_name, "origin": _FIXED_ORIGIN, **key_expiry_metadata(self_status)},
             last_error="Missing Tailscale prerequisites: " + ", ".join(missing),
         )
         self.store.replace_domains(
@@ -618,7 +638,7 @@ class TailscaleService:
             external_id=external_id,
             label="Tailscale Funnel",
             status="connected",
-            public_metadata={"device_name": device_name, "origin": _FIXED_ORIGIN},
+            public_metadata={"device_name": device_name, "origin": _FIXED_ORIGIN, **key_expiry_metadata(self_status)},
         )
         self.store.replace_domains(
             connection.id,
@@ -663,7 +683,7 @@ class TailscaleService:
                 external_id=existing.external_id,
                 label=existing.label,
                 status="error",
-                public_metadata={"device_name": device_name, "origin": _FIXED_ORIGIN},
+                public_metadata={"device_name": device_name, "origin": _FIXED_ORIGIN, **key_expiry_metadata(self_status)},
                 last_error="Missing Tailscale prerequisites: " + ", ".join(missing),
             )
             self.store.replace_domains(

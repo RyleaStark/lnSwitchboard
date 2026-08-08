@@ -603,11 +603,20 @@ function ConnectedTailscale({
   onDisconnect: () => void
 }) {
   const disabled = managementDisabled || refreshing || disconnecting
+  const keyExpiryEnabled = connection.public_metadata.key_expiry_enabled === true
+  const keyExpiryDays = connection.public_metadata.key_expiry_days_remaining
+  const daysRemaining = typeof keyExpiryDays === "number" && Number.isFinite(keyExpiryDays) ? Math.max(0, Math.ceil(keyExpiryDays)) : null
   return (
     <div className="flex flex-col gap-5">
       {managementDisabled ? (
         <p role="alert" className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
           Restore the Tailscale connector to refresh or disconnect this connection.
+        </p>
+      ) : null}
+      {keyExpiryEnabled ? (
+        <p role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-foreground">
+          <span className="font-medium">Tailscale key expiry is enabled.</span>{" "}
+          Disable key expiry for this device in the Tailscale admin console{daysRemaining !== null ? `, or reconnect Tailscale in ${daysRemaining} ${daysRemaining === 1 ? "day" : "days"}.` : "."}
         </p>
       ) : null}
       {connection.domains.map((domain) => (
