@@ -9,6 +9,7 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..cloudflare_client import CloudflareAPIError
+from ..cloudflare_oauth import CloudflareOAuthReauthRequiredError
 from ..cloudflare_service import (
     CloudflareConflictError,
     CloudflareNotFoundError,
@@ -39,7 +40,10 @@ _Result = TypeVar("_Result")
 CLOUDFLARE_AUTHORIZATION_COOKIE = "lnswitchboard_cloudflare_authorization"
 TAILSCALE_LOGIN_COOKIE = "lnswitchboard_tailscale_login"
 _REQUIRED_PERMISSIONS = [
-    "Account / Cloudflare One Connectors / Edit",
+    "Account / Workers Scripts / Edit",
+    "Account / Zero Trust / Edit",
+    "Account / Access: Apps and Policies / Edit",
+    "Zone / Workers Routes / Edit",
     "Zone / DNS / Edit",
     "Zone / Zone / Read",
 ]
@@ -66,9 +70,15 @@ def _serialize_connection(connection: ProviderConnection) -> dict[str, object]:
 
 class CloudflareProvisionRequest(BaseModel):
     account_id: str
-    tunnel_id: str
     zone_id: str
     hostname: str
+
+
+class CloudflareAuthorizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    grant_id: str = Field(min_length=1, max_length=256)
+    account_id: str = Field(min_length=1, max_length=64)
 
 
 class CloudflareDomainRequest(BaseModel):
@@ -136,6 +146,11 @@ async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Resu
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
+        ) from exc
+    except CloudflareOAuthReauthRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cloudflare authorization expired; reconnect Cloudflare",
         ) from exc
     except CloudflareServiceError as exc:
         raise HTTPException(
@@ -292,7 +307,7 @@ async def cloudflare_setup(
         "available": settings.cloudflared_connector_enabled,
         "origin": settings.cloudflared_origin_url,
         "required_permissions": _REQUIRED_PERMISSIONS,
-        "authorization_method": "api_token",
+        "authorization_method": "oauth",
     }
 
 
@@ -300,32 +315,12 @@ async def cloudflare_setup(
     "/cloudflare/authorize",
 )
 async def authorize_cloudflare(
-    request: Request,
+    request: CloudflareAuthorizeRequest,
     response: Response,
     service: CloudflareService = Depends(get_cloudflare_service_dep),
 ) -> dict[str, object]:
-    try:
-        payload = await request.json()
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Invalid Cloudflare authorization request",
-        ) from exc
-    api_token = payload.get("api_token") if isinstance(payload, dict) else None
-    account_id = payload.get("account_id") if isinstance(payload, dict) else None
-    tunnel_id = payload.get("tunnel_id") if isinstance(payload, dict) else None
-    if (
-        not isinstance(api_token, str)
-        or not isinstance(account_id, str)
-        or not isinstance(tunnel_id, str)
-        or not 1 <= len(api_token) <= 4096
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Invalid Cloudflare authorization request",
-        )
     authorization = await _cloudflare_call(
-        lambda: service.authorize(api_token, account_id, tunnel_id)
+        lambda: service.authorize_grant(request.grant_id, request.account_id)
     )
     response.set_cookie(
         CLOUDFLARE_AUTHORIZATION_COOKIE,
@@ -396,7 +391,6 @@ async def provision_cloudflare(
         lambda: service.provision(
             authorization_id=authorization_id,
             account_id=request.account_id,
-            tunnel_id=request.tunnel_id,
             zone_id=request.zone_id,
             hostname=request.hostname,
         )

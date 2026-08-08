@@ -6,24 +6,23 @@ from backend.app.cloudflare_service import CloudflareUnavailableError
 from backend.app.main import admin_app
 
 ACCOUNT_ID = "a" * 32
-TUNNEL_ID = "1" * 32
 ZONE_ID = "b" * 32
 SECOND_ZONE_ID = "d" * 32
 
 
 class FakeCloudflareService:
     def __init__(self) -> None:
-        self.authorize_request: tuple[str, str, str] | None = None
+        self.authorize_request: tuple[str, str] | None = None
         self.provision_request: dict[str, str] | None = None
 
-    async def authorize(self, api_token: str, account_id: str, tunnel_id: str):
-        self.authorize_request = (api_token, account_id, tunnel_id)
+    async def authorize_grant(self, grant_id: str, account_id: str):
+        self.authorize_request = (grant_id, account_id)
         return {"authorization_id": "authorization-flow-id", "accounts": [{"id": account_id, "name": "Example account", "zones": [{"id": ZONE_ID, "name": "example.com"}]}]}
 
-    async def provision(self, *, authorization_id: str, account_id: str, tunnel_id: str, zone_id: str, hostname: str):
-        self.provision_request = {"authorization_id": authorization_id, "account_id": account_id, "tunnel_id": tunnel_id, "zone_id": zone_id, "hostname": hostname}
+    async def provision(self, *, authorization_id: str, account_id: str, zone_id: str, hostname: str):
+        self.provision_request = {"authorization_id": authorization_id, "account_id": account_id, "zone_id": zone_id, "hostname": hostname}
         store = deps._get_connection_store()
-        connection = store.upsert_connection(provider="cloudflare", external_id=tunnel_id, label="Cloudflare Tunnel", status="provisioning", account_id=account_id, public_metadata={"origin": "http://lnswitchboard:21212"})
+        connection = store.upsert_connection(provider="cloudflare", external_id="lnswitchboard-mesh-node", label="Cloudflare", status="provisioning", account_id=account_id, public_metadata={"origin": "http://lnswitchboard:21212"})
         store.replace_domains(connection.id, [{"hostname": hostname, "status": "pending", "zone_id": zone_id}])
         return store.get_connection(connection.id)
 
@@ -58,17 +57,17 @@ class FakeCloudflareService:
 
 
 class UnavailableCloudflareService(FakeCloudflareService):
-    async def authorize(self, api_token: str, account_id: str, tunnel_id: str):
+    async def authorize_grant(self, grant_id: str, account_id: str):
         raise CloudflareUnavailableError("not installed")
 
 
 class ExplodingCloudflareService(FakeCloudflareService):
-    async def authorize(self, api_token: str, account_id: str, tunnel_id: str):
+    async def authorize_grant(self, grant_id: str, account_id: str):
         raise RuntimeError("unexpected sensitive failure")
 
 
 class ConflictingCloudflareService(FakeCloudflareService):
-    async def authorize(self, api_token: str, account_id: str, tunnel_id: str):
+    async def authorize_grant(self, grant_id: str, account_id: str):
         raise CloudflareAPIError(409)
 
 
@@ -79,7 +78,7 @@ def test_cloudflare_configuration_conflict_is_returned_as_retryable_409(test_cli
     try:
         response = test_client.post(
             "/api/connections/cloudflare/authorize",
-            json={"api_token": "secret", "account_id": ACCOUNT_ID, "tunnel_id": TUNNEL_ID},
+            json={"grant_id": "test-grant", "account_id": ACCOUNT_ID},
         )
     finally:
         admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
@@ -98,7 +97,7 @@ def test_unhandled_cloudflare_error_is_sanitized_and_never_cached(test_client, c
     try:
         response = test_client.post(
             "/api/connections/cloudflare/authorize",
-            json={"api_token": "secret", "account_id": ACCOUNT_ID, "tunnel_id": TUNNEL_ID},
+            json={"grant_id": "test-grant", "account_id": ACCOUNT_ID},
         )
     finally:
         admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
@@ -114,35 +113,38 @@ def test_cloudflare_setup_documents_current_dashboard_permissions(test_client) -
     response = test_client.get("/api/connections/cloudflare/setup")
     assert response.status_code == 200
     assert response.json()["required_permissions"] == [
-        "Account / Cloudflare One Connectors / Edit",
+        "Account / Workers Scripts / Edit",
+        "Account / Zero Trust / Edit",
+        "Account / Access: Apps and Policies / Edit",
+        "Zone / Workers Routes / Edit",
         "Zone / DNS / Edit",
         "Zone / Zone / Read",
     ]
-    assert "Cloudflare Tunnel" not in response.text
+    assert response.json()["authorization_method"] == "oauth"
 
 
-def test_cloudflare_api_collects_write_only_token_and_explicit_existing_tunnel_ids(test_client) -> None:
+def test_cloudflare_api_authorizes_with_grant_and_provisions_without_tunnel_ids(test_client) -> None:
     service = FakeCloudflareService()
     admin_app.dependency_overrides[deps.get_cloudflare_service_dep] = lambda: service
     secret = "do-not-return-api-token"
     try:
-        authorized = test_client.post("/api/connections/cloudflare/authorize", json={"api_token": secret, "account_id": ACCOUNT_ID, "tunnel_id": TUNNEL_ID})
-        provisioned = test_client.post("/api/connections/cloudflare/provision", json={"account_id": ACCOUNT_ID, "tunnel_id": TUNNEL_ID, "zone_id": ZONE_ID, "hostname": "pay.example.com"}, cookies={"lnswitchboard_cloudflare_authorization": "authorization-flow-id"})
+        authorized = test_client.post("/api/connections/cloudflare/authorize", json={"grant_id": secret, "account_id": ACCOUNT_ID})
+        provisioned = test_client.post("/api/connections/cloudflare/provision", json={"account_id": ACCOUNT_ID, "zone_id": ZONE_ID, "hostname": "pay.example.com"}, cookies={"lnswitchboard_cloudflare_authorization": "authorization-flow-id"})
     finally:
         admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
     assert authorized.status_code == 200
     assert authorized.headers["cache-control"] == "no-store, private"
     assert authorized.json() == {"accounts": [{"id": ACCOUNT_ID, "name": "Example account", "zones": [{"id": ZONE_ID, "name": "example.com"}]}]}
-    assert service.authorize_request == (secret, ACCOUNT_ID, TUNNEL_ID)
+    assert service.authorize_request == (secret, ACCOUNT_ID)
     assert secret not in authorized.text
     assert provisioned.status_code == 201
     assert provisioned.headers["cache-control"] == "no-store, private"
-    assert service.provision_request and service.provision_request["tunnel_id"] == TUNNEL_ID
+    assert service.provision_request and "tunnel_id" not in service.provision_request
     assert secret not in provisioned.text
 
 
-def test_cloudflare_authorize_requires_explicit_existing_tunnel_ids(test_client) -> None:
-    response = test_client.post("/api/connections/cloudflare/authorize", json={"api_token": "secret"})
+def test_cloudflare_authorize_requires_grant_and_account(test_client) -> None:
+    response = test_client.post("/api/connections/cloudflare/authorize", json={"grant_id": "test-grant"})
     assert response.status_code == 422
     assert response.headers["cache-control"] == "no-store, private"
     assert "secret" not in response.text
@@ -154,7 +156,7 @@ def test_cloudflare_api_lists_adds_and_removes_authorized_domains(test_client) -
     try:
         provisioned = test_client.post(
             "/api/connections/cloudflare/provision",
-            json={"account_id": ACCOUNT_ID, "tunnel_id": TUNNEL_ID, "zone_id": ZONE_ID, "hostname": "example.com"},
+            json={"account_id": ACCOUNT_ID, "zone_id": ZONE_ID, "hostname": "example.com"},
             cookies={"lnswitchboard_cloudflare_authorization": "authorization-flow-id"},
         )
         connection_id = provisioned.json()["id"]
@@ -200,7 +202,7 @@ def test_cloudflare_api_lists_adds_and_removes_authorized_domains(test_client) -
 def test_cloudflare_unavailable_maps_to_conflict_without_secret_echo(test_client) -> None:
     admin_app.dependency_overrides[deps.get_cloudflare_service_dep] = UnavailableCloudflareService
     try:
-        response = test_client.post("/api/connections/cloudflare/authorize", json={"api_token": "secret", "account_id": ACCOUNT_ID, "tunnel_id": TUNNEL_ID})
+        response = test_client.post("/api/connections/cloudflare/authorize", json={"grant_id": "test-grant", "account_id": ACCOUNT_ID})
     finally:
         admin_app.dependency_overrides.pop(deps.get_cloudflare_service_dep, None)
     assert response.status_code == 409

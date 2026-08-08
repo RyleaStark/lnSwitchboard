@@ -10,7 +10,7 @@ import secrets as random_secrets
 import time
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlsplit
 
 from .cloudflare_client import PLACEHOLDER_DNS_CONTENT, CloudflareAPIError
@@ -123,6 +123,7 @@ class CloudflareService:
         token_path: Path,
         origin_url: str,
         token_gid: int,
+        access_token_resolver: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         self.store = store
         self.secrets = secrets
@@ -131,6 +132,7 @@ class CloudflareService:
         self.token_path = Path(token_path)
         self.origin_url = self._validate_origin_url(origin_url)
         self.token_gid = token_gid
+        self.access_token_resolver = access_token_resolver
 
         self._provision_lock = asyncio.Lock()
 
@@ -214,6 +216,30 @@ class CloudflareService:
             raise CloudflareValidationError("Cloudflare API token is required")
         account_id = self._normalize_resource_id(account_id, "account ID")
         client = self.client_factory(token)
+        authorized_accounts = await self._verify_and_list(client, account_id)
+        return self._store_authorization(
+            {"api_token": token, "account_id": account_id}, authorized_accounts
+        )
+
+    async def authorize_grant(self, grant_id: str, account_id: str) -> dict[str, Any]:
+        """Authorize via an OAuth grant instead of a pasted API token."""
+        self._require_connector()
+        grant_id = grant_id.strip()
+        if not grant_id:
+            raise CloudflareValidationError("Cloudflare authorization grant is required")
+        if self.access_token_resolver is None:
+            raise CloudflareServiceError("Cloudflare OAuth access is unavailable")
+        access_token = await self.access_token_resolver(grant_id)
+        account_id = self._normalize_resource_id(account_id, "account ID")
+        client = self.client_factory(access_token)
+        authorized_accounts = await self._verify_and_list(client, account_id)
+        return self._store_authorization(
+            {"grant_id": grant_id, "account_id": account_id}, authorized_accounts
+        )
+
+    async def _verify_and_list(
+        self, client: CloudflareClientProtocol, account_id: str
+    ) -> list[dict[str, Any]]:
         await client.verify_token()
         try:
             accounts = await client.list_accounts()
@@ -242,13 +268,17 @@ class CloudflareService:
                 ],
             }
         ]
+        return authorized_accounts
+
+    def _store_authorization(
+        self, credential: dict[str, str], authorized_accounts: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         authorization_id = random_secrets.token_urlsafe(24)
         self.secrets.set(
             f"{_AUTHORIZATION_PREFIX}{authorization_id}",
             {
-                "api_token": token,
+                **credential,
                 "created_at": time.time(),
-                "account_id": account_id,
             },
         )
         return {"authorization_id": authorization_id, "accounts": authorized_accounts}
@@ -400,10 +430,12 @@ class CloudflareService:
                     }
                 ],
             )
-            self.secrets.set(
-                connection.id,
-                {"api_token": str(credential_payload["api_token"])},
+            credential = (
+                {"api_token": str(credential_payload["api_token"])}
+                if credential_payload.get("api_token")
+                else {"grant_id": str(credential_payload["grant_id"])}
             )
+            self.secrets.set(connection.id, credential)
         except Exception:
             if connection is not None:
                 self.secrets.delete(connection.id)
@@ -1352,9 +1384,15 @@ class CloudflareService:
     ) -> CloudflareClientProtocol:
         del owner_id
         api_token = payload.get("api_token")
-        if not isinstance(api_token, str) or not api_token:
-            raise CloudflareServiceError("Cloudflare API token is unavailable")
-        return self.client_factory(api_token)
+        if isinstance(api_token, str) and api_token:
+            return self.client_factory(api_token)
+        grant_id = payload.get("grant_id")
+        if isinstance(grant_id, str) and grant_id:
+            if self.access_token_resolver is None:
+                raise CloudflareServiceError("Cloudflare OAuth access is unavailable")
+            access_token = await self.access_token_resolver(grant_id)
+            return self.client_factory(access_token)
+        raise CloudflareServiceError("Cloudflare API token is unavailable")
 
     async def _connection_client(self, connection_id: str) -> CloudflareClientProtocol:
         self._require_connection(connection_id)

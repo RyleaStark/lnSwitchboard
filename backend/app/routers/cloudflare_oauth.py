@@ -22,9 +22,7 @@ from ..cloudflare_oauth import (
     CloudflareOAuthReauthRequiredError,
     CloudflareOAuthStateError,
 )
-from ..config import Settings
-from ..connection_secret_store import ConnectionSecretStore
-from ..deps import get_connection_secret_store_dep, get_settings_dep
+from .. import deps as app_deps
 
 router = APIRouter(prefix="/api/cloudflare/oauth", tags=["cloudflare-oauth"])
 
@@ -42,11 +40,10 @@ def _set_private_no_store(response: Response) -> None:
 
 
 async def get_cloudflare_oauth_manager_dep(
-    settings: Settings = Depends(get_settings_dep),
-    secrets: ConnectionSecretStore = Depends(get_connection_secret_store_dep),
+    manager: CloudflareOAuthManager = Depends(app_deps.get_cloudflare_oauth_manager_dep),
 ) -> CloudflareOAuthManager:
-    """Build the OAuth manager. Integration may cache this in deps later."""
-    return CloudflareOAuthManager(settings=settings, secret_store=secrets)
+    """Share the cached manager (and its access-token cache) with the app."""
+    return manager
 
 
 class BeginRequest(BaseModel):

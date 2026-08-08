@@ -348,6 +348,65 @@ def call_names(client: FakeCloudflareClient) -> list[str]:
     return [name for name, _ in client.calls]
 
 
+@pytest.mark.anyio
+async def test_oauth_grant_flow_resolves_access_tokens_and_persists_grant_id(
+    tmp_path: Path,
+) -> None:
+    store = ConnectionStore(tmp_path / "connections.db")
+    secrets = ConnectionSecretStore(tmp_path / "connections.db", tmp_path / "connection.key")
+    client = FakeCloudflareClient()
+    resolved: list[str] = []
+
+    async def resolver(grant_id: str) -> str:
+        resolved.append(grant_id)
+        return "access-token"
+
+    service = CloudflareService(
+        store=store,
+        secrets=secrets,
+        client_factory=lambda _token: client,
+        connector_enabled=True,
+        token_path=tmp_path / "mesh" / "node.env",
+        origin_url="http://app:21212",
+        token_gid=os.getgid(),
+        access_token_resolver=resolver,
+    )
+
+    authorization = await service.authorize_grant("grant-123", ACCOUNT_ID)
+    connection = await service.provision(
+        authorization_id=str(authorization["authorization_id"]),
+        account_id=ACCOUNT_ID,
+        zone_id=ZONE_ID,
+        hostname="example.com",
+    )
+
+    assert secrets.get(connection.id) == {"grant_id": "grant-123"}
+    assert resolved == ["grant-123", "grant-123"]
+
+    await service.refresh_status(connection.id)
+    assert resolved == ["grant-123", "grant-123", "grant-123"]
+
+
+@pytest.mark.anyio
+async def test_grant_payload_without_resolver_fails_closed(tmp_path: Path) -> None:
+    store = ConnectionStore(tmp_path / "connections.db")
+    secrets = ConnectionSecretStore(tmp_path / "connections.db", tmp_path / "connection.key")
+    client = FakeCloudflareClient()
+    service = CloudflareService(
+        store=store,
+        secrets=secrets,
+        client_factory=lambda _token: client,
+        connector_enabled=True,
+        token_path=tmp_path / "mesh" / "node.env",
+        origin_url="http://app:21212",
+        token_gid=os.getgid(),
+    )
+    secrets.set("owner", {"grant_id": "grant-123"})
+
+    with pytest.raises(CloudflareServiceError, match="OAuth access is unavailable"):
+        await service._client_from_payload("owner", {"grant_id": "grant-123"})
+
+
 @pytest.mark.parametrize(
     "origin_url",
     [

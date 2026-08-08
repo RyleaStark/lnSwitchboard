@@ -7,6 +7,7 @@ from functools import lru_cache
 from fastapi import Depends, HTTPException, Request, status
 
 from .cloudflare_client import CloudflareClient
+from .cloudflare_oauth import CloudflareOAuthManager
 from .cloudflare_service import CloudflareService
 from .config import Settings, get_settings
 from .connection_secret_store import ConnectionSecretStore
@@ -79,6 +80,14 @@ def _get_connection_secret_store() -> ConnectionSecretStore:
 
 
 @lru_cache()
+def _get_cloudflare_oauth_manager() -> CloudflareOAuthManager:
+    return CloudflareOAuthManager(
+        settings=get_settings(),
+        secret_store=_get_connection_secret_store(),
+    )
+
+
+@lru_cache()
 def _get_cloudflare_service() -> CloudflareService:
     settings = get_settings()
     return CloudflareService(
@@ -89,6 +98,7 @@ def _get_cloudflare_service() -> CloudflareService:
         token_path=settings.cloudflared_token_path,
         origin_url=settings.cloudflared_origin_url,
         token_gid=settings.cloudflared_token_gid,
+        access_token_resolver=_get_cloudflare_oauth_manager().get_access_token,
     )
 
 
@@ -185,6 +195,10 @@ async def get_connection_secret_store_dep() -> ConnectionSecretStore:
 
 async def get_cloudflare_service_dep() -> CloudflareService:
     return _get_cloudflare_service()
+
+
+async def get_cloudflare_oauth_manager_dep() -> CloudflareOAuthManager:
+    return _get_cloudflare_oauth_manager()
 
 
 async def get_tailscale_service_dep() -> TailscaleService:

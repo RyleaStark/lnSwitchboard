@@ -17,6 +17,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from .deps import (
+    get_cloudflare_oauth_manager_dep,
     get_cloudflare_service_dep,
     get_connection_store_dep,
     get_ln_address_store_dep,
@@ -34,6 +35,7 @@ from .macaroon_store import MacaroonNotConfiguredError
 from .nip05_store import NostrIdentityStore
 from .request_utils import get_public_domain, get_public_host
 from .routers import connections as connections_router
+from .routers import cloudflare_oauth as cloudflare_oauth_router
 from .routers import ln_addresses as ln_addresses_router
 from .routers import lnurl as lnurl_router
 from .routers import nip05 as nip05_router
@@ -232,6 +234,8 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # pragma: no cover - network runtime
             LOGGER.warning("Unable to recover incomplete Cloudflare provisioning: %s", exc)
         else:
+            (await get_cloudflare_oauth_manager_dep()).purge_expired_flows()
+
             async def purge_expired_cloudflare_authorizations() -> None:
                 while True:
                     await asyncio.sleep(60)
@@ -416,6 +420,7 @@ _add_cloudflare_response_privacy(admin_app)
 _add_request_security(public_app)
 
 admin_app.include_router(ui_router.router)
+admin_app.include_router(cloudflare_oauth_router.router)
 admin_app.include_router(connections_router.router)
 admin_app.include_router(webhooks_router.router)
 admin_app.include_router(ln_addresses_router.api_router)

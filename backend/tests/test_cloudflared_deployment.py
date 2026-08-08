@@ -56,12 +56,10 @@ def test_compose_never_exposes_docker_socket_or_admin_origin_to_cloudflared() ->
     assert "21212" in raw
 
 
-def test_cloudflare_onboarding_requires_no_oauth_configuration() -> None:
-    deployment_files = [
-        ROOT / ".env.example",
-        ROOT / "docker-compose.yml",
-        ROOT / "backend" / "app" / "config.py",
-    ]
+def test_cloudflare_onboarding_uses_oauth_configuration() -> None:
+    """Cloudflare onboarding is OAuth-only; the API-token path is retired."""
+    config = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
 
-    for path in deployment_files:
-        assert "CLOUDFLARE_OAUTH" not in path.read_text(encoding="utf-8")
+    assert "cloudflare_oauth_client_id" in config
+    assert "cloudflare_oauth_authorize_url" in config
+    assert "cloudflare_oauth_token_url" in config
