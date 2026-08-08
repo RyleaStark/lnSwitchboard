@@ -8,7 +8,7 @@ import os
 import re
 import secrets as random_secrets
 import time
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlsplit
@@ -32,6 +32,19 @@ _RESOURCE_ID = re.compile(r"^[a-fA-F0-9]{32}$")
 _CONNECTION_OWNER_ID = re.compile(
     r"^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$", re.IGNORECASE
 )
+
+# Cloudflare One prerequisites for Mesh networking, per
+# https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-mesh/get-started/
+# ("What the wizard configures" / "Existing Cloudflare One accounts") and
+# .../cloudflare-mesh/routes/ ("Hostname routes" prerequisites).
+MESH_IP_RANGE = "100.96.0.0/12"
+DEFAULT_CGNAT_EXCLUSION = "100.64.0.0/10"
+MESH_INCLUDE_DESCRIPTION = "Cloudflare Mesh device IPs (managed by lnSwitchboard)"
+WARP_ENROLLMENT_APP_NAME = "Warp device enrollment"
+PREREQ_METADATA_KEY = "cloudflare_one_prerequisites"
+_PREREQ_PASSED = "passed"
+_PREREQ_CONFIGURED = "configured"
+_PREREQ_MANUAL = "needs-manual-action"
 
 
 class CloudflareServiceError(RuntimeError):
@@ -72,6 +85,30 @@ class CloudflareClientProtocol(Protocol):
         self, account_id: str, node_id: str
     ) -> list[dict[str, Any]]: ...
     async def delete_mesh_node(self, account_id: str, node_id: str) -> None: ...
+
+    async def list_access_apps(self, account_id: str) -> list[dict[str, Any]]: ...
+    async def create_access_app(
+        self, account_id: str, app: dict[str, Any]
+    ) -> dict[str, Any]: ...
+    async def list_device_policies(
+        self, account_id: str
+    ) -> list[dict[str, Any]]: ...
+    async def get_default_device_policy(
+        self, account_id: str
+    ) -> dict[str, Any]: ...
+    async def patch_default_device_policy(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]: ...
+    async def get_device_settings(self, account_id: str) -> dict[str, Any]: ...
+    async def patch_device_settings(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]: ...
+    async def get_connectivity_settings(
+        self, account_id: str
+    ) -> dict[str, Any]: ...
+    async def patch_connectivity_settings(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]: ...
 
     async def create_hostname_route(
         self, account_id: str, node_id: str
@@ -315,6 +352,270 @@ class CloudflareService:
         client = await self._client_from_payload(owner_id, payload)
         return owner_id, payload, client
 
+    # ------------------------------------------------------------------
+    # Cloudflare One account prerequisites
+    #
+    # Cloudflare Mesh needs account-level Cloudflare One settings that the
+    # dashboard setup wizard normally applies. The owner approved full
+    # auto-configuration, so this stage reconciles them over the API
+    # instead. It is idempotent: current state is read first and only
+    # missing pieces are created or patched. Operator-owned entries are
+    # never deleted, except the documented default 100.64.0.0/10 CGNAT
+    # split-tunnel exclusion when (and only when) it is the sole entry
+    # blocking the Mesh range. Anything customized beyond that is reported
+    # as needing manual action instead of being mutated. These settings are
+    # account-level enablement and are intentionally never torn down on
+    # disconnect or rollback.
+    # ------------------------------------------------------------------
+
+    async def ensure_account_prerequisites(
+        self, client: CloudflareClientProtocol, account_id: str
+    ) -> dict[str, Any]:
+        """Reconcile Cloudflare One prerequisites and return a structured report.
+
+        The report is secret-free and safe to persist in public_metadata:
+        ``{"status": "satisfied" | "needs-manual-action", "checks": {...}}``
+        where each check is ``{"status": "passed" | "configured" |
+        "needs-manual-action", "detail": <fixed message>}``.
+        """
+        checks: dict[str, dict[str, str]] = {}
+        checks["device_enrollment"] = await self._ensure_device_enrollment(
+            client, account_id
+        )
+        checks["device_profile"] = await self._ensure_device_profile(
+            client, account_id
+        )
+        checks.update(await self._ensure_device_toggles(client, account_id))
+        overall = (
+            "satisfied"
+            if all(check["status"] != _PREREQ_MANUAL for check in checks.values())
+            else "needs-manual-action"
+        )
+        return {"status": overall, "checks": checks}
+
+    @staticmethod
+    def _prereq_check(status: str, detail: str) -> dict[str, str]:
+        return {"status": status, "detail": detail}
+
+    @staticmethod
+    def _split_tunnel_network(entry: dict[str, Any]) -> Any:
+        try:
+            return ip_network(str(entry.get("address", "")).strip(), strict=False)
+        except ValueError:
+            # Split Tunnel entries may also be hostnames, which can never
+            # route (or block) the Mesh IP range.
+            return None
+
+    @classmethod
+    def _split_tunnel_covers(cls, entry: dict[str, Any], mesh_net: Any) -> bool:
+        network = cls._split_tunnel_network(entry)
+        return (
+            network is not None
+            and network.version == mesh_net.version
+            and mesh_net.subnet_of(network)
+        )
+
+    @classmethod
+    def _split_tunnel_blocks(cls, entry: dict[str, Any], mesh_net: Any) -> bool:
+        network = cls._split_tunnel_network(entry)
+        return (
+            network is not None
+            and network.version == mesh_net.version
+            and network.overlaps(mesh_net)
+        )
+
+    async def _ensure_device_enrollment(
+        self, client: CloudflareClientProtocol, account_id: str
+    ) -> dict[str, str]:
+        apps = await client.list_access_apps(account_id)
+        warp_apps = [app for app in apps if app.get("type") == "warp"]
+        for app in warp_apps:
+            policies = app.get("policies")
+            if isinstance(policies, list) and any(
+                isinstance(policy, dict) and policy.get("decision") == "allow"
+                for policy in policies
+            ):
+                return self._prereq_check(
+                    _PREREQ_PASSED, "A device enrollment rule already exists"
+                )
+        if warp_apps:
+            # An operator-managed enrollment application without an allow
+            # policy is never mutated.
+            return self._prereq_check(
+                _PREREQ_MANUAL,
+                "A device enrollment application exists without an allow "
+                "policy; add an enrollment rule in the Cloudflare dashboard",
+            )
+        await client.create_access_app(
+            account_id,
+            {
+                "name": WARP_ENROLLMENT_APP_NAME,
+                "type": "warp",
+                "app_launcher_visible": False,
+                "policies": [
+                    {
+                        "name": "Allow device enrollment",
+                        "decision": "allow",
+                        "include": [{"everyone": {}}],
+                        "precedence": 1,
+                    }
+                ],
+            },
+        )
+        return self._prereq_check(
+            _PREREQ_CONFIGURED,
+            "Created the device enrollment application with an allow policy",
+        )
+
+    async def _ensure_device_profile(
+        self, client: CloudflareClientProtocol, account_id: str
+    ) -> dict[str, str]:
+        policy = await client.get_default_device_policy(account_id)
+        service_mode = policy.get("service_mode_v2")
+        mode_name = (
+            service_mode.get("mode") if isinstance(service_mode, dict) else None
+        )
+        if isinstance(mode_name, str) and mode_name and mode_name != "warp":
+            # Client mode is never switched on a customized profile.
+            return self._prereq_check(
+                _PREREQ_MANUAL,
+                f"The default device profile uses client mode {mode_name!r}; "
+                "Cloudflare Mesh requires Traffic and DNS (warp) mode",
+            )
+        include = [
+            entry
+            for entry in (policy.get("include") or [])
+            if isinstance(entry, dict)
+        ]
+        exclude = [
+            entry
+            for entry in (policy.get("exclude") or [])
+            if isinstance(entry, dict)
+        ]
+        mesh_net = ip_network(MESH_IP_RANGE)
+        if include and exclude:
+            return self._prereq_check(
+                _PREREQ_MANUAL,
+                "The default device profile has both Split Tunnel include and "
+                "exclude lists; review the profile in the Cloudflare dashboard",
+            )
+        if include:
+            # Include mode: adding the Mesh range only widens what routes
+            # through Cloudflare, which is safe on any profile.
+            if any(self._split_tunnel_covers(entry, mesh_net) for entry in include):
+                return self._prereq_check(
+                    _PREREQ_PASSED,
+                    "The default device profile includes the Mesh IP range",
+                )
+            updated = [dict(entry) for entry in include]
+            updated.append(
+                {"address": MESH_IP_RANGE, "description": MESH_INCLUDE_DESCRIPTION}
+            )
+            await client.patch_default_device_policy(
+                account_id, {"include": updated}
+            )
+            return self._prereq_check(
+                _PREREQ_CONFIGURED,
+                f"Added {MESH_IP_RANGE} to the default device profile Split "
+                "Tunnel include list",
+            )
+        # Exclude mode: the Mesh range must not be excluded. Only the exact
+        # documented default CGNAT exclusion may be removed, and only when it
+        # is the sole entry blocking the Mesh range.
+        blockers = [
+            entry for entry in exclude if self._split_tunnel_blocks(entry, mesh_net)
+        ]
+        if not blockers:
+            return self._prereq_check(
+                _PREREQ_PASSED,
+                "The default device profile does not exclude the Mesh IP range",
+            )
+        default_exclusion = ip_network(DEFAULT_CGNAT_EXCLUSION)
+        if (
+            len(blockers) == 1
+            and self._split_tunnel_network(blockers[0]) == default_exclusion
+        ):
+            remaining = [
+                dict(entry) for entry in exclude if entry is not blockers[0]
+            ]
+            await client.patch_default_device_policy(
+                account_id, {"exclude": remaining}
+            )
+            return self._prereq_check(
+                _PREREQ_CONFIGURED,
+                f"Removed the default CGNAT exclusion {DEFAULT_CGNAT_EXCLUSION} "
+                "from the default device profile so the Mesh IP range routes "
+                "through Cloudflare",
+            )
+        blocking = ", ".join(
+            sorted(str(entry.get("address", "")) for entry in blockers)
+        )
+        return self._prereq_check(
+            _PREREQ_MANUAL,
+            f"The default device profile excludes the Mesh IP range "
+            f"{MESH_IP_RANGE} via {blocking}; remove the blocking exclusion "
+            "in the Cloudflare dashboard",
+        )
+
+    async def _ensure_device_toggles(
+        self, client: CloudflareClientProtocol, account_id: str
+    ) -> dict[str, dict[str, str]]:
+        settings = await client.get_device_settings(account_id)
+        connectivity = await client.get_connectivity_settings(account_id)
+        device_missing = {
+            field: True
+            for field in (
+                "gateway_proxy_enabled",
+                "gateway_udp_proxy_enabled",
+                "use_zt_virtual_ip",
+            )
+            if settings.get(field) is not True
+        }
+        connectivity_missing = {
+            field: True
+            for field in ("icmp_proxy_enabled", "offramp_warp_enabled")
+            if connectivity.get(field) is not True
+        }
+        if device_missing:
+            await client.patch_device_settings(account_id, device_missing)
+        if connectivity_missing:
+            await client.patch_connectivity_settings(account_id, connectivity_missing)
+
+        def toggle_status(missing: bool, passed_detail: str, configured_detail: str):
+            if missing:
+                return self._prereq_check(_PREREQ_CONFIGURED, configured_detail)
+            return self._prereq_check(_PREREQ_PASSED, passed_detail)
+
+        return {
+            "gateway_proxy": toggle_status(
+                "gateway_proxy_enabled" in device_missing
+                or "gateway_udp_proxy_enabled" in device_missing
+                or "icmp_proxy_enabled" in connectivity_missing,
+                "The Gateway proxy is enabled for TCP, UDP, and ICMP",
+                "Enabled the Gateway proxy for TCP, UDP, and ICMP",
+            ),
+            "unique_device_ips": toggle_status(
+                "use_zt_virtual_ip" in device_missing,
+                "A unique IP address is assigned to each device",
+                "Enabled assigning a unique IP address to each device",
+            ),
+            "mesh_connectivity": toggle_status(
+                "offramp_warp_enabled" in connectivity_missing,
+                "Cloudflare One traffic can reach enrolled devices",
+                "Enabled Cloudflare One traffic to reach enrolled devices",
+            ),
+        }
+
+    @staticmethod
+    def _prerequisites_manual_action_message(report: dict[str, Any]) -> str:
+        checks = report.get("checks", {})
+        blocked = "; ".join(
+            f"{name}: {check.get('detail', '')}"
+            for name, check in checks.items()
+            if isinstance(check, dict) and check.get("status") == _PREREQ_MANUAL
+        )
+        return f"Cloudflare One prerequisites need manual action: {blocked}"
+
     async def provision(
         self,
         *,
@@ -453,6 +754,18 @@ class CloudflareService:
         }
         dns_adopted = False
         try:
+            # Account-level Cloudflare One prerequisites reconcile before any
+            # mesh/worker mutation; a failure here leaves no remote resources
+            # and the standard compensation below simply removes the intent.
+            prereq_report = await self.ensure_account_prerequisites(
+                client, account_id
+            )
+            metadata[PREREQ_METADATA_KEY] = prereq_report
+            if prereq_report["status"] != "satisfied":
+                raise CloudflareConflictError(
+                    self._prerequisites_manual_action_message(prereq_report)
+                )
+
             progress["node_attempted"] = True
             node_id = await self._create_or_recover_mesh_node(
                 client, account_id, node_name
@@ -645,6 +958,17 @@ class CloudflareService:
             return connection
         client = await self._connection_client(connection_id)
         account_id = str(connection.account_id)
+        prereq_report: dict[str, Any] | None = None
+        prereq_error: str | None = None
+        try:
+            prereq_report = await self.ensure_account_prerequisites(
+                client, account_id
+            )
+        except CloudflareAPIError:
+            prereq_error = "Cloudflare One prerequisites could not be verified"
+        else:
+            if prereq_report["status"] != "satisfied":
+                prereq_error = "Cloudflare One prerequisites need manual action"
         node_id = await self._resolve_node_id(client, account_id, connection)
         if (
             node_id is not None
@@ -664,9 +988,9 @@ class CloudflareService:
             not item.get("is_pending_reconnect", False) for item in remote_connections
         )
 
-        transport_error: str | None = None
+        transport_error: str | None = prereq_error
         if node_id is None:
-            transport_error = "Managed mesh node is missing"
+            transport_error = transport_error or "Managed mesh node is missing"
         content = await client.get_worker_script_content(
             account_id, WORKER_SCRIPT_NAME
         )
@@ -779,6 +1103,8 @@ class CloudflareService:
             status = "degraded"
 
         metadata = dict(connection.public_metadata)
+        if prereq_report is not None:
+            metadata[PREREQ_METADATA_KEY] = prereq_report
         metadata["connector_count"] = len(remote_connections)
         updated = self.store.upsert_connection(
             provider="cloudflare",

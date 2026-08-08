@@ -243,6 +243,96 @@ class CloudflareClient:
         )
 
     # ------------------------------------------------------------------
+    # Cloudflare One account prerequisites (device enrollment, device
+    # profiles, device/connectivity settings)
+    # ------------------------------------------------------------------
+
+    async def list_access_apps(self, account_id: str) -> list[dict[str, Any]]:
+        return await self._list_pages(f"/accounts/{account_id}/access/apps")
+
+    async def create_access_app(
+        self, account_id: str, app: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "POST",
+            f"/accounts/{account_id}/access/apps",
+            json=app,
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def list_device_policies(self, account_id: str) -> list[dict[str, Any]]:
+        result = await self._request(
+            "GET",
+            f"/accounts/{account_id}/devices/policies",
+            params={"per_page": 50},
+        )
+        if not isinstance(result, list):
+            raise CloudflareAPIError(502)
+        return [item for item in result if isinstance(item, dict)]
+
+    async def get_default_device_policy(self, account_id: str) -> dict[str, Any]:
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/devices/policy"
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def patch_default_device_policy(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "PATCH",
+            f"/accounts/{account_id}/devices/policy",
+            json=fields,
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def get_device_settings(self, account_id: str) -> dict[str, Any]:
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/devices/settings"
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def patch_device_settings(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "PATCH",
+            f"/accounts/{account_id}/devices/settings",
+            json=fields,
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def get_connectivity_settings(self, account_id: str) -> dict[str, Any]:
+        result = await self._request(
+            "GET", f"/accounts/{account_id}/zerotrust/connectivity_settings"
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    async def patch_connectivity_settings(
+        self, account_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "PATCH",
+            f"/accounts/{account_id}/zerotrust/connectivity_settings",
+            json=fields,
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError(502)
+        return result
+
+    # ------------------------------------------------------------------
     # Hostname route (internal reachability of the app over the mesh)
     # ------------------------------------------------------------------
 
