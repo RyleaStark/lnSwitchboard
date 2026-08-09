@@ -77,9 +77,9 @@ async def proxy_public_request(request: Request, path: str) -> Response:
         return PlainTextResponse("Request headers too large", status_code=431)
     body = bytearray()
     async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > _MAX_PUBLIC_REQUEST_BYTES:
+        if len(body) + len(chunk) > _MAX_PUBLIC_REQUEST_BYTES:
             return PlainTextResponse("Request body too large", status_code=413)
+        body.extend(chunk)
 
     headers = [
         (name, value)
@@ -105,12 +105,12 @@ async def proxy_public_request(request: Request, path: str) -> Response:
                     "Public backend response headers too large", status_code=502
                 )
             response_body = bytearray()
-            async for chunk in backend.aiter_bytes():
-                response_body.extend(chunk)
-                if len(response_body) > _MAX_PUBLIC_RESPONSE_BYTES:
+            async for chunk in backend.aiter_bytes(chunk_size=64 * 1024):
+                if len(response_body) + len(chunk) > _MAX_PUBLIC_RESPONSE_BYTES:
                     return PlainTextResponse(
                         "Public backend response too large", status_code=502
                     )
+                response_body.extend(chunk)
             response_headers = [
                 (name, value)
                 for name, value in backend.headers.raw
