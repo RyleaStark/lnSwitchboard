@@ -300,25 +300,29 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_cloudflare_oauth_redirect_loopback(cls, value: str) -> str:
         try:
+            if any(
+                character.isspace()
+                or ord(character) < 0x20
+                or ord(character) == 0x7F
+                for character in value
+            ):
+                raise ValueError
             parsed = urlsplit(value)
             host = parsed.hostname
             port = parsed.port
             address = ip_address(host) if host is not None else None
-            is_portable_loopback = (
-                address is not None
-                and address.is_loopback
-                and (address.version == 4 or address == ip_address("::1"))
-            )
-            if not (
-                parsed.scheme == "http"
-                and is_portable_loopback
-                and port is not None
-                and parsed.username is None
-                and parsed.password is None
-                and parsed.path == "/api/cloudflare/oauth/callback"
-                and not parsed.query
-                and not parsed.fragment
-            ):
+            if address is None or port is None or port <= 0:
+                raise ValueError
+            if address.version == 4:
+                if not address.is_loopback or host != str(address):
+                    raise ValueError
+                authority = f"{host}:{port}"
+            elif address == ip_address("::1") and host == "::1":
+                authority = f"[{host}]:{port}"
+            else:
+                raise ValueError
+            expected = f"http://{authority}/api/cloudflare/oauth/callback"
+            if value != expected:
                 raise ValueError
         except ValueError as exc:
             raise ValueError(
@@ -330,11 +334,39 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_cloudflare_oauth_redirect_page(cls, value: str) -> str:
         try:
+            if not value.isascii() or "\\" in value or any(
+                character.isspace()
+                or ord(character) < 0x20
+                or ord(character) == 0x7F
+                for character in value
+            ):
+                raise ValueError
             parsed = urlsplit(value)
-            _ = parsed.port
+            port = parsed.port
+            hostname = parsed.hostname
+            if hostname is None or not hostname.isascii() or len(hostname) > 253:
+                raise ValueError
+            try:
+                address = ip_address(hostname)
+            except ValueError:
+                labels = hostname.split(".")
+                valid_hostname = all(
+                    0 < len(label) <= 63
+                    and label[0].isalnum()
+                    and label[-1].isalnum()
+                    and all(character.isalnum() or character == "-" for character in label)
+                    for label in labels
+                )
+            else:
+                valid_hostname = (
+                    getattr(address, "scope_id", None) is None
+                    and str(address) == hostname
+                )
             if not (
-                parsed.scheme == "https"
-                and parsed.hostname is not None
+                value.startswith("https://")
+                and parsed.scheme == "https"
+                and valid_hostname
+                and (port is None or port > 0)
                 and parsed.username is None
                 and parsed.password is None
                 and not parsed.query

@@ -163,6 +163,13 @@ def test_invalid_trusted_proxy_setting_is_rejected(monkeypatch) -> None:
         "http://127.0.0.1:22121/api/cloudflare/oauth/callback?forward=1",
         "http://user@127.0.0.1:22121/api/cloudflare/oauth/callback",
         "http://127.0.0.1:22121/not-the-oauth-callback",
+        " http://127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "http://127.0.0.1:22121/api/cloudflare/oauth/callback\n",
+        "\thttp://127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "\x01http://127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "\x7fhttp://127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "http://127.0.0.1:0/api/cloudflare/oauth/callback",
+        "http://[0:0:0:0:0:0:0:1]:22121/api/cloudflare/oauth/callback",
     ],
 )
 def test_cloudflare_query_callback_is_restricted_to_the_exact_loopback_endpoint(
@@ -197,6 +204,18 @@ def test_cloudflare_query_callback_accepts_ipv4_and_ipv6_loopback(
         "https://oauth.example/callback/?next=admin",
         "https://oauth.example/callback/#fragment",
         "https:///callback/",
+        " https://oauth.example/callback/",
+        "https://oauth.example/callback/\t",
+        "\x01https://oauth.example/callback/",
+        "\x7fhttps://oauth.example/callback/",
+        "https://oauth.example\\@evil.example/callback/",
+        "https://foo..example/callback/",
+        "https://-foo.example/callback/",
+        "https://foo-.example/callback/",
+        "https://%65xample.com/callback/",
+        "https://oauth.example:0/callback/",
+        "https://[fe80::1%25lo]/callback/",
+        "https://oauth.example/callbäck/",
     ],
 )
 def test_cloudflare_remote_callback_requires_a_clean_https_page(
