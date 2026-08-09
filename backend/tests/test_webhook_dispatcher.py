@@ -291,6 +291,10 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
                         "payerdata_raw": "LEGACY_PAYER_SECRET",
                         "preimage": "LEGACY_PREIMAGE_SECRET",
                         "verify_url": "https://example.invalid/LEGACY_VERIFY_SECRET",
+                        "error": {
+                            "type": "LEGACY_ERROR_TYPE_SECRET",
+                            "message": "LEGACY_ERROR_MESSAGE_SECRET",
+                        },
                     }
                 ),
             ),
@@ -358,6 +362,8 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         "LEGACY_PAYER_SECRET",
         "LEGACY_PREIMAGE_SECRET",
         "LEGACY_VERIFY_SECRET",
+        "LEGACY_ERROR_TYPE_SECRET",
+        "LEGACY_ERROR_MESSAGE_SECRET",
         "LEGACY_EVENT_RESPONSE_SECRET",
         "LEGACY_CLIENT_RESPONSE_SECRET",
         "LEGACY_METADATA_PAYLOAD_SECRET",

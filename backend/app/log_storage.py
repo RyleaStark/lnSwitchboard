@@ -133,6 +133,7 @@ _REQUEST_HISTORY_SECRET_KEYS = {
     "forwarding_target",
     "ln_client_response",
     "metadata_for_hash",
+    "message",
     "memo",
     "payment_request_preview",
     "payer_data",
@@ -158,11 +159,17 @@ def _safe_request_history_details(event: str, details: Any) -> Dict[str, Any] | 
 
     def scrub(value: Any) -> Any:
         if isinstance(value, dict):
-            return {
-                str(key): scrub(item)
-                for key, item in value.items()
-                if str(key) not in _REQUEST_HISTORY_SECRET_KEYS
-            }
+            cleaned: Dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key)
+                if normalized_key == "error":
+                    if item:
+                        cleaned[normalized_key] = {"type": "OperationError"}
+                    continue
+                if normalized_key in _REQUEST_HISTORY_SECRET_KEYS:
+                    continue
+                cleaned[normalized_key] = scrub(item)
+            return cleaned
         if isinstance(value, list):
             return [scrub(item) for item in value]
         return value
@@ -177,6 +184,7 @@ _INVOICE_OPERATIONAL_DROP_KEYS = {
     "forwarding_target",
     "ln_client_response",
     "metadata_for_hash",
+    "message",
     "memo",
     "payment_request_preview",
     "preimage",
@@ -195,11 +203,17 @@ def _safe_invoice_event_details(details: Any) -> Dict[str, Any] | None:
 
     def scrub(value: Any) -> Any:
         if isinstance(value, dict):
-            return {
-                str(key): scrub(item)
-                for key, item in value.items()
-                if str(key) not in _INVOICE_OPERATIONAL_DROP_KEYS
-            }
+            cleaned: Dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key)
+                if normalized_key == "error":
+                    if item:
+                        cleaned[normalized_key] = {"type": "OperationError"}
+                    continue
+                if normalized_key in _INVOICE_OPERATIONAL_DROP_KEYS:
+                    continue
+                cleaned[normalized_key] = scrub(item)
+            return cleaned
         if isinstance(value, list):
             return [scrub(item) for item in value]
         return value
