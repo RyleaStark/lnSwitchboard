@@ -147,7 +147,8 @@ def test_lnurl_nip57_invoice_hashes_raw_zap_request(test_client: TestClient):
 
     logs_resp = test_client.get("/api/logs/recent", params={"page_size": 50})
     invoice_entry = next(item for item in logs_resp.json()["items"] if item["event"] == "invoice")
-    assert invoice_entry["details"]["zap_request"]["event_id"] == event_id(zap_event)
+    assert "zap_request" not in invoice_entry["details"]
+    assert raw not in json.dumps(invoice_entry, sort_keys=True)
 
 
 def test_lnurl_nip57_rejects_invalid_zap_requests(test_client: TestClient):
@@ -184,7 +185,7 @@ def test_lnurl_lud17_lnurlp_scheme_is_recorded(test_client: TestClient):
         None,
     )
     assert entry is not None
-    assert entry["details"]["callback_lnurl"] == "lnurlp://testserver/.well-known/lnurlp/bones"
+    assert "callback_lnurl" not in entry["details"]
 
 
 def test_lnurl_invoice(test_client: TestClient):
@@ -232,45 +233,28 @@ def test_lnurl_invoice(test_client: TestClient):
     )
     assert invoice_entry is not None
     assert invoice_entry["domain"] == "testserver"
-    assert invoice_entry["details"]["invoice"]["payment_request"] == data["pr"]
-    assert invoice_entry["details"]["response"] == data
-    assert invoice_entry["details"]["ln_client_response"] == {
-        "payment_request": data["pr"],
-        "r_hash": invoice_entry["details"]["payment_hash"],
-    }
-    assert invoice_entry["details"]["response"]["successAction"]["tag"] == "message"
-    assert (
-        invoice_entry["details"]["response"]["successAction"]["message"]
-        == "Your payment hit faster than a Lightning bolt — bones@testserver stacked your sats!"
-    )
-    assert (
-        invoice_entry["details"]["metadata"]
-        == expected_metadata
-    )
-    assert invoice_entry["details"]["metadata_entries"][1] == ["text/identifier", "bones@testserver"]
-    assert invoice_entry["details"]["metadata_entries"][2] == ["text/hostname", "testserver"]
-    assert invoice_entry["details"]["metadata_entries"][0] == [
-        "text/plain",
-        "Pay bones@testserver",
-    ]
-    assert invoice_entry["details"]["domain"] == "testserver"
-    assert invoice_entry["details"]["invoice"]["amount_sat"] == 1
-    assert invoice_entry["details"]["comment"] == "Thanks for your work!"
-    assert invoice_entry["details"]["comment_length"] == len("Thanks for your work!")
-    assert invoice_entry["details"]["invoice"]["memo"] == "Pay bones@testserver | Thanks for your work!"
-    assert "payment_hash" in invoice_entry["details"]
-    assert invoice_entry["details"]["verify_url"] == data["verify"]
-    assert invoice_entry["details"]["verify_url_http"] == https_to_http(data["verify"])
-    assert data["verify"].endswith(invoice_entry["details"]["payment_hash"])
     details = invoice_entry["details"]
-    assert details.get("callback_http") == "http://testserver/.well-known/lnurlp/bones"
-    callback_value = details.get("callback")
-    assert callback_value in (
-        None,
-        "http://testserver/.well-known/lnurlp/bones",
-        "lnurlp://testserver/.well-known/lnurlp/bones",
-    )
-    assert details.get("callback_lnurl") == "lnurlp://testserver/.well-known/lnurlp/bones"
+    assert details["invoice"]["amount_sat"] == 1
+    assert "payment_hash" in details
+    assert data["verify"].endswith(details["payment_hash"])
+    assert details["metadata"] == expected_metadata
+    assert details["metadata_entries"][1] == ["text/identifier", "bones@testserver"]
+    assert details["metadata_entries"][2] == ["text/hostname", "testserver"]
+    assert details["comment_length"] == len("Thanks for your work!")
+    exposed = json.dumps(invoice_entry, sort_keys=True)
+    for secret in (data["pr"], data["verify"], "Thanks for your work!"):
+        assert secret not in exposed
+    for key in (
+        "callback",
+        "callback_http",
+        "callback_lnurl",
+        "comment",
+        "ln_client_response",
+        "response",
+        "verify_url",
+        "verify_url_http",
+    ):
+        assert key not in details
 
 
 def test_request_logs_mark_expired_invoices(test_client: TestClient):
@@ -349,12 +333,13 @@ def test_lnurl_verify_flow(test_client: TestClient):
     assert verify_entries
     latest = verify_entries[0]
     assert latest["domain"] == "testserver"
-    assert latest["details"]["response"]["settled"] is True
-    assert latest["details"]["response"]["preimage"] == "01" * 32
+    assert latest["details"]["settled"] is True
     assert latest["details"]["payment_hash"] == payment_hash
-    assert latest["details"]["verify_url"] == verify_url
-    assert latest["details"]["verify_url_http"] == https_to_http(verify_url)
-    assert latest["details"]["domain"] == "testserver"
+    exposed = json.dumps(latest, sort_keys=True)
+    assert "01" * 32 not in exposed
+    assert invoice_data["pr"] not in exposed
+    for key in ("preimage", "payment_request", "response", "verify_url", "verify_url_http"):
+        assert key not in latest["details"]
 
 
 def test_lnurl_verify_invalid_hash(test_client: TestClient):
@@ -377,7 +362,6 @@ def test_lnurl_tag_metadata(test_client: TestClient):
     metadata_entries = json.loads(data["metadata"])
     assert ["text/tag", "vip"] in metadata_entries
     expected_callback_http = "http://testserver/.well-known/lnurlp/bones+vip"
-    expected_callback_lnurl = "lnurlp://testserver/.well-known/lnurlp/bones+vip"
     assert data["callback"] == expected_callback_http
 
     logs_resp = test_client.get("/api/logs/recent", params={"page_size": 50})
@@ -396,9 +380,8 @@ def test_lnurl_tag_metadata(test_client: TestClient):
     assert discovery_entry["details"]["username_raw"] == "bones+vip"
     assert ["text/tag", "vip"] in discovery_entry["details"]["metadata_entries"]
     assert discovery_entry["details"]["domain"] == "testserver"
-    assert discovery_entry["details"].get("callback_http") == expected_callback_http
-    assert discovery_entry["details"].get("callback") in (None, expected_callback_http)
-    assert discovery_entry["details"].get("callback_lnurl") == expected_callback_lnurl
+    for key in ("callback", "callback_http", "callback_lnurl", "response"):
+        assert key not in discovery_entry["details"]
 
 
 def test_lnurl_address_overrides(test_client: TestClient):
@@ -644,7 +627,6 @@ def test_callback_and_ip_respect_forwarded_headers(monkeypatch, test_client: Tes
     assert response.status_code == 200
     data = response.json()
     expected_callback = "https://wallet.example.com:8443/.well-known/lnurlp/alice"
-    expected_callback_lnurl = "lnurlp://wallet.example.com:8443/.well-known/lnurlp/alice"
     assert data["callback"] == expected_callback
 
     logs_resp = test_client.get("/api/logs/recent", params={"page_size": 100})
@@ -658,10 +640,8 @@ def test_callback_and_ip_respect_forwarded_headers(monkeypatch, test_client: Tes
     )
     assert entry is not None
     assert entry["ip"] == "203.0.113.10"
-    assert entry["details"].get("callback") in (None, expected_callback)
-    assert entry["details"].get("callback_http") == expected_callback
-    assert entry["details"].get("callback_lnurl") == expected_callback_lnurl
-    assert entry["details"]["response"] == data
+    for key in ("callback", "callback_http", "callback_lnurl", "proxy", "response"):
+        assert key not in entry["details"]
     expected_metadata = data["metadata"]
     expected_hash = hashlib.sha256(expected_metadata.encode("utf-8")).hexdigest()
     assert entry["details"]["metadata"] == expected_metadata
@@ -674,18 +654,6 @@ def test_callback_and_ip_respect_forwarded_headers(monkeypatch, test_client: Tes
         "Pay alice@wallet.example.com",
     ]
     assert "invoice" not in entry["details"]
-
-    proxy = entry["details"]["proxy"]
-    assert proxy["resolved"]["proto"] == "https"
-    assert proxy["resolved"]["netloc"] == "wallet.example.com:8443"
-    assert proxy["sources"]["proto"] == "Forwarded proto"
-    assert proxy["sources"]["host"] == "Forwarded host"
-    assert proxy["sources"]["port"] == "x-forwarded-port"
-    assert proxy["headers"]["forwarded"] == headers["Forwarded"]
-    assert proxy["headers"]["x-forwarded-port"] == headers["X-Forwarded-Port"]
-    assert proxy["client"]["ip"] == "203.0.113.10"
-    assert proxy["client"]["source"] == "x-forwarded-for"
-
 
 def test_client_ip_walks_xff_from_the_trusted_peer(monkeypatch, test_client: TestClient):
     monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
@@ -701,7 +669,6 @@ def test_client_ip_walks_xff_from_the_trusted_peer(monkeypatch, test_client: Tes
     assert response.status_code == 200
     data = response.json()
     expected_callback = "https://public.example.com/.well-known/lnurlp/cloudflare"
-    expected_callback_lnurl = "lnurlp://public.example.com/.well-known/lnurlp/cloudflare"
     assert data["callback"] == expected_callback
 
     logs_resp = test_client.get("/api/logs/recent", params={"page_size": 100})
@@ -719,10 +686,8 @@ def test_client_ip_walks_xff_from_the_trusted_peer(monkeypatch, test_client: Tes
     )
     assert entry is not None
     assert entry["ip"] == "198.51.100.23"
-    assert entry["details"].get("callback") in (None, expected_callback)
-    assert entry["details"].get("callback_http") == expected_callback
-    assert entry["details"].get("callback_lnurl") == expected_callback_lnurl
-    assert entry["details"]["response"] == data
+    for key in ("callback", "callback_http", "callback_lnurl", "proxy", "response"):
+        assert key not in entry["details"]
     expected_metadata = data["metadata"]
     expected_hash = hashlib.sha256(expected_metadata.encode("utf-8")).hexdigest()
     assert entry["details"]["metadata"] == expected_metadata
@@ -741,15 +706,6 @@ def test_client_ip_walks_xff_from_the_trusted_peer(monkeypatch, test_client: Tes
         "Pay cloudflare@public.example.com",
     ]
     assert "invoice" not in entry["details"]
-
-    proxy = entry["details"]["proxy"]
-    assert proxy["resolved"]["proto"] == "https"
-    assert proxy["resolved"]["host"] == "public.example.com"
-    assert proxy["sources"]["proto"] == "x-forwarded-proto"
-    assert proxy["sources"]["host"] == "Host header"
-    assert proxy["headers"]["cf-connecting-ip"] == "6.6.6.6"
-    assert proxy["client"]["ip"] == "198.51.100.23"
-    assert proxy["client"]["source"] == "x-forwarded-for"
 
 
 def test_logs_pagination_and_search(test_client: TestClient):
@@ -852,11 +808,11 @@ def test_lnurl_payerdata_happy_path(monkeypatch, test_client: TestClient):
     )
     assert entry is not None
     details = entry["details"]
-    assert details["payerdata"]["identifier"] == "payer@example.com"
-    assert details["payerdata"]["name"] == "Alice"
     expected_payload = f"{base_metadata}{payer_payload}"
-    assert details["metadata_for_hash"] == expected_payload
     assert details["metadata_hash"] == hashlib.sha256(expected_payload.encode("utf-8")).hexdigest()
+    assert "payerdata" not in details
+    assert "metadata_for_hash" not in details
+    assert payer_payload not in json.dumps(entry, sort_keys=True)
     config.get_settings.cache_clear()
 
 
@@ -885,7 +841,8 @@ def test_lnurl_optional_payerdata_can_be_omitted(monkeypatch, test_client: TestC
     )
     assert entry is not None
     details = entry["details"]
-    assert details["metadata_for_hash"] == base_metadata
+    assert details["metadata_hash"] == hashlib.sha256(base_metadata.encode("utf-8")).hexdigest()
+    assert "metadata_for_hash" not in details
     assert "payerdata" not in details
     config.get_settings.cache_clear()
 
@@ -917,9 +874,10 @@ def test_lnurl_payerdata_appends_extra_wallet_fields(monkeypatch, test_client: T
     )
     assert entry is not None
     expected_payload = f"{base_metadata}{payer_payload}"
-    assert entry["details"]["payerdata"]["custom"] == {"tier": "gold"}
-    assert entry["details"]["metadata_for_hash"] == expected_payload
     assert entry["details"]["metadata_hash"] == hashlib.sha256(expected_payload.encode("utf-8")).hexdigest()
+    assert "payerdata" not in entry["details"]
+    assert "metadata_for_hash" not in entry["details"]
+    assert payer_payload not in json.dumps(entry, sort_keys=True)
     config.get_settings.cache_clear()
 
 
@@ -1377,7 +1335,7 @@ def test_forwarded_lnurl_discovery_and_invoice(monkeypatch, test_client: TestCli
     assert logs
     assert logs[0]["event"] == "forward"
 
-    invoices_resp = test_client.get("/api/invoices", params={"q": "forwarded"})
+    invoices_resp = test_client.get("/api/invoices", params={"q": "tips"})
     assert invoices_resp.status_code == 200
     invoices = invoices_resp.json()["items"]
     assert invoices
@@ -1465,7 +1423,8 @@ def test_invoice_list_endpoint(test_client: TestClient):
     payload = list_resp.json()
     assert payload["total_items"] >= 1
     first = payload["items"][0]
-    assert first["payment_request"] == invoice_payload["pr"]
+    assert first["payment_request"] is None
+    assert invoice_payload["pr"] not in json.dumps(first, sort_keys=True)
     assert first["payment_hash"] == invoice_payload["verify"].rsplit("/", 1)[-1]
     assert first["status"] in {"pending", "settled", "expired"}
     assert "details" in first

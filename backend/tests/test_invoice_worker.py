@@ -90,7 +90,7 @@ async def _wait_for_settlement(storage: RequestLogStorage, payment_hash: str) ->
             if record["payment_hash"] == payment_hash and record["settled"]:
                 details = record["details"]["invoice"]
                 assert details["settled"] is True
-                assert details.get("r_preimage") == "02" * 32
+                assert "r_preimage" not in details
                 return
         await asyncio.sleep(0.05)
     raise AssertionError("Invoice was not marked settled via subscription")

@@ -123,6 +123,90 @@ def _safe_webhook_log_details(details: Any) -> Dict[str, Any]:
     return safe
 
 
+_REQUEST_HISTORY_SECRET_KEYS = {
+    "address_override",
+    "callback",
+    "callback_http",
+    "callback_lnurl",
+    "comment",
+    "forward_to",
+    "forwarding_target",
+    "ln_client_response",
+    "metadata_for_hash",
+    "memo",
+    "payment_request_preview",
+    "payer_data",
+    "payerdata",
+    "payerdata_raw",
+    "payment_request",
+    "preimage",
+    "r_preimage",
+    "proxy",
+    "query",
+    "remote_callback",
+    "response",
+    "verify_url",
+    "verify_url_http",
+    "zap_request",
+}
+
+
+def _safe_request_history_details(event: str, details: Any) -> Dict[str, Any] | None:
+    normalized = _normalize_details(details)
+    if normalized is None or event not in {"discovery", "forward", "invoice", "verify"}:
+        return normalized
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): scrub(item)
+                for key, item in value.items()
+                if str(key) not in _REQUEST_HISTORY_SECRET_KEYS
+            }
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    return scrub(normalized)
+
+
+_INVOICE_OPERATIONAL_DROP_KEYS = {
+    "callback",
+    "callback_http",
+    "callback_lnurl",
+    "forwarding_target",
+    "ln_client_response",
+    "metadata_for_hash",
+    "memo",
+    "payment_request_preview",
+    "preimage",
+    "r_preimage",
+    "proxy",
+    "query",
+    "remote_callback",
+    "response",
+}
+
+
+def _safe_invoice_event_details(details: Any) -> Dict[str, Any] | None:
+    normalized = _normalize_details(details)
+    if normalized is None:
+        return None
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): scrub(item)
+                for key, item in value.items()
+                if str(key) not in _INVOICE_OPERATIONAL_DROP_KEYS
+            }
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    return scrub(normalized)
+
+
 @dataclass
 class LogEntry:
     """Structured log entry for LNURL interactions."""
@@ -357,6 +441,48 @@ class RequestLogStorage:
                     int(request_log["id"]),
                 ),
             )
+        sensitive_history = conn.execute(
+            """
+            SELECT id, event, status, message, details
+            FROM request_logs
+            WHERE event IN ('discovery', 'forward', 'invoice', 'verify')
+            """
+        ).fetchall()
+        failure_messages = {
+            "forward": "Forwarding target unavailable",
+            "invoice": "Invoice operation failed",
+            "verify": "Invoice lookup failed",
+        }
+        for request_log in sensitive_history:
+            event = str(request_log["event"])
+            safe_details = _safe_request_history_details(
+                event, self._deserialize_details(request_log["details"])
+            )
+            message = request_log["message"]
+            if str(request_log["status"] or "") == "error" and message:
+                message = failure_messages.get(event, "Request failed")
+            conn.execute(
+                "UPDATE request_logs SET message = ?, details = ? WHERE id = ?",
+                (
+                    message,
+                    self._serialize_details(safe_details),
+                    int(request_log["id"]),
+                ),
+            )
+        invoice_history = conn.execute(
+            "SELECT id, details FROM invoice_events"
+        ).fetchall()
+        for invoice_event in invoice_history:
+            safe_details = _safe_invoice_event_details(
+                self._deserialize_details(invoice_event["details"])
+            )
+            conn.execute(
+                "UPDATE invoice_events SET details = ? WHERE id = ?",
+                (
+                    self._serialize_details(safe_details),
+                    int(invoice_event["id"]),
+                ),
+            )
         conn.execute(
             "INSERT OR IGNORE INTO lnswitchboard_migrations (name, applied_at) VALUES (?, ?)",
             (migration_name, datetime.now(tz=timezone.utc).isoformat()),
@@ -556,7 +682,7 @@ class RequestLogStorage:
         message: str | None,
         details: Dict[str, Any] | None,
     ) -> Optional[int]:
-        normalized_details = _normalize_details(details)
+        normalized_details = _safe_request_history_details(event, details)
         cursor = conn.execute(
             """
             INSERT INTO request_logs (
@@ -663,6 +789,14 @@ class RequestLogStorage:
 
     async def append(self, entry: LogEntry) -> Optional[int]:
         payload = asdict(entry)
+        event = str(payload.get("event") or "")
+        payload["details"] = _safe_request_history_details(event, payload.get("details"))
+        if str(payload.get("status") or "") == "error" and payload.get("message"):
+            payload["message"] = {
+                "forward": "Forwarding target unavailable",
+                "invoice": "Invoice operation failed",
+                "verify": "Invoice lookup failed",
+            }.get(event, payload["message"])
         row_id: Optional[int] = None
         async with self._lock:
             try:
@@ -1073,7 +1207,9 @@ class RequestLogStorage:
         for entry in self._recent:
             if entry.get("id") == log_id:
                 if details is not None:
-                    entry["details"] = _normalize_details(details)
+                    entry["details"] = _safe_request_history_details(
+                        str(entry.get("event") or ""), details
+                    )
                 break
 
     async def log_invoice_event(
@@ -1124,7 +1260,7 @@ class RequestLogStorage:
                             amount_msat,
                             payment_hash,
                             payment_request,
-                            self._serialize_details(details),
+                            self._serialize_details(_safe_invoice_event_details(details)),
                             request_log_id,
                             next_check_at,
                             expires_at,
@@ -1301,7 +1437,10 @@ class RequestLogStorage:
         interval_seconds: int,
         settled_at: Optional[datetime],
     ) -> None:
-        serialized_details = self._serialize_details(details)
+        serialized_details = self._serialize_details(_safe_invoice_event_details(details))
+        serialized_request_details = self._serialize_details(
+            _safe_request_history_details("invoice", details)
+        )
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         next_check_iso = next_check.isoformat() if next_check else None
         expires_at_iso = (
@@ -1341,14 +1480,14 @@ class RequestLogStorage:
                             event.id,
                         ),
                     )
-                    if event.request_log_id is not None and serialized_details is not None:
+                    if event.request_log_id is not None and serialized_request_details is not None:
                         conn.execute(
                             """
                             UPDATE request_logs
                             SET details = ?
                             WHERE id = ?
                             """,
-                            (serialized_details, event.request_log_id),
+                            (serialized_request_details, event.request_log_id),
                         )
             except sqlite3.Error:
                 return
@@ -1374,10 +1513,8 @@ class RequestLogStorage:
                 WHERE LOWER(username) LIKE ?
                    OR LOWER(domain) LIKE ?
                    OR LOWER(COALESCE(payment_hash, '')) LIKE ?
-                   OR LOWER(COALESCE(payment_request, '')) LIKE ?
-                   OR LOWER(COALESCE(details, '')) LIKE ?
             """
-            params.extend([like, like, like, like, like])
+            params.extend([like, like, like])
 
         async with self._lock:
             try:
@@ -1425,6 +1562,7 @@ class RequestLogStorage:
             if not isinstance(amount_msat, int):
                 amount_msat = None
             details = self._deserialize_details(row["details"])
+            public_details = _safe_request_history_details("invoice", details)
             settled = bool(row["settled"])
             expired = bool(row["expired"])
             forwarded = isinstance(details, dict) and bool(details.get("forwarded"))
@@ -1438,14 +1576,14 @@ class RequestLogStorage:
                     "amount_msat": amount_msat,
                     "amount_sat": amount_msat // 1000 if isinstance(amount_msat, int) else None,
                     "payment_hash": row["payment_hash"],
-                    "payment_request": row["payment_request"],
+                    "payment_request": None,
                     "settled": settled,
                     "expired": expired,
                     "status": "forwarded" if forwarded else ("settled" if settled else ("expired" if expired else "pending")),
                     "next_check_at": row["next_check_at"],
                     "last_checked_at": row["last_checked_at"],
                     "expires_at": row["expires_at"],
-                    "details": details,
+                    "details": public_details,
                     "request_log_id": row["request_log_id"],
                     "settled_at": row["settled_at"],
                 }

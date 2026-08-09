@@ -276,8 +276,47 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
             """,
             (now,),
         )
+        conn.execute(
+            """
+            INSERT INTO request_logs (
+                timestamp, username, ip, event, domain, amount_msat, status, message, details
+            ) VALUES (?, 'payer', 'internal', 'invoice', 'example.invalid', 1000, 'error', ?, ?)
+            """,
+            (
+                now,
+                "LEGACY_INVOICE_EXCEPTION_SECRET",
+                json.dumps(
+                    {
+                        "response": {"body": "LEGACY_REMOTE_BODY_SECRET"},
+                        "payerdata_raw": "LEGACY_PAYER_SECRET",
+                        "preimage": "LEGACY_PREIMAGE_SECRET",
+                        "verify_url": "https://example.invalid/LEGACY_VERIFY_SECRET",
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO invoice_events (
+                created_at, username, domain, ip, amount_msat, payment_hash,
+                payment_request, details, settled, expired, check_interval_seconds
+            ) VALUES (?, 'payer', 'example.invalid', 'internal', 1000, ?, 'lnbc1safe', ?, 0, 0, 60)
+            """,
+            (
+                now,
+                "ab" * 32,
+                json.dumps(
+                    {
+                        "response": {"body": "LEGACY_EVENT_RESPONSE_SECRET"},
+                        "ln_client_response": {"token": "LEGACY_CLIENT_RESPONSE_SECRET"},
+                        "metadata_for_hash": "LEGACY_METADATA_PAYLOAD_SECRET",
+                        "proxy": {"header": "LEGACY_PROXY_HEADER_SECRET"},
+                    }
+                ),
+            ),
+        )
 
-    RequestLogStorage(db_path)
+    sanitized_storage = RequestLogStorage(db_path)
     with sqlite3.connect(db_path) as conn:
         persisted = json.dumps(
             {
@@ -288,8 +327,9 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
                     "SELECT error, response_body FROM webhook_attempts"
                 ).fetchall(),
                 "request_logs": conn.execute(
-                    "SELECT message, details FROM request_logs WHERE event = 'webhook_delivery'"
+                    "SELECT message, details FROM request_logs"
                 ).fetchall(),
+                "invoice_events": conn.execute("SELECT details FROM invoice_events").fetchall(),
             },
             sort_keys=True,
         )
@@ -299,6 +339,10 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         assert conn.execute(
             "SELECT COUNT(*) FROM request_logs WHERE event = 'webhook_delivery'"
         ).fetchone()[0] == 1
+    exposed = json.dumps(
+        asyncio.run(sanitized_storage.list_invoice_events(page=1, page_size=10)),
+        sort_keys=True,
+    )
 
     for secret in (
         "LEGACY_PATH_SECRET",
@@ -309,8 +353,18 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         "LEGACY_RESPONSE_SECRET",
         "LEGACY_LOG_SECRET",
         "LEGACY_DETAIL_SECRET",
+        "LEGACY_INVOICE_EXCEPTION_SECRET",
+        "LEGACY_REMOTE_BODY_SECRET",
+        "LEGACY_PAYER_SECRET",
+        "LEGACY_PREIMAGE_SECRET",
+        "LEGACY_VERIFY_SECRET",
+        "LEGACY_EVENT_RESPONSE_SECRET",
+        "LEGACY_CLIENT_RESPONSE_SECRET",
+        "LEGACY_METADATA_PAYLOAD_SECRET",
+        "LEGACY_PROXY_HEADER_SECRET",
     ):
         assert secret not in persisted
+        assert secret not in exposed
 
 
 async def _exercise_retry_eventually_succeeds(tmp_path):
