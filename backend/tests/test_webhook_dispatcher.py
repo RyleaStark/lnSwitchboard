@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 from datetime import datetime, timezone
 
 import pytest
@@ -74,6 +75,76 @@ def test_private_webhook_targets_are_blocked_by_default(tmp_path) -> None:
 
         with pytest.raises(UnsafeOutboundTarget, match="non-public network"):
             await dispatcher._send(url="http://127.0.0.1/admin", payload={}, headers={})
+
+    asyncio.run(exercise())
+
+
+def test_success_logs_do_not_expose_webhook_url_secrets(tmp_path, caplog) -> None:
+    async def exercise() -> None:
+        address_store, _address = await _create_address(tmp_path)
+
+        async def sender(url, payload, headers):
+            return None
+
+        dispatcher = WebhookDispatcher(address_store=address_store, sender=sender)
+        secret_url = (
+            "https://hooks.example.invalid/services/PATH_SECRET"
+            "?token=QUERY_SECRET"
+        )
+        with caplog.at_level(logging.INFO):
+            delivered = await dispatcher._attempt_delivery(
+                url=secret_url,
+                payload={},
+                headers={},
+                attempt=1,
+                delivery_id=0,
+            )
+
+        assert delivered is True
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "PATH_SECRET" not in messages
+        assert "QUERY_SECRET" not in messages
+        assert secret_url not in messages
+
+    asyncio.run(exercise())
+
+
+def test_failure_logs_do_not_expose_webhook_url_or_exception_secrets(
+    tmp_path, caplog
+) -> None:
+    async def exercise() -> None:
+        address_store, _address = await _create_address(tmp_path)
+
+        async def sender(url, payload, headers):
+            raise RuntimeError("delivery failed with EXCEPTION_SECRET")
+
+        dispatcher = WebhookDispatcher(
+            address_store=address_store,
+            sender=sender,
+            max_retries=0,
+        )
+        secret_url = (
+            "https://hooks.example.invalid/services/PATH_SECRET"
+            "?token=QUERY_SECRET"
+        )
+        with caplog.at_level(logging.WARNING):
+            delivered = await dispatcher._attempt_delivery(
+                url=secret_url,
+                payload={},
+                headers={},
+                attempt=1,
+                delivery_id=0,
+            )
+
+        assert delivered is False
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        for secret in (
+            "PATH_SECRET",
+            "QUERY_SECRET",
+            "EXCEPTION_SECRET",
+            secret_url,
+        ):
+            assert secret not in messages
 
     asyncio.run(exercise())
 
