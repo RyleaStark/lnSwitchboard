@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import logging
+import stat
 from contextlib import asynccontextmanager, suppress
 from ipaddress import IPv6Address, ip_address, ip_network
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import grpc
+import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -207,6 +210,42 @@ async def _periodic_log_cleanup(storage, *, interval_seconds: float = 3600.0) ->
             )
 
 
+async def _start_public_backend(
+    socket_path: Path,
+) -> tuple[uvicorn.Server, asyncio.Task[None]]:
+    """Start the public-only ASGI surface on a private Unix socket."""
+
+    try:
+        existing = socket_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISSOCK(existing.st_mode) or existing.st_uid != os.getuid():
+            raise OSError("Public backend socket path is unsafe")
+        socket_path.unlink()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app=public_app,
+            uds=str(socket_path),
+            proxy_headers=False,
+            access_log=False,
+            lifespan="off",
+        )
+    )
+    task = asyncio.create_task(server.serve())
+    for _ in range(500):
+        if server.started and socket_path.exists():
+            return server, task
+        if task.done():
+            await task
+            raise RuntimeError("Public backend stopped before readiness")
+        await asyncio.sleep(0.01)
+    server.should_exit = True
+    with suppress(asyncio.CancelledError):
+        await task
+    raise RuntimeError("Public backend socket did not become ready")
+
+
 def _get_admin_proxy_client(request: Request, cidrs: str) -> str | None:
     """Resolve X-Forwarded-For from right to left across local trusted proxies."""
 
@@ -311,6 +350,9 @@ async def lifespan(app: FastAPI):
             "Unable to verify LND connection (error_type=%s)",
             type(exc).__name__,
         )
+    public_backend_server, public_backend_task = await _start_public_backend(
+        settings.public_backend_socket_path
+    )
     log_cleanup_task = asyncio.create_task(_periodic_log_cleanup(storage))
     yield
     log_cleanup_task.cancel()
@@ -320,6 +362,9 @@ async def lifespan(app: FastAPI):
         cloudflare_authorization_cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cloudflare_authorization_cleanup_task
+    public_backend_server.should_exit = True
+    with suppress(asyncio.CancelledError):
+        await public_backend_task
     await invoice_full_refresh_worker.stop()
     await invoice_subscription_worker.stop()
     await ln_client.close()
@@ -331,6 +376,24 @@ def _add_request_security(target_app: FastAPI) -> None:
         """Honor forwarding headers only when the immediate peer is trusted."""
 
         settings = get_settings()
+        internal_client = next(
+            (
+                value.decode("ascii", errors="ignore")
+                for name, value in request.scope["headers"]
+                if name.lower() == b"x-lns-internal-client-ip"
+            ),
+            "",
+        )
+        if request.client is None and internal_client:
+            try:
+                request.state.internal_client_ip = str(ip_address(internal_client))
+            except ValueError:
+                pass
+        request.scope["headers"] = [
+            (name, value)
+            for name, value in request.scope["headers"]
+            if name.lower() != b"x-lns-internal-client-ip"
+        ]
         trusted_networks = parse_trusted_proxy_cidrs(settings.trusted_proxy_cidrs)
         client_host = request.client.host if request.client else ""
         try:

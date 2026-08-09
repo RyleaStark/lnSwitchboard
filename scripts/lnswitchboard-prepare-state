@@ -9,7 +9,7 @@ import stat
 from collections.abc import Iterable
 
 ROOTS = (
-    ("/app-secrets", (("cloudflare-mesh",), ("public-state",))),
+    ("/app-secrets", (("cloudflare-mesh",),)),
     ("/tailscale-control", (("control",), ("status",))),
     ("/tailscale-state", ()),
 )
@@ -31,12 +31,7 @@ FILE_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
 )
-SQLITE_BUNDLE = (
-    "lnswitchboard.db",
-    "lnswitchboard.db-journal",
-    "lnswitchboard.db-wal",
-    "lnswitchboard.db-shm",
-)
+
 
 
 def fail() -> None:
@@ -164,50 +159,38 @@ def validate_tree(directory_fd: int, relative: tuple[str, ...] = ()) -> None:
                 fail()
 
 
-def migrate_public_state(root_fd: int) -> None:
-    """Move a legacy SQLite bundle into the public-only state subtree."""
-
-    state_fd = open_directory("public-state", parent_fd=root_fd)
+def prepare_public_socket_root() -> None:
+    descriptor = open_directory("/public-socket")
     try:
-        if any(name not in SQLITE_BUNDLE for name in os.listdir(state_fd)):
-            fail()
-        for name in SQLITE_BUNDLE:
-            try:
-                source = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            try:
-                os.stat(name, dir_fd=state_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                # A member on both sides is ambiguous, not a resumable partial
-                # migration. Never guess which generation is authoritative.
-                fail()
-            if not stat.S_ISREG(source.st_mode) or source.st_nlink != 1:
+        entries = os.listdir(descriptor)
+        if entries:
+            if entries != ["public.sock"]:
                 fail()
             try:
-                os.rename(
-                    name,
-                    name,
-                    src_dir_fd=root_fd,
-                    dst_dir_fd=state_fd,
+                leaf = os.stat(
+                    "public.sock", dir_fd=descriptor, follow_symlinks=False
                 )
             except OSError:
                 fail()
+            if (
+                not stat.S_ISSOCK(leaf.st_mode)
+                or leaf.st_uid != UID
+                or leaf.st_gid != GID
+            ):
+                fail()
             try:
-                moved = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+                os.unlink("public.sock", dir_fd=descriptor)
             except OSError:
                 fail()
-            if not same_inode(source, moved):
-                fail()
-            os.fsync(root_fd)
-            os.fsync(state_fd)
+        os.fchown(descriptor, UID, GID)
+        os.fchmod(descriptor, DIR_MODE)
+        os.fsync(descriptor)
     finally:
-        os.close(state_fd)
+        os.close(descriptor)
 
 
 def main() -> None:
+    prepare_public_socket_root()
     for root, required in ROOTS:
         descriptor = open_directory(root)
         try:
@@ -224,9 +207,6 @@ def main() -> None:
                     for child in reversed(opened):
                         os.close(child)
             harden_tree(descriptor)
-            if root == "/app-secrets":
-                migrate_public_state(descriptor)
-                harden_tree(descriptor)
             os.fchown(descriptor, UID, GID)
             os.fchmod(descriptor, DIR_MODE)
             os.fsync(descriptor)

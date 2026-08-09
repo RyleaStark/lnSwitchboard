@@ -25,6 +25,7 @@ def test_production_server_disables_query_bearing_access_logs(monkeypatch) -> No
         def run(self, *, sockets) -> None:
             assert len(sockets) == 2
 
+    monkeypatch.setenv("LISTENER_MODE", "both")
     monkeypatch.setattr(
         server,
         "get_settings",
@@ -66,6 +67,7 @@ def test_server_can_bind_one_listener_mode(monkeypatch, mode, expected) -> None:
         def run(self, *, sockets) -> None:
             assert len(sockets) == 1
 
+    monkeypatch.setenv("LISTENER_MODE", mode)
     monkeypatch.setattr(
         server,
         "get_settings",

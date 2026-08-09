@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import runpy
+import socket
 from pathlib import Path
 
 import pytest
@@ -14,58 +15,54 @@ from backend.app.main import _periodic_log_cleanup
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _state_initializer_namespace() -> dict:
-    return runpy.run_path(str(ROOT / "scripts" / "lnswitchboard-prepare-state"))
+def test_initializer_preserves_the_rollback_compatible_database_authority() -> None:
+    initializer = (ROOT / "scripts" / "lnswitchboard-prepare-state").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"/public-socket"' in initializer
+    assert "public-state" not in initializer
+    assert "migrate_public_state" not in initializer
 
 
-def test_initializer_moves_legacy_sqlite_bundle_into_public_state(tmp_path) -> None:
-    state = tmp_path / "public-state"
-    state.mkdir()
-    for suffix, payload in (("", b"main"), ("-wal", b"wal"), ("-shm", b"shm")):
-        (tmp_path / f"lnswitchboard.db{suffix}").write_bytes(payload)
-    namespace = _state_initializer_namespace()
-    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        namespace["migrate_public_state"](descriptor)
-    finally:
-        os.close(descriptor)
+def test_initializer_removes_only_its_owned_stale_public_socket(tmp_path) -> None:
+    root = tmp_path / "socket-root"
+    root.mkdir()
+    socket_path = root / "public.sock"
+    stale = socket.socket(socket.AF_UNIX)
+    stale.bind(str(socket_path))
+    stale.close()
+    namespace = runpy.run_path(
+        str(ROOT / "scripts" / "lnswitchboard-prepare-state")
+    )
+    namespace["prepare_public_socket_root"].__globals__["open_directory"] = (
+        lambda _path: os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    )
 
-    assert not any(tmp_path.glob("lnswitchboard.db*"))
-    assert (state / "lnswitchboard.db").read_bytes() == b"main"
-    assert (state / "lnswitchboard.db-wal").read_bytes() == b"wal"
-    assert (state / "lnswitchboard.db-shm").read_bytes() == b"shm"
+    namespace["prepare_public_socket_root"]()
 
-
-def test_initializer_rejects_ambiguous_public_state_generation(tmp_path) -> None:
-    state = tmp_path / "public-state"
-    state.mkdir()
-    (tmp_path / "lnswitchboard.db").write_bytes(b"legacy")
-    (state / "lnswitchboard.db").write_bytes(b"current")
-    namespace = _state_initializer_namespace()
-    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        with pytest.raises(SystemExit, match="refused unsafe"):
-            namespace["migrate_public_state"](descriptor)
-    finally:
-        os.close(descriptor)
-
-    assert (tmp_path / "lnswitchboard.db").read_bytes() == b"legacy"
-    assert (state / "lnswitchboard.db").read_bytes() == b"current"
+    assert list(root.iterdir()) == []
 
 
-def test_initializer_rejects_non_database_public_state_file(tmp_path) -> None:
-    state = tmp_path / "public-state"
-    state.mkdir()
-    (state / "admin-secret").write_bytes(b"must-not-be-public")
-    namespace = _state_initializer_namespace()
-    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        with pytest.raises(SystemExit, match="refused unsafe"):
-            namespace["migrate_public_state"](descriptor)
-    finally:
-        os.close(descriptor)
+def test_initializer_rejects_a_public_socket_symlink_without_mutation(tmp_path) -> None:
+    root = tmp_path / "socket-root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"sentinel")
+    socket_path = root / "public.sock"
+    socket_path.symlink_to(outside)
+    namespace = runpy.run_path(
+        str(ROOT / "scripts" / "lnswitchboard-prepare-state")
+    )
+    namespace["prepare_public_socket_root"].__globals__["open_directory"] = (
+        lambda _path: os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    )
 
-    assert (state / "admin-secret").read_bytes() == b"must-not-be-public"
+    with pytest.raises(SystemExit, match="refused unsafe"):
+        namespace["prepare_public_socket_root"]()
+
+    assert socket_path.is_symlink()
+    assert outside.read_bytes() == b"sentinel"
 
 
 def test_idle_service_runs_periodic_retention_cleanup() -> None:
@@ -153,7 +150,10 @@ def test_primary_application_container_is_least_privilege() -> None:
     )
     assert app.get("privileged") is not True
     assert app["environment"]["LISTENER_MODE"] == "admin"
-    assert app["environment"]["DATA_STORE_PATH"] == "/app/state/lnswitchboard.db"
+    assert app["environment"]["DATA_STORE_PATH"] == "/app/secrets/lnswitchboard.db"
+    assert app["environment"]["PUBLIC_BACKEND_SOCKET_PATH"] == (
+        "/run/lnswitchboard-public/public.sock"
+    )
     assert app["ports"] == [
         "${LNSWITCHBOARD_BIND_ADDRESS:-127.0.0.1}:22121:22121"
     ]
@@ -169,17 +169,22 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert public["cap_drop"] == ["ALL"]
     assert public["security_opt"] == ["no-new-privileges:true"]
     assert public["environment"]["LISTENER_MODE"] == "public"
-    assert public["environment"]["DATA_STORE_PATH"] == "/app/state/lnswitchboard.db"
+    assert set(public["environment"]) == {
+        "LISTENER_MODE",
+        "PUBLIC_BACKEND_SOCKET_PATH",
+        "PUBLIC_SERVICE_PORT",
+    }
     assert public["depends_on"]["permissions-init"]["condition"] == (
         "service_completed_successfully"
     )
     assert public["depends_on"]["lnswitchboard"]["condition"] == "service_healthy"
-    assert public["environment"]["CLOUDFLARED_CONNECTOR_ENABLED"] == "false"
-    assert public["environment"]["TAILSCALE_CONNECTOR_ENABLED"] == "false"
     assert "./secrets:/app/secrets:rw" in app["volumes"]
-    assert "./secrets/public-state:/app/state:rw" in app["volumes"]
-    assert "./secrets/public-state:/app/state:rw" in public["volumes"]
+    assert "public-backend:/run/lnswitchboard-public:rw" in app["volumes"]
+    assert public["volumes"] == [
+        "public-backend:/run/lnswitchboard-public:ro"
+    ]
     assert all("/app/secrets" not in volume for volume in public["volumes"])
+    assert all("/lnd" not in volume for volume in public["volumes"])
     assert set(public["networks"]) == {"cloudflare-egress"}
     assert public["healthcheck"]["test"] == [
         "CMD",
@@ -198,6 +203,7 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert initializer["entrypoint"] == [
         "/usr/local/bin/lnswitchboard-prepare-state"
     ]
+    assert "public-backend:/public-socket" in initializer["volumes"]
 
 
 def test_compose_application_image_matches_version_file() -> None:

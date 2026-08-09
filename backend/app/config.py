@@ -130,6 +130,10 @@ class Settings(BaseSettings):
         default="127.0.0.1",
     )
     public_service_port: int = _env_field(env="PUBLIC_SERVICE_PORT", default=21212)
+    public_backend_socket_path: Path = _env_field(
+        env="PUBLIC_BACKEND_SOCKET_PATH",
+        default=Path("/run/lnswitchboard-public/public.sock"),
+    )
     dep_env: str = _env_field(env="DEP_ENV", default="DOCKER")
     lnd_host: str = _env_field(env="LND_HOST", default=...)
     lnd_grpc_port: int = _env_field(env="LND_GRPC_PORT", default=10009)

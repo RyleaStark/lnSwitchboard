@@ -103,6 +103,11 @@ def _resolve_client_ip(
 
     from .config import get_settings, parse_trusted_proxy_cidrs
 
+    internal_client = getattr(request.state, "internal_client_ip", None)
+    if internal_client:
+        return internal_client, "internal-public-gateway", [
+            {"source": "internal-public-gateway", "value": internal_client}
+        ]
     headers = request.headers
     peer = request.client.host if request.client else None
 
