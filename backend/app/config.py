@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from functools import lru_cache
-from ipaddress import IPv4Network, IPv6Network, ip_network
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_core import PydanticUndefined
@@ -294,6 +295,31 @@ class Settings(BaseSettings):
         if normalized not in {"DOCKER", "UMBREL", "UMBREL-DEV"}:
             raise ValueError("DEP_ENV must be one of DOCKER, UMBREL, or UMBREL-DEV")
         return normalized
+
+    @field_validator("cloudflare_oauth_redirect_loopback")
+    @classmethod
+    def _validate_cloudflare_oauth_redirect_loopback(cls, value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+            host = parsed.hostname
+            port = parsed.port
+            is_loopback = host is not None and ip_address(host).is_loopback
+            if not (
+                parsed.scheme == "http"
+                and is_loopback
+                and port is not None
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.path == "/api/cloudflare/oauth/callback"
+                and not parsed.query
+                and not parsed.fragment
+            ):
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError(
+                "CLOUDFLARE_OAUTH_REDIRECT_LOOPBACK must be an exact HTTP loopback callback URL"
+            ) from exc
+        return value
 
     @field_validator("max_sendable_sat")
     @classmethod

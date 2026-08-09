@@ -153,6 +153,40 @@ def test_invalid_trusted_proxy_setting_is_rejected(monkeypatch) -> None:
         Settings()
 
 
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "https://admin.example/api/cloudflare/oauth/callback",
+        "http://192.168.1.10:22121/api/cloudflare/oauth/callback",
+        "http://127.0.0.1:22121/api/cloudflare/oauth/callback?forward=1",
+        "http://user@127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "http://127.0.0.1:22121/not-the-oauth-callback",
+    ],
+)
+def test_cloudflare_query_callback_is_restricted_to_the_exact_loopback_endpoint(
+    monkeypatch: pytest.MonkeyPatch, redirect_uri: str
+) -> None:
+    monkeypatch.setenv("CLOUDFLARE_OAUTH_REDIRECT_LOOPBACK", redirect_uri)
+
+    with pytest.raises(ValueError, match="loopback"):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "http://[::1]:22121/api/cloudflare/oauth/callback",
+    ],
+)
+def test_cloudflare_query_callback_accepts_ipv4_and_ipv6_loopback(
+    monkeypatch: pytest.MonkeyPatch, redirect_uri: str
+) -> None:
+    monkeypatch.setenv("CLOUDFLARE_OAUTH_REDIRECT_LOOPBACK", redirect_uri)
+
+    assert Settings().cloudflare_oauth_redirect_loopback == redirect_uri
+
+
 def test_default_cloudflare_oauth_scope_matches_registered_capabilities(
     monkeypatch,
 ) -> None:
