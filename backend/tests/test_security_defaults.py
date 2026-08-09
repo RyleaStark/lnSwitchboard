@@ -216,6 +216,14 @@ def test_cloudflare_query_callback_accepts_ipv4_and_ipv6_loopback(
         "https://oauth.example:0/callback/",
         "https://[fe80::1%25lo]/callback/",
         "https://oauth.example/callbäck/",
+        "https://127.000.000.001/callback/",
+        "https://127.1/callback/",
+        "https://2130706433/callback/",
+        "https://0x7f000001/callback/",
+        "https://oauth.example:/callback/",
+        "https://oauth.example/callback/?",
+        "https://oauth.example/callback/#",
+        "https://127.0.0.1/callback/",
     ],
 )
 def test_cloudflare_remote_callback_requires_a_clean_https_page(

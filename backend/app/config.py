@@ -334,33 +334,63 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_cloudflare_oauth_redirect_page(cls, value: str) -> str:
         try:
-            if not value.isascii() or "\\" in value or any(
+            if (
+                not value.isascii()
+                or "\\" in value
+                or "?" in value
+                or "#" in value
+                or any(
                 character.isspace()
                 or ord(character) < 0x20
                 or ord(character) == 0x7F
                 for character in value
+                )
             ):
                 raise ValueError
             parsed = urlsplit(value)
             port = parsed.port
             hostname = parsed.hostname
-            if hostname is None or not hostname.isascii() or len(hostname) > 253:
+            if (
+                hostname is None
+                or not hostname.isascii()
+                or len(hostname) > 253
+                or parsed.netloc.endswith(":")
+            ):
                 raise ValueError
             try:
                 address = ip_address(hostname)
             except ValueError:
                 labels = hostname.split(".")
+                numeric_labels = []
+                for label in labels:
+                    lowered = label.lower()
+                    if lowered.startswith("0x"):
+                        numeric_labels.append(
+                            len(lowered) > 2
+                            and all(
+                                character in "0123456789abcdef"
+                                for character in lowered[2:]
+                            )
+                        )
+                    elif len(label) > 1 and label.startswith("0"):
+                        numeric_labels.append(
+                            all(character in "01234567" for character in label)
+                        )
+                    else:
+                        numeric_labels.append(label.isdigit())
                 valid_hostname = all(
                     0 < len(label) <= 63
                     and label[0].isalnum()
                     and label[-1].isalnum()
                     and all(character.isalnum() or character == "-" for character in label)
                     for label in labels
-                )
+                ) and not all(numeric_labels)
             else:
                 valid_hostname = (
                     getattr(address, "scope_id", None) is None
                     and str(address) == hostname
+                    and not address.is_loopback
+                    and getattr(address, "ipv4_mapped", None) is None
                 )
             if not (
                 value.startswith("https://")
