@@ -175,6 +175,7 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert re.search(r"(?m)^USER 1000:1000$", dockerfile)
     assert app["user"] == "1000:1000"
     assert app["read_only"] is True
+    assert app["mem_limit"] == "256m"
     assert app["cap_drop"] == ["ALL"]
     assert app["security_opt"] == ["no-new-privileges:true"]
     assert "/tmp:size=64m,mode=1777" in app["tmpfs"]
