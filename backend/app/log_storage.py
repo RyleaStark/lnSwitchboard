@@ -51,26 +51,19 @@ def _delivery_target_reference(target: Any) -> str:
     return f"webhook:{digest}"
 
 
-def _error_type_name(value: str) -> str | None:
-    if not value.startswith("type:"):
-        return None
-    name = value[5:]
-    if not name or len(name) > 128 or not name.isidentifier():
-        return None
-    return name
-
-
 def _encoded_delivery_error(error: Any) -> str | None:
     if error in (None, ""):
         return None
-    name = _error_type_name(str(error))
-    return f"type:{name or 'DeliveryError'}"
+    # Exception text is untrusted. Rollback writers can also persist strings that
+    # resemble an internal type marker, so no string value is accepted as
+    # provenance for a more specific persisted error class.
+    return "type:DeliveryError"
 
 
 def _safe_delivery_error(error: Any) -> str | None:
     if error in (None, ""):
         return None
-    return _error_type_name(str(error)) or "DeliveryError"
+    return "DeliveryError"
 
 
 def _safe_delivery_headers(headers: Any) -> Dict[str, Any]:
@@ -328,7 +321,7 @@ class RequestLogStorage:
                 parsed_headers if isinstance(parsed_headers, dict) else {}
             )
             conn.execute(
-                "UPDATE webhook_deliveries SET target = ?, headers = ? WHERE id = ?",
+                "UPDATE webhook_deliveries SET target = ?, payload = NULL, headers = ? WHERE id = ?",
                 (
                     _delivery_target_reference(row["target"]),
                     self._serialize_details(safe_headers),
@@ -474,7 +467,7 @@ class RequestLogStorage:
             "event": row["event"],
             "target": _delivery_target_reference(row["target"]),
             "status": row["status"],
-            "payload": self._deserialize_details(row["payload"]),
+            "payload": None,
             "headers": _safe_delivery_headers(self._deserialize_details(row["headers"])),
             "address_id": row["address_id"],
             "invoice_event_id": row["invoice_event_id"],
@@ -518,33 +511,6 @@ class RequestLogStorage:
             "response_body": None,
         }
 
-    def _delivery_payload_context(self, payload: Any) -> tuple[str, str | None, int | None, Dict[str, Any]]:
-        if not isinstance(payload, dict):
-            return "webhook", None, None, {}
-        domain = payload.get("domain") if isinstance(payload.get("domain"), str) else None
-        ln_address = payload.get("ln_address") if isinstance(payload.get("ln_address"), str) else None
-        username = payload.get("username") if isinstance(payload.get("username"), str) else None
-        local_part = payload.get("local_part") if isinstance(payload.get("local_part"), str) else None
-        if not username and ln_address:
-            local, _, address_domain = ln_address.rpartition("@")
-            if local and address_domain:
-                username = local
-                domain = domain or address_domain
-            else:
-                username = ln_address
-        username = (username or local_part or "webhook").strip() or "webhook"
-        amount_msat: int | None = None
-        raw_amount = payload.get("amount_msat")
-        if raw_amount not in (None, ""):
-            try:
-                amount_msat = int(raw_amount)
-            except (TypeError, ValueError):
-                amount_msat = None
-        details: Dict[str, Any] = {}
-        for key in ("ln_address", "username_raw", "tag", "forwarded", "forward_to", "settlement_source"):
-            if key in payload:
-                details[key] = payload[key]
-        return username, domain, amount_msat, details
 
     def _delivery_log_status(self, delivery_status: str, success: bool | None = None) -> str:
         if delivery_status == "delivered":
@@ -636,8 +602,10 @@ class RequestLogStorage:
         delivery_status: str,
         attempt: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
-        payload = delivery.get("payload")
-        username, domain, amount_msat, _recipient_details = self._delivery_payload_context(payload)
+        # Webhook bodies are transient transport data, not request-history
+        # metadata. Test overrides and provider fields can place secrets in any
+        # field, so no display value may be derived from the body.
+        username, domain, amount_msat = "webhook", None, None
         kind = str(delivery.get("kind") or "webhook")
         target = _delivery_target_reference(delivery.get("target"))
         success = bool(attempt.get("success")) if isinstance(attempt, dict) else None
@@ -795,7 +763,7 @@ class RequestLogStorage:
                             event,
                             target_reference,
                             status,
-                            self._serialize_details(payload),
+                            None,
                             self._serialize_details(safe_headers),
                             address_id,
                             invoice_event_id,
@@ -998,9 +966,8 @@ class RequestLogStorage:
                    OR LOWER(event) LIKE ?
                    OR LOWER(target) LIKE ?
                    OR LOWER(status) LIKE ?
-                   OR LOWER(COALESCE(payload, '')) LIKE ?
             """
-            params.extend([like, like, like, like, like])
+            params.extend([like, like, like, like])
 
         async with self._lock:
             try:
@@ -1202,6 +1169,41 @@ class RequestLogStorage:
             except sqlite3.Error:
                 return []
         return [self._row_to_invoice_event(row) for row in rows]
+
+    async def get_invoice_event_by_id(self, event_id: int) -> Optional[InvoiceEvent]:
+        if event_id <= 0:
+            return None
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT
+                            id,
+                            username,
+                            domain,
+                            ip,
+                            amount_msat,
+                            payment_hash,
+                            payment_request,
+                            details,
+                            request_log_id,
+                            created_at,
+                            next_check_at,
+                            check_interval_seconds,
+                            expires_at,
+                            settled,
+                            expired,
+                            settled_at
+                        FROM invoice_events
+                        WHERE id = ?
+                        LIMIT 1
+                        """,
+                        (event_id,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return None
+        return self._row_to_invoice_event(row) if row else None
 
     async def get_invoice_event_by_hash(self, payment_hash: str) -> Optional[InvoiceEvent]:
         normalized = (payment_hash or "").strip().lower()

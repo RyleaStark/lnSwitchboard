@@ -169,6 +169,8 @@ def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> 
             webhook_urls=[secret_url],
         )
         event, details = _make_event(address)
+        details["comment"] = "PERSISTED_PAYLOAD_SECRET"
+        details["username_raw"] = "PERSISTED_USERNAME_SECRET"
 
         class SecretStatusError(OutboundHTTPStatusError):
             def __str__(self) -> str:
@@ -202,7 +204,7 @@ def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> 
             persisted = json.dumps(
                 {
                     "deliveries": conn.execute(
-                        "SELECT target, headers FROM webhook_deliveries"
+                        "SELECT target, payload, headers FROM webhook_deliveries"
                     ).fetchall(),
                     "attempts": conn.execute(
                         "SELECT error, response_body FROM webhook_attempts"
@@ -219,6 +221,8 @@ def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> 
             "PERSISTED_QUERY_SECRET",
             "ClassShapedSecretError",
             "PERSISTED_RESPONSE_SECRET",
+            "PERSISTED_PAYLOAD_SECRET",
+            "PERSISTED_USERNAME_SECRET",
         ):
             assert secret not in exposed
             assert secret not in persisted
@@ -244,12 +248,13 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
             INSERT INTO webhook_deliveries (
                 created_at, updated_at, kind, event, target, status, payload,
                 headers, address_id, invoice_event_id, request_log_id, delivery_key
-            ) VALUES (?, ?, 'http.webhook', 'payment.settled', ?, 'failed', '{}', ?, NULL, NULL, NULL, 'legacy')
+            ) VALUES (?, ?, 'http.webhook', 'payment.settled', ?, 'failed', ?, ?, NULL, NULL, NULL, 'legacy')
             """,
             (
                 now,
                 now,
                 "https://hooks.invalid/LEGACY_PATH_SECRET?token=LEGACY_QUERY_SECRET",
+                json.dumps({"oauth_code": "LEGACY_PAYLOAD_SECRET"}),
                 json.dumps({"X-LnSwitchboard-Signature": "LEGACY_SIGNATURE_SECRET"}),
             ),
         )
@@ -258,7 +263,7 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
             """
             INSERT INTO webhook_attempts (
                 delivery_id, attempted_at, attempt_number, success, error, response_body
-            ) VALUES (?, ?, 1, 0, 'LEGACY_EXCEPTION_SECRET', 'LEGACY_RESPONSE_SECRET')
+            ) VALUES (?, ?, 1, 0, 'type:RollbackClassShapedSecretError', 'LEGACY_RESPONSE_SECRET')
             """,
             (delivery_id, now),
         )
@@ -277,7 +282,7 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         persisted = json.dumps(
             {
                 "deliveries": conn.execute(
-                    "SELECT target, headers FROM webhook_deliveries"
+                    "SELECT target, payload, headers FROM webhook_deliveries"
                 ).fetchall(),
                 "attempts": conn.execute(
                     "SELECT error, response_body FROM webhook_attempts"
@@ -299,7 +304,8 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         "LEGACY_PATH_SECRET",
         "LEGACY_QUERY_SECRET",
         "LEGACY_SIGNATURE_SECRET",
-        "LEGACY_EXCEPTION_SECRET",
+        "LEGACY_PAYLOAD_SECRET",
+        "RollbackClassShapedSecretError",
         "LEGACY_RESPONSE_SECRET",
         "LEGACY_LOG_SECRET",
         "LEGACY_DETAIL_SECRET",
@@ -424,6 +430,7 @@ async def _exercise_delivery_history_and_hmac_headers(tmp_path):
     assert deliveries["total_items"] == 1
     delivery = deliveries["items"][0]
     assert delivery["status"] == "delivered"
+    assert delivery["payload"] is None
     target_reference = f"webhook:{hashlib.sha256(b'https://hooks.example.com/payments').hexdigest()[:16]}"
     assert delivery["target"] == target_reference
     assert delivery["last_attempt"]["success"] is True
@@ -431,9 +438,9 @@ async def _exercise_delivery_history_and_hmac_headers(tmp_path):
     assert len(delivery_logs) == 1
     delivery_log = delivery_logs[0]
     assert delivery_log["status"] == "ok"
-    assert delivery_log["username"] == "pay+vip"
-    assert delivery_log["domain"] == "testserver"
-    assert delivery_log["amount_msat"] == 2000
+    assert delivery_log["username"] == "webhook"
+    assert delivery_log["domain"] is None
+    assert delivery_log["amount_msat"] is None
     assert delivery_log["details"]["delivery_id"] == delivery["id"]
     assert delivery_log["details"]["delivery_status"] == "delivered"
     assert delivery_log["details"]["attempt_number"] == 1
@@ -502,6 +509,27 @@ async def _exercise_webhook_retry_resumes_after_restart(tmp_path):
     storage = RequestLogStorage(db_path)
     address_store, address = await _create_address(tmp_path)
     event, details = _make_event(address)
+    settled_at = datetime.now(tz=timezone.utc)
+    await storage.log_invoice_event(
+        username=event.username,
+        domain=event.domain,
+        amount_msat=event.amount_msat,
+        ip=event.ip,
+        payment_hash=event.payment_hash,
+        payment_request=event.payment_request,
+        details=details,
+        request_log_id=event.request_log_id,
+    )
+    await storage.apply_invoice_event_update(
+        event=event,
+        details=details,
+        settled=True,
+        expired=False,
+        next_check=None,
+        expires_at=None,
+        interval_seconds=event.check_interval_seconds,
+        settled_at=settled_at,
+    )
 
     async def failing_sender(url, payload, headers):
         raise RuntimeError("receiver offline")
@@ -523,6 +551,7 @@ async def _exercise_webhook_retry_resumes_after_restart(tmp_path):
     deliveries = await storage.list_deliveries(page=1, page_size=5)
     delivery = deliveries["items"][0]
     assert delivery["status"] == "retrying"
+    assert delivery["payload"] is None
     assert delivery["last_attempt"]["success"] is False
     delivery_logs = [entry for entry in await storage.get_recent() if entry["event"] == "webhook_delivery"]
     assert len(delivery_logs) == 1
@@ -548,6 +577,8 @@ async def _exercise_webhook_retry_resumes_after_restart(tmp_path):
     assert resumed == 1
     await asyncio.wait_for(resumed_event.wait(), timeout=1.0)
     assert len(captured) == 1
+    assert captured[0]["payload"]["event"] == "payment.settled"
+    assert captured[0]["payload"]["payment_request"] == event.payment_request
 
     attempts = await storage.list_delivery_attempts(int(delivery["id"]))
     assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]

@@ -182,8 +182,8 @@ class WebhookDispatcher:
         )
 
     async def replay_delivery(self, delivery: Dict[str, Any]) -> bool:
-        payload = delivery.get("payload")
-        if not isinstance(payload, dict):
+        payload = await self._rebuild_delivery_payload(delivery)
+        if payload is None:
             raise ValueError("Delivery payload is unavailable")
         endpoint = await self._resolve_delivery_endpoint(delivery)
         if endpoint is None:
@@ -209,10 +209,10 @@ class WebhookDispatcher:
         deliveries = await self._delivery_storage.list_retryable_http_deliveries(limit=limit)
         resumed = 0
         for delivery in deliveries:
-            payload = delivery.get("payload")
+            payload = await self._rebuild_delivery_payload(delivery)
             delivery_id = int(delivery.get("id") or 0)
             endpoint = await self._resolve_delivery_endpoint(delivery)
-            if endpoint is None or not isinstance(payload, dict) or delivery_id <= 0:
+            if endpoint is None or payload is None or delivery_id <= 0:
                 if delivery_id > 0:
                     await self._delivery_storage.update_delivery_status(
                         delivery_id=delivery_id,
@@ -283,6 +283,38 @@ class WebhookDispatcher:
             if self._endpoint_identifier(endpoint) == endpoint_id:
                 return endpoint
         return None
+
+    async def _rebuild_delivery_payload(
+        self, delivery: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        if self._delivery_storage is None:
+            return None
+        invoice_event_id = int(delivery.get("invoice_event_id") or 0)
+        address_id = str(delivery.get("address_id") or "").strip()
+        if invoice_event_id <= 0 or not address_id:
+            return None
+        event = await self._delivery_storage.get_invoice_event_by_id(invoice_event_id)
+        if event is None or not isinstance(event.details, dict):
+            return None
+        try:
+            address = await self._address_store.get_address(address_id)
+        except AddressNotFoundError:
+            return None
+        settled_at = None
+        if event.settled_at:
+            candidate = event.settled_at
+            if candidate.endswith("Z"):
+                candidate = f"{candidate[:-1]}+00:00"
+            try:
+                settled_at = datetime.fromisoformat(candidate)
+            except ValueError:
+                return None
+        return self._build_payload(
+            event=event,
+            details=event.details,
+            address=address,
+            settled_at=settled_at,
+        )
 
     async def _create_delivery(
         self,
