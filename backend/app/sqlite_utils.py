@@ -75,8 +75,14 @@ def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
         name,
     ):
         _secure_existing_sidecars(parent_fd, name)
-        stable_path = f"/proc/self/fd/{parent_fd}/{name}"
+        # Point SQLite at the already validated database descriptor. Using the
+        # parent/name pathname here would let a post-validation symlink swap
+        # create or open an outside database before our identity check could
+        # reject it. SQLite's Unix VFS resolves this descriptor link to the
+        # original inode and derives sidecars beside that file.
+        stable_path = f"/proc/self/fd/{descriptor}"
         opened = os.fstat(descriptor)
+        expected_filename = os.readlink(stable_path)
         with _SQLITE_OPEN_LOCK:
             descriptor_count = _count_open_inode_descriptors(opened)
             connection = sqlite3.connect(
@@ -87,6 +93,17 @@ def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
             if _count_open_inode_descriptors(opened) <= descriptor_count:
                 connection.close()
                 raise OSError("SQLite opened a different inode than the validated database")
+            main_row = next(
+                (
+                    row
+                    for row in connection.execute("PRAGMA database_list").fetchall()
+                    if row[1] == "main"
+                ),
+                None,
+            )
+            if main_row is None or os.path.abspath(str(main_row[2])) != expected_filename:
+                connection.close()
+                raise OSError("SQLite database path changed while opening")
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
             connection.close()

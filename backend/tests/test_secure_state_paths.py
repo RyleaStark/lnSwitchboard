@@ -45,7 +45,7 @@ def test_primary_database_hardlink_is_rejected_without_mutation(tmp_path: Path) 
     assert _mode(target) == 0o644
 
 
-def test_sqlite_connection_rejects_swap_open_restore_before_writes(
+def test_sqlite_connection_binds_swap_open_restore_to_validated_inode(
     tmp_path: Path, monkeypatch
 ) -> None:
     database = tmp_path / "state.db"
@@ -65,13 +65,49 @@ def test_sqlite_connection_rejects_swap_open_restore_before_writes(
             os.rename(backup, database)
 
     monkeypatch.setattr(sqlite_utils.sqlite3, "connect", raced_connect)
-    with pytest.raises(OSError, match="different inode"):
+    with pytest.raises(OSError, match="path changed"):
         with sqlite_connection(database) as connection:
-            connection.execute("CREATE TABLE escaped(secret TEXT)")
+            connection.execute("CREATE TABLE stayed_private(secret TEXT)")
 
     with real_connect(outside) as connection:
         assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE name='escaped'"
+            "SELECT name FROM sqlite_master WHERE name='stayed_private'"
+        ).fetchall() == []
+    with real_connect(database) as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='stayed_private'"
+        ).fetchall() == []
+
+
+def test_sqlite_swap_to_dangling_outside_target_cannot_create_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "state.db"
+    outside = tmp_path / "outside" / "created-by-race.db"
+    outside.parent.mkdir()
+    sqlite3.connect(database).close()
+    backup = tmp_path / "state.original"
+    real_connect = sqlite_utils.sqlite3.connect
+
+    def raced_connect(path, *args, **kwargs):
+        os.rename(database, backup)
+        os.symlink(outside, database)
+        try:
+            return real_connect(path, *args, **kwargs)
+        finally:
+            os.unlink(database)
+            os.rename(backup, database)
+
+    monkeypatch.setattr(sqlite_utils.sqlite3, "connect", raced_connect)
+    with pytest.raises(OSError, match="path changed"):
+        with sqlite_connection(database) as connection:
+            connection.execute("CREATE TABLE stayed_private(secret TEXT)")
+
+    assert not outside.exists()
+    assert list(outside.parent.iterdir()) == []
+    with real_connect(database) as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='stayed_private'"
         ).fetchall() == []
 
 
