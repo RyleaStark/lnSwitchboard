@@ -158,6 +158,8 @@ def test_invalid_trusted_proxy_setting_is_rejected(monkeypatch) -> None:
     [
         "https://admin.example/api/cloudflare/oauth/callback",
         "http://192.168.1.10:22121/api/cloudflare/oauth/callback",
+        "http://localhost:22121/api/cloudflare/oauth/callback",
+        "http://[::ffff:127.0.0.1]:22121/api/cloudflare/oauth/callback",
         "http://127.0.0.1:22121/api/cloudflare/oauth/callback?forward=1",
         "http://user@127.0.0.1:22121/api/cloudflare/oauth/callback",
         "http://127.0.0.1:22121/not-the-oauth-callback",

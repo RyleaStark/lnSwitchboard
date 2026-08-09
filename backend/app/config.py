@@ -303,10 +303,15 @@ class Settings(BaseSettings):
             parsed = urlsplit(value)
             host = parsed.hostname
             port = parsed.port
-            is_loopback = host is not None and ip_address(host).is_loopback
+            address = ip_address(host) if host is not None else None
+            is_portable_loopback = (
+                address is not None
+                and address.is_loopback
+                and (address.version == 4 or address == ip_address("::1"))
+            )
             if not (
                 parsed.scheme == "http"
-                and is_loopback
+                and is_portable_loopback
                 and port is not None
                 and parsed.username is None
                 and parsed.password is None
