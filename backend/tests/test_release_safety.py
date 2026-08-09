@@ -77,6 +77,10 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert initializer["cap_drop"] == ["ALL"]
     assert set(initializer["cap_add"]) == {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
     assert initializer["security_opt"] == ["no-new-privileges:true"]
+    init_command = initializer["command"][-1]
+    assert "! -type d ! -type f" in init_command
+    assert "stat -c %h" in init_command
+    assert "chown -R -h 1000:1000" in init_command
 
 
 def test_compose_application_image_matches_version_file() -> None:

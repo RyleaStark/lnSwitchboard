@@ -18,14 +18,16 @@ services:
       - -c
       - |
         set -eu
-        test -z "$(find /app-secrets /tailscale-control /tailscale-state -xdev -type l -print)"
+        test -z "$$(find /app-secrets /tailscale-control /tailscale-state -xdev ! -type d ! -type f -print)"
+        find /app-secrets /tailscale-control /tailscale-state -xdev -type f \
+          -exec sh -ec 'for path do [ "$$(stat -c %h "$$path")" = 1 ] || exit 65; done' sh '{}' +
         install -d -m 0700 -o 1000 -g 1000 /app-secrets
         install -d -m 0700 -o 1000 -g 1000 /app-secrets/cloudflare-mesh
         install -d -m 0700 -o 1000 -g 1000 /tailscale-control
         install -d -m 0700 -o 1000 -g 1000 /tailscale-control/control
         install -d -m 0700 -o 1000 -g 1000 /tailscale-control/status
         install -d -m 0700 -o 1000 -g 1000 /tailscale-state
-        chown -R 1000:1000 /app-secrets /tailscale-control /tailscale-state
+        chown -R -h 1000:1000 /app-secrets /tailscale-control /tailscale-state
         find /app-secrets -xdev -type d -exec chmod 0700 '{}' +
         find /app-secrets -xdev -type f -exec chmod 0600 '{}' +
         if [ -f /app-secrets/cloudflare-mesh/node.env ]; then
