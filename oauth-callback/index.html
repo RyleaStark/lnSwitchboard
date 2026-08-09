@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <!-- Privacy: this static page loads nothing, sends nothing, and tracks nothing. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-N3HTihqR9p/jGOTPcDuP3aeaTQZ0uc2mG26dHGfNuRw='; style-src 'sha256-KxyoN0SOEhIi7z4/QQZZ9tQXnQncBfjKvxKpcPOqBDA='; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-hng6lX+gWwBkSLpr2NINLIk3jK4zb9/xWKhdFbKzNfU='; style-src 'sha256-KxyoN0SOEhIi7z4/QQZZ9tQXnQncBfjKvxKpcPOqBDA='; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <title>lnSwitchboard — Cloudflare authorization</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e8eaf0; }
@@ -57,17 +57,11 @@
 (function () {
   "use strict";
 
-  // Cloudflare OAuth supports response_mode=fragment, so the code arrives in
-  // location.hash and never touches any server. Fall back to the query string.
+  // Cloudflare OAuth uses response_mode=fragment, so the authorization
+  // response stays inside the browser and never touches the static host.
   function readParams() {
     var hash = window.location.hash || "";
-    if (hash.length > 1) {
-      var fromHash = new URLSearchParams(hash.substring(1));
-      if (fromHash.get("code") || fromHash.get("error")) {
-        return fromHash;
-      }
-    }
-    return new URLSearchParams(window.location.search);
+    return new URLSearchParams(hash.length > 1 ? hash.substring(1) : "");
   }
 
   var params = readParams();
