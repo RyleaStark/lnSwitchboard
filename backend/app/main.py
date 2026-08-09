@@ -350,9 +350,12 @@ async def lifespan(app: FastAPI):
             "Unable to verify LND connection (error_type=%s)",
             type(exc).__name__,
         )
-    public_backend_server, public_backend_task = await _start_public_backend(
-        settings.public_backend_socket_path
-    )
+    public_backend_server: uvicorn.Server | None = None
+    public_backend_task: asyncio.Task[None] | None = None
+    if settings.listener_mode == "admin":
+        public_backend_server, public_backend_task = await _start_public_backend(
+            settings.public_backend_socket_path
+        )
     log_cleanup_task = asyncio.create_task(_periodic_log_cleanup(storage))
     yield
     log_cleanup_task.cancel()
@@ -362,9 +365,10 @@ async def lifespan(app: FastAPI):
         cloudflare_authorization_cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cloudflare_authorization_cleanup_task
-    public_backend_server.should_exit = True
-    with suppress(asyncio.CancelledError):
-        await public_backend_task
+    if public_backend_server is not None and public_backend_task is not None:
+        public_backend_server.should_exit = True
+        with suppress(asyncio.CancelledError):
+            await public_backend_task
     await invoice_full_refresh_worker.stop()
     await invoice_subscription_worker.stop()
     await ln_client.close()
