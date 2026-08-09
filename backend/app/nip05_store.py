@@ -111,7 +111,13 @@ class NostrIdentityStore:
                 "CREATE INDEX IF NOT EXISTS idx_nostr_identity_domain ON nostr_identities(domain)"
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_nostr_identity_public ON nostr_identities(domain, local_part)"
+                """
+                CREATE INDEX IF NOT EXISTS idx_nostr_identity_public_bounded
+                ON nostr_identities(domain, local_part)
+                WHERE length(CAST(local_part AS BLOB)) <= 64
+                  AND length(CAST(domain AS BLOB)) <= 253
+                  AND length(CAST(pubkey_hex AS BLOB)) = 64
+                """
             )
 
     def _norm(self, value: str) -> str:
@@ -327,6 +333,9 @@ class NostrIdentityStore:
                                    created_at, updated_at
                             FROM nostr_identities
                             WHERE domain = ?
+                              AND length(CAST(local_part AS BLOB)) <= 64
+                              AND length(CAST(domain AS BLOB)) <= 253
+                              AND length(CAST(pubkey_hex AS BLOB)) = 64
                             ORDER BY local_part
                             LIMIT ?
                             """,
@@ -349,6 +358,9 @@ class NostrIdentityStore:
                                    created_at, updated_at
                             FROM nostr_identities
                             WHERE domain = ? AND local_part = ?
+                              AND length(CAST(local_part AS BLOB)) <= 64
+                              AND length(CAST(domain AS BLOB)) <= 253
+                              AND length(CAST(pubkey_hex AS BLOB)) = 64
                             LIMIT 1
                             """,
                             (normalized_domain, normalized_local),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import sqlite3
 from contextlib import closing
 
@@ -341,12 +343,16 @@ def test_public_nip05_bounds_legacy_rows_before_python_materialization(
             str(value)
             for row in conn.execute(
                 "EXPLAIN QUERY PLAN SELECT local_part FROM nostr_identities "
-                "WHERE domain = ? ORDER BY local_part LIMIT 16",
+                "WHERE domain = ? "
+                "AND length(CAST(local_part AS BLOB)) <= 64 "
+                "AND length(CAST(domain AS BLOB)) <= 253 "
+                "AND length(CAST(pubkey_hex AS BLOB)) = 64 "
+                "ORDER BY local_part LIMIT 16",
                 ("testserver",),
             )
             for value in row
         )
-    assert "idx_nostr_identity_public" in plan
+    assert "idx_nostr_identity_public_bounded" in plan
 
     aggregate = test_client.get("/.well-known/nostr.json")
     assert aggregate.status_code == 200
@@ -361,6 +367,51 @@ def test_public_nip05_bounds_legacy_rows_before_python_materialization(
     assert exact.status_code == 200
     assert exact.json()["names"] == {"legacy039": SAMPLE_HEX}
     assert "relays" not in exact.json()
+
+
+def test_bounded_public_index_build_skips_oversized_legacy_keys(tmp_path):
+    db_path = tmp_path / "legacy.sqlite"
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute(
+            """
+            CREATE TABLE nostr_identities (
+                id TEXT PRIMARY KEY,
+                local_part TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                npub TEXT NOT NULL,
+                pubkey_hex TEXT NOT NULL,
+                relays TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO nostr_identities VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("valid", "valid", "legacy.example", SAMPLE_NPUB, SAMPLE_HEX, "[]", "now", "now"),
+                (
+                    "oversized",
+                    "a" * (1024 * 1024),
+                    "legacy.example",
+                    SAMPLE_NPUB,
+                    SAMPLE_HEX,
+                    "[]",
+                    "now",
+                    "now",
+                ),
+            ],
+        )
+    os.chmod(db_path, 0o600)
+
+    store = NostrIdentityStore(db_path)
+    records = asyncio.run(store.get_public_by_domain("legacy.example"))
+    assert [record["local_part"] for record in records] == ["valid"]
+    with closing(sqlite3.connect(db_path)) as conn:
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_nostr_identity_public_bounded'"
+        ).fetchone()[0]
+    assert "WHERE length(CAST(local_part AS BLOB)) <= 64" in sql
 
 
 def test_public_profile_reports_ln_address_and_zap_readiness(test_client: TestClient):
