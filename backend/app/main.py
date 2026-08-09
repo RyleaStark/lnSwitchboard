@@ -408,7 +408,16 @@ def _add_request_security(target_app: FastAPI) -> None:
             client_ip = ip_address(client_host)
         except ValueError:
             client_ip = None
-        if client_ip is None or not any(client_ip in network for network in trusted_networks):
+        internal_loopback = (
+            request.client is None
+            and bool(internal_client)
+            and client_ip is not None
+            and client_ip.is_loopback
+        )
+        if client_ip is None or not (
+            internal_loopback
+            or any(client_ip in network for network in trusted_networks)
+        ):
             request.scope["headers"] = [
                 (name, value)
                 for name, value in request.scope["headers"]

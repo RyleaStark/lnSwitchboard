@@ -73,6 +73,13 @@ def test_internal_gateway_peer_still_walks_the_trusted_proxy_chain(trusted_cidrs
     assert get_client_ip(request) == "198.51.100.9"
 
 
+def test_internal_loopback_gateway_walks_tailscale_forwarding(trusted_cidrs) -> None:
+    request = _request(None, {"x-forwarded-for": "198.51.100.9"})
+    request.state.internal_client_ip = "127.0.0.1"
+
+    assert get_client_ip(request) == "198.51.100.9"
+
+
 def test_edge_headers_no_longer_override_the_chain(trusted_cidrs) -> None:
     request = _request(
         "10.0.0.2",

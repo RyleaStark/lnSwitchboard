@@ -114,6 +114,8 @@ def _resolve_client_ip(
             address = ip_address(value)
         except ValueError:
             return False
+        if internal_client and value == internal_client and address.is_loopback:
+            return True
         networks = parse_trusted_proxy_cidrs(get_settings().trusted_proxy_cidrs)
         return any(
             address in network for network in networks if address.version == network.version
