@@ -1,11 +1,35 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
 import yaml
 
+from backend.app.main import _periodic_log_cleanup
+
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_idle_service_runs_periodic_retention_cleanup() -> None:
+    async def exercise() -> None:
+        cleaned = asyncio.Event()
+
+        class Storage:
+            async def cleanup(self) -> None:
+                cleaned.set()
+
+        task = asyncio.create_task(_periodic_log_cleanup(Storage(), interval_seconds=0.01))
+        try:
+            await asyncio.wait_for(cleaned.wait(), timeout=0.2)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(exercise())
 
 
 def _workflow() -> dict:
@@ -79,7 +103,7 @@ def test_primary_application_container_is_least_privilege() -> None:
         "CMD",
         "python",
         "-c",
-        "import socket; socket.create_connection(('127.0.0.1', 22121), 2).close()",
+        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:22121/api/health', timeout=2).read()",
     ]
 
     assert public["user"] == "1000:1000"

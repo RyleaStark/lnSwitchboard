@@ -194,6 +194,20 @@ def _parse_forwarded_ip(value: str):
     return _normalized_address(cleaned)
 
 
+async def _periodic_log_cleanup(storage, *, interval_seconds: float = 3600.0) -> None:
+    """Enforce retention even while the service is idle."""
+
+    while True:
+        await asyncio.sleep(max(0.01, float(interval_seconds)))
+        try:
+            await storage.cleanup()
+        except Exception as exc:  # pragma: no cover - storage runtime
+            LOGGER.warning(
+                "Unable to run periodic history cleanup (error_type=%s)",
+                type(exc).__name__,
+            )
+
+
 def _get_admin_proxy_client(request: Request, cidrs: str) -> str | None:
     """Resolve X-Forwarded-For from right to left across local trusted proxies."""
 
@@ -297,7 +311,11 @@ async def lifespan(app: FastAPI):
             "Unable to verify LND connection (error_type=%s)",
             type(exc).__name__,
         )
+    log_cleanup_task = asyncio.create_task(_periodic_log_cleanup(storage))
     yield
+    log_cleanup_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await log_cleanup_task
     if cloudflare_authorization_cleanup_task is not None:
         cloudflare_authorization_cleanup_task.cancel()
         with suppress(asyncio.CancelledError):

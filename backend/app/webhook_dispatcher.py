@@ -482,6 +482,16 @@ class WebhookDispatcher:
                 lease_seconds=max(300, int(self._timeout * 4)),
             )
             if claim is None:
+                if not manual:
+                    delay = await self._delivery_storage.get_delivery_claim_retry_delay(
+                        delivery_id
+                    )
+                    if delay is not None:
+                        self._schedule_retry(
+                            next_attempt=attempt,
+                            delivery_id=delivery_id,
+                            delay_seconds=delay,
+                        )
                 return False
             claim_token = str(claim["token"])
             attempt = int(claim["attempt_number"])

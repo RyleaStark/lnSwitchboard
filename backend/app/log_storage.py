@@ -1200,6 +1200,30 @@ class RequestLogStorage:
             except sqlite3.Error:
                 return None
 
+    async def get_delivery_claim_retry_delay(self, delivery_id: int) -> Optional[float]:
+        """Return seconds until an active delivery lease may be reclaimed."""
+
+        now = datetime.now(tz=timezone.utc)
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        "SELECT status, claim_token, claim_expires_at "
+                        "FROM webhook_deliveries WHERE id = ?",
+                        (delivery_id,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return None
+        if row is None or str(row["status"] or "") not in {"pending", "retrying"}:
+            return None
+        if not str(row["claim_token"] or ""):
+            return None
+        try:
+            expires = datetime.fromisoformat(str(row["claim_expires_at"] or ""))
+        except ValueError:
+            return 0.05
+        return max(0.0, (expires - now).total_seconds()) + 0.05
+
     async def complete_claimed_delivery_attempt(
         self,
         *,

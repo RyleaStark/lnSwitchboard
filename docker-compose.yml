@@ -64,15 +64,13 @@ services:
     ports:
       - "${LNSWITCHBOARD_BIND_ADDRESS:-127.0.0.1}:22121:22121"
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 22121), 2).close()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:22121/api/health', timeout=2).read()"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
     networks:
-      default:
-        aliases:
-          - lns.internal
+      default: {}
 
   lnswitchboard-public:
     image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc22}
@@ -113,6 +111,7 @@ services:
       cloudflare-egress:
         aliases:
           - lnswitchboard-public
+          - lns.internal
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 21212), 2).close()"]
       interval: 30s

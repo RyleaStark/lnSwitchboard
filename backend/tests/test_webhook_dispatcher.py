@@ -6,7 +6,7 @@ import hmac
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -863,6 +863,51 @@ async def _exercise_two_dispatchers_share_one_persistent_retry_claim(tmp_path) -
     assert refreshed is not None and refreshed["status"] == "delivered"
     attempts = await seed_storage.list_delivery_attempts(int(delivery["id"]))
     assert [item["attempt_number"] for item in attempts] == [1, 2]
+
+
+def test_restart_wakes_retry_after_crash_claim_expires(tmp_path):
+    asyncio.run(_exercise_restart_wakes_retry_after_crash_claim_expires(tmp_path))
+
+
+async def _exercise_restart_wakes_retry_after_crash_claim_expires(tmp_path):
+    db_path, address_store, storage, event, details, settled_at = (
+        await _seed_retry_authority(tmp_path, "expired-crash-claim.db")
+    )
+
+    async def fail_seed(_url, _payload, _headers):
+        raise RuntimeError("seed")
+
+    seed = WebhookDispatcher(
+        address_store=address_store, delivery_storage=storage, sender=fail_seed,
+        max_retries=2, retry_window_seconds=60,
+    )
+    assert not await seed.dispatch_payment_settled(
+        event=event, details=details, settled_at=settled_at
+    )
+    await _cancel_retry_tasks(seed)
+    delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
+    expires = (datetime.now(tz=timezone.utc) + timedelta(seconds=0.15)).isoformat()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE webhook_deliveries SET claim_token='crashed', claim_expires_at=?, "
+            "claim_attempt_number=2 WHERE id=?",
+            (expires, delivery["id"]),
+        )
+
+    calls = 0
+
+    async def succeed(_url, _payload, _headers):
+        nonlocal calls
+        calls += 1
+
+    restarted = WebhookDispatcher(
+        address_store=address_store, delivery_storage=RequestLogStorage(db_path),
+        sender=succeed, max_retries=2, retry_window_seconds=0.1,
+    )
+    assert await restarted.resume_pending_retries() == 1
+    await asyncio.sleep(0.35)
+    await _cancel_retry_tasks(restarted)
+    assert calls == 1
 
 
 async def _exercise_manual_replay_cannot_overlap_initial_claim(tmp_path) -> None:

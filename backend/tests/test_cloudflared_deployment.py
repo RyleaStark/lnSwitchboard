@@ -59,7 +59,12 @@ def test_compose_mesh_sidecar_contract_is_isolated_and_digest_pinned() -> None:
     assert mesh["depends_on"]["lnswitchboard-public"]["condition"] == (
         "service_healthy"
     )
-    assert app["networks"]["default"]["aliases"] == ["lns.internal"]
+    public = services["lnswitchboard-public"]
+    assert "lns.internal" not in app["networks"].get("default", {}).get("aliases", [])
+    assert public["networks"]["cloudflare-egress"]["aliases"] == [
+        "lnswitchboard-public",
+        "lns.internal",
+    ]
 
 
 def test_compose_never_exposes_docker_socket_or_admin_origin_to_mesh() -> None:
