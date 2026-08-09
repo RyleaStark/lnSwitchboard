@@ -5,13 +5,14 @@ import hashlib
 import hmac
 import json
 import logging
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
 
 from backend.app.ln_address_store import LNAddressStore
 from backend.app.log_storage import InvoiceEvent, RequestLogStorage
-from ..app.outbound_security import UnsafeOutboundTarget
+from ..app.outbound_security import OutboundHTTPStatusError, UnsafeOutboundTarget
 from backend.app.webhook_dispatcher import WebhookDispatcher
 
 
@@ -149,6 +150,155 @@ def test_failure_logs_do_not_expose_webhook_url_or_exception_secrets(
     asyncio.run(exercise())
 
 
+def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> None:
+    async def exercise() -> None:
+        db_path = tmp_path / "persisted-redaction.db"
+        storage = RequestLogStorage(db_path)
+        address_store = LNAddressStore(db_path)
+        secret_url = (
+            "https://hooks.example.invalid/services/PERSISTED_PATH_SECRET"
+            "?token=PERSISTED_QUERY_SECRET"
+        )
+        address = await address_store.add_address(
+            local_part="pay",
+            domain="testserver",
+            min_sendable_sat=None,
+            max_sendable_sat=None,
+            metadata_description=None,
+            success_message=None,
+            webhook_urls=[secret_url],
+        )
+        event, details = _make_event(address)
+
+        class SecretStatusError(OutboundHTTPStatusError):
+            def __str__(self) -> str:
+                return "PERSISTED_EXCEPTION_SECRET"
+
+        async def sender(url, payload, headers):
+            raise SecretStatusError(503, "PERSISTED_RESPONSE_SECRET")
+
+        dispatcher = WebhookDispatcher(
+            address_store=address_store,
+            delivery_storage=storage,
+            sender=sender,
+            max_retries=0,
+        )
+        delivered = await dispatcher.dispatch_payment_settled(
+            event=event,
+            details=details,
+            settled_at=datetime.now(tz=timezone.utc),
+        )
+        assert delivered is False
+
+        exposed = json.dumps(
+            {
+                "deliveries": await storage.list_deliveries(page=1, page_size=5),
+                "attempts": await storage.list_delivery_attempts(1),
+                "request_logs": await storage.get_recent(),
+            },
+            sort_keys=True,
+        )
+        with sqlite3.connect(db_path) as conn:
+            persisted = json.dumps(
+                {
+                    "deliveries": conn.execute(
+                        "SELECT target, headers FROM webhook_deliveries"
+                    ).fetchall(),
+                    "attempts": conn.execute(
+                        "SELECT error, response_body FROM webhook_attempts"
+                    ).fetchall(),
+                    "request_logs": conn.execute(
+                        "SELECT message, details FROM request_logs WHERE event = 'webhook_delivery'"
+                    ).fetchall(),
+                },
+                sort_keys=True,
+            )
+
+        for secret in (
+            "PERSISTED_PATH_SECRET",
+            "PERSISTED_QUERY_SECRET",
+            "PERSISTED_EXCEPTION_SECRET",
+            "PERSISTED_RESPONSE_SECRET",
+        ):
+            assert secret not in exposed
+            assert secret not in persisted
+
+    asyncio.run(exercise())
+
+
+def test_startup_scrubs_legacy_webhook_history_secrets(tmp_path) -> None:
+    db_path = tmp_path / "legacy-redaction.db"
+    RequestLogStorage(db_path)
+    now = datetime.now(tz=timezone.utc).isoformat()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "DELETE FROM lnswitchboard_migrations WHERE name = 'webhook_history_redaction_v1'"
+        )
+        conn.execute(
+            """
+            INSERT INTO webhook_deliveries (
+                created_at, updated_at, kind, event, target, status, payload,
+                headers, address_id, invoice_event_id, request_log_id, delivery_key
+            ) VALUES (?, ?, 'http.webhook', 'payment.settled', ?, 'failed', '{}', ?, NULL, NULL, NULL, 'legacy')
+            """,
+            (
+                now,
+                now,
+                "https://hooks.invalid/LEGACY_PATH_SECRET?token=LEGACY_QUERY_SECRET",
+                json.dumps({"X-LnSwitchboard-Signature": "LEGACY_SIGNATURE_SECRET"}),
+            ),
+        )
+        delivery_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO webhook_attempts (
+                delivery_id, attempted_at, attempt_number, success, error, response_body
+            ) VALUES (?, ?, 1, 0, 'LEGACY_EXCEPTION_SECRET', 'LEGACY_RESPONSE_SECRET')
+            """,
+            (delivery_id, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO request_logs (
+                timestamp, username, ip, event, status, message, details
+            ) VALUES (?, 'webhook', 'internal', 'webhook_delivery', 'failed',
+                      'LEGACY_LOG_SECRET', '{"target":"LEGACY_DETAIL_SECRET"}')
+            """,
+            (now,),
+        )
+
+    RequestLogStorage(db_path)
+    with sqlite3.connect(db_path) as conn:
+        persisted = json.dumps(
+            {
+                "deliveries": conn.execute(
+                    "SELECT target, headers FROM webhook_deliveries"
+                ).fetchall(),
+                "attempts": conn.execute(
+                    "SELECT error, response_body FROM webhook_attempts"
+                ).fetchall(),
+                "request_logs": conn.execute(
+                    "SELECT message, details FROM request_logs WHERE event = 'webhook_delivery'"
+                ).fetchall(),
+            },
+            sort_keys=True,
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM lnswitchboard_migrations WHERE name = 'webhook_history_redaction_v1'"
+        ).fetchone()[0] == 1
+
+    for secret in (
+        "LEGACY_PATH_SECRET",
+        "LEGACY_QUERY_SECRET",
+        "LEGACY_SIGNATURE_SECRET",
+        "LEGACY_EXCEPTION_SECRET",
+        "LEGACY_RESPONSE_SECRET",
+        "LEGACY_LOG_SECRET",
+        "LEGACY_DETAIL_SECRET",
+    ):
+        assert secret not in persisted
+
+
 async def _exercise_retry_eventually_succeeds(tmp_path):
     address_store, address = await _create_address(tmp_path)
     event, details = _make_event(address)
@@ -266,7 +416,8 @@ async def _exercise_delivery_history_and_hmac_headers(tmp_path):
     assert deliveries["total_items"] == 1
     delivery = deliveries["items"][0]
     assert delivery["status"] == "delivered"
-    assert delivery["target"] == "https://hooks.example.com/payments"
+    target_reference = f"webhook:{hashlib.sha256(b'https://hooks.example.com/payments').hexdigest()[:16]}"
+    assert delivery["target"] == target_reference
     assert delivery["last_attempt"]["success"] is True
     delivery_logs = [entry for entry in await storage.get_recent() if entry["event"] == "webhook_delivery"]
     assert len(delivery_logs) == 1
@@ -278,7 +429,8 @@ async def _exercise_delivery_history_and_hmac_headers(tmp_path):
     assert delivery_log["details"]["delivery_id"] == delivery["id"]
     assert delivery_log["details"]["delivery_status"] == "delivered"
     assert delivery_log["details"]["attempt_number"] == 1
-    assert delivery_log["details"]["headers"]["X-LnSwitchboard-Signature"].startswith("sha256=")
+    assert "X-LnSwitchboard-Signature" not in delivery_log["details"]["headers"]
+    assert delivery_log["details"]["headers"]["X-LnSwitchboard-Delivery-Id"] == delivery_id
 
 
 def test_webhook_filters_skip_non_matching_endpoint(tmp_path):
@@ -328,7 +480,9 @@ async def _exercise_webhook_filters_skip_non_matching_endpoint(tmp_path):
     assert len(delivery_logs) == 1
     assert delivery_logs[0]["status"] == "skipped"
     assert delivery_logs[0]["details"]["delivery_status"] == "skipped"
-    assert delivery_logs[0]["details"]["target"] == "https://hooks.example.com/payments"
+    assert delivery_logs[0]["details"]["target"] == (
+        f"webhook:{hashlib.sha256(b'https://hooks.example.com/payments').hexdigest()[:16]}"
+    )
 
 
 def test_webhook_retry_resumes_after_restart(tmp_path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import hashlib
 import json
 import sqlite3
 import math
@@ -40,6 +41,37 @@ def _normalize_details(details: Dict[str, Any] | None) -> Dict[str, Any] | None:
         return _json_safe(details)
     except Exception:
         return {"_raw": repr(details)}
+
+
+def _delivery_target_reference(target: Any) -> str:
+    value = str(target or "")
+    if value.startswith("webhook:"):
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"webhook:{digest}"
+
+
+def _safe_delivery_error(error: Any) -> str | None:
+    if error in (None, ""):
+        return None
+    value = str(error)
+    normalized = value.replace(".", "").replace("_", "")
+    if value.endswith(("Error", "Exception")) and normalized.isalnum():
+        return value[:128]
+    return "DeliveryError"
+
+
+def _safe_delivery_headers(headers: Any) -> Dict[str, Any]:
+    if not isinstance(headers, dict):
+        return {}
+    allowed = {
+        "User-Agent",
+        "X-LnSwitchboard-Event",
+        "X-LnSwitchboard-Version",
+        "X-LnSwitchboard-Address-Id",
+        "X-LnSwitchboard-Delivery-Id",
+    }
+    return {str(key): value for key, value in headers.items() if str(key) in allowed}
 
 
 @dataclass
@@ -219,6 +251,38 @@ class RequestLogStorage:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_webhook_attempts_delivery ON webhook_attempts(delivery_id)"
             )
+            self._redact_legacy_webhook_history(conn)
+
+    def _redact_legacy_webhook_history(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lnswitchboard_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        migration_name = "webhook_history_redaction_v1"
+        applied = conn.execute(
+            "SELECT 1 FROM lnswitchboard_migrations WHERE name = ?",
+            (migration_name,),
+        ).fetchone()
+        if applied:
+            return
+        rows = conn.execute("SELECT id, target FROM webhook_deliveries").fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE webhook_deliveries SET target = ?, headers = '{}' WHERE id = ?",
+                (_delivery_target_reference(row["target"]), int(row["id"])),
+            )
+        conn.execute(
+            "UPDATE webhook_attempts SET error = CASE WHEN error IS NULL THEN NULL ELSE 'DeliveryError' END, response_body = NULL"
+        )
+        conn.execute("DELETE FROM request_logs WHERE event = 'webhook_delivery'")
+        conn.execute(
+            "INSERT INTO lnswitchboard_migrations (name, applied_at) VALUES (?, ?)",
+            (migration_name, datetime.now(tz=timezone.utc).isoformat()),
+        )
 
     def _ensure_invoice_event_columns(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(invoice_events)")}
@@ -316,14 +380,6 @@ class RequestLogStorage:
                 return {"_raw": payload}
         return payload
 
-    def _redact_response_body(self, body: Optional[str], limit: int = 1000) -> Optional[str]:
-        if body is None:
-            return None
-        text = str(body)
-        if len(text) <= limit:
-            return text
-        return f"{text[:limit]}..."
-
     def _row_to_delivery(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {
             "id": row["id"],
@@ -331,10 +387,10 @@ class RequestLogStorage:
             "updated_at": row["updated_at"],
             "kind": row["kind"],
             "event": row["event"],
-            "target": row["target"],
+            "target": _delivery_target_reference(row["target"]),
             "status": row["status"],
             "payload": self._deserialize_details(row["payload"]),
-            "headers": self._deserialize_details(row["headers"]),
+            "headers": _safe_delivery_headers(self._deserialize_details(row["headers"])),
             "address_id": row["address_id"],
             "invoice_event_id": row["invoice_event_id"],
             "request_log_id": row["request_log_id"],
@@ -350,8 +406,8 @@ class RequestLogStorage:
             "success": bool(row["success"]),
             "status_code": row["status_code"],
             "latency_ms": row["latency_ms"],
-            "error": row["error"],
-            "response_body": row["response_body"],
+            "error": _safe_delivery_error(row["error"]),
+            "response_body": None,
         }
 
     def _row_to_delivery_log_attempt(
@@ -373,8 +429,8 @@ class RequestLogStorage:
             "success": success,
             "status_code": status_code,
             "latency_ms": latency_ms,
-            "error": error,
-            "response_body": response_body,
+            "error": _safe_delivery_error(error),
+            "response_body": None,
         }
 
     def _delivery_payload_context(self, payload: Any) -> tuple[str, str | None, int | None, Dict[str, Any]]:
@@ -498,10 +554,10 @@ class RequestLogStorage:
         payload = delivery.get("payload")
         username, domain, amount_msat, recipient_details = self._delivery_payload_context(payload)
         kind = str(delivery.get("kind") or "webhook")
-        target = str(delivery.get("target") or "")
+        target = _delivery_target_reference(delivery.get("target"))
         success = bool(attempt.get("success")) if isinstance(attempt, dict) else None
         attempt_number = attempt.get("attempt_number") if isinstance(attempt, dict) else None
-        error = attempt.get("error") if isinstance(attempt, dict) else None
+        error = _safe_delivery_error(attempt.get("error")) if isinstance(attempt, dict) else None
         details: Dict[str, Any] = {
             **recipient_details,
             "delivery_id": delivery.get("id"),
@@ -514,7 +570,7 @@ class RequestLogStorage:
             "request_log_id": delivery.get("request_log_id"),
             "delivery_key": delivery.get("delivery_key"),
             "payload": payload,
-            "headers": delivery.get("headers") or {},
+            "headers": _safe_delivery_headers(delivery.get("headers")),
         }
         if attempt is not None:
             details["attempt"] = attempt
@@ -522,7 +578,7 @@ class RequestLogStorage:
             details["status_code"] = attempt.get("status_code")
             details["latency_ms"] = attempt.get("latency_ms")
             details["error"] = error
-            details["response_body"] = attempt.get("response_body")
+            details["response_body"] = None
         return self._insert_request_log_locked(
             conn,
             timestamp=timestamp,
@@ -620,6 +676,8 @@ class RequestLogStorage:
         delivery_key: Optional[str] = None,
     ) -> int:
         now_iso = datetime.now(tz=timezone.utc).isoformat()
+        target_reference = _delivery_target_reference(target)
+        safe_headers = _safe_delivery_headers(headers)
         async with self._lock:
             try:
                 with self._connect() as conn:
@@ -653,10 +711,10 @@ class RequestLogStorage:
                             now_iso,
                             kind,
                             event,
-                            target,
+                            target_reference,
                             status,
                             self._serialize_details(payload),
-                            self._serialize_details(headers or {}),
+                            self._serialize_details(safe_headers),
                             address_id,
                             invoice_event_id,
                             request_log_id,
@@ -673,10 +731,10 @@ class RequestLogStorage:
                                 "updated_at": now_iso,
                                 "kind": kind,
                                 "event": event,
-                                "target": target,
+                                "target": target_reference,
                                 "status": status,
                                 "payload": payload,
-                                "headers": headers or {},
+                                "headers": safe_headers,
                                 "address_id": address_id,
                                 "invoice_event_id": invoice_event_id,
                                 "request_log_id": request_log_id,
@@ -710,7 +768,12 @@ class RequestLogStorage:
                     else:
                         conn.execute(
                             "UPDATE webhook_deliveries SET status = ?, headers = ?, updated_at = ? WHERE id = ?",
-                            (status, self._serialize_details(headers), now_iso, delivery_id),
+                            (
+                                status,
+                                self._serialize_details(_safe_delivery_headers(headers)),
+                                now_iso,
+                                delivery_id,
+                            ),
                         )
             except sqlite3.Error:
                 return
@@ -730,7 +793,8 @@ class RequestLogStorage:
             return
         attempted_at = datetime.now(tz=timezone.utc).isoformat()
         final_status = delivery_status or ("delivered" if success else "failed")
-        redacted_response = self._redact_response_body(response_body)
+        safe_error = _safe_delivery_error(error)
+        redacted_response = None
         async with self._lock:
             try:
                 with self._connect() as conn:
@@ -760,7 +824,7 @@ class RequestLogStorage:
                             1 if success else 0,
                             status_code,
                             latency_ms,
-                            error,
+                            safe_error,
                             redacted_response,
                         ),
                     )
@@ -790,7 +854,7 @@ class RequestLogStorage:
                                 success=success,
                                 status_code=status_code,
                                 latency_ms=latency_ms,
-                                error=error,
+                                error=safe_error,
                                 response_body=redacted_response,
                             ),
                         )
