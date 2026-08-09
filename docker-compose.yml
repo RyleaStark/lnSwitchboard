@@ -81,6 +81,8 @@ services:
     depends_on:
       permissions-init:
         condition: service_completed_successfully
+      lnswitchboard:
+        condition: service_healthy
     user: "1000:1000"
     read_only: true
     cap_drop:

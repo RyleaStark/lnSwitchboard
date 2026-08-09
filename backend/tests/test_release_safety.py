@@ -87,6 +87,10 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert public["cap_drop"] == ["ALL"]
     assert public["security_opt"] == ["no-new-privileges:true"]
     assert public["environment"]["LISTENER_MODE"] == "public"
+    assert public["depends_on"]["permissions-init"]["condition"] == (
+        "service_completed_successfully"
+    )
+    assert public["depends_on"]["lnswitchboard"]["condition"] == "service_healthy"
     assert public["environment"]["CLOUDFLARED_CONNECTOR_ENABLED"] == "false"
     assert public["environment"]["TAILSCALE_CONNECTOR_ENABLED"] == "false"
     assert set(public["networks"]) == {"cloudflare-egress"}
