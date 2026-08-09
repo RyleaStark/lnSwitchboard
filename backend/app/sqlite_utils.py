@@ -16,7 +16,7 @@ from .secure_files import private_regular
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-_SQLITE_OPEN_LOCK = threading.Lock()
+_SQLITE_OPEN_LOCK = threading.RLock()
 
 
 def _deny_sidecar_mode_changes(
@@ -100,7 +100,7 @@ def _count_open_inode_descriptors(info: os.stat_result) -> int:
 
 
 @contextmanager
-def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
+def _sqlite_connection_locked(path: Path) -> Iterator[sqlite3.Connection]:
     """Yield a transaction bound to stable database and journal descriptors."""
 
     with private_regular(path, writable=True, create=True) as (
@@ -178,7 +178,11 @@ def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
                 yield connection
         finally:
             if connection is not None:
-                connection.close()
+                # Descriptor-delta verification is process-wide. Serialize every
+                # managed close with opens so one connection cannot disappear
+                # between another connection's before/after inode counts.
+                with _SQLITE_OPEN_LOCK:
+                    connection.close()
             try:
                 journal_current = os.stat(
                     f"{name}-journal", dir_fd=parent_fd, follow_symlinks=False
@@ -191,3 +195,15 @@ def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
             finally:
                 os.close(journal_descriptor)
             _secure_existing_sidecars(parent_fd, name)
+
+
+@contextmanager
+def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    """Yield one process-serialized secure SQLite connection lifecycle."""
+
+    # EXCLUSIVE rollback-journal locking and process-wide descriptor binding are
+    # intentionally one lifecycle protocol. Overlap would make descriptor deltas
+    # ambiguous and competing EXCLUSIVE connections fail with database-locked.
+    with _SQLITE_OPEN_LOCK:
+        with _sqlite_connection_locked(path) as connection:
+            yield connection

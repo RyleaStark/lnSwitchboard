@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -79,3 +80,24 @@ def test_sqlite_database_symlink_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(OSError, match="symbolic link"):
         with sqlite_connection(alias):
             pass
+
+
+def test_sqlite_connection_descriptor_binding_survives_concurrent_lifecycles(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "concurrent.db"
+    with sqlite_connection(database) as connection:
+        connection.execute("CREATE TABLE records (worker INTEGER, iteration INTEGER)")
+
+    def worker(_worker_id: int) -> int:
+        completed = 0
+        for _iteration in range(30):
+            with sqlite_connection(database) as connection:
+                connection.execute("SELECT COUNT(*) FROM records").fetchone()
+            completed += 1
+        return completed
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        completed = list(executor.map(worker, range(4)))
+
+    assert completed == [30, 30, 30, 30]

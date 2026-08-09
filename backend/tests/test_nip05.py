@@ -172,6 +172,58 @@ def test_identity_relays_must_be_websocket_urls(test_client: TestClient):
     assert item["relays"] == ["wss://relay.nostr.net"]
 
 
+def test_identity_rejects_values_that_cannot_fit_the_public_representation(
+    test_client: TestClient,
+):
+    oversized_relay = f"wss://relay.example/{'x' * 2048}"
+    response = test_client.post(
+        "/api/nip05/identities",
+        json={
+            "local_part": "bounded",
+            "domain": "testserver",
+            "npub": SAMPLE_NPUB,
+            "relays": [oversized_relay],
+        },
+    )
+    assert response.status_code == 422
+    assert "too long" in response.text.lower()
+
+    response = test_client.post(
+        "/api/nip05/identities",
+        json={
+            "local_part": "x" * 65,
+            "domain": "testserver",
+            "npub": SAMPLE_NPUB,
+            "relays": [],
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_identity_domain_count_is_bounded_for_public_aggregate(test_client: TestClient):
+    for index in range(16):
+        create_identity(
+            test_client,
+            {
+                "local_part": f"bounded{index}",
+                "domain": "testserver",
+                "npub": SAMPLE_NPUB,
+                "relays": ["wss://relay.example"],
+            },
+        )
+    response = test_client.post(
+        "/api/nip05/identities",
+        json={
+            "local_part": "bounded-overflow",
+            "domain": "testserver",
+            "npub": SAMPLE_NPUB,
+            "relays": [],
+        },
+    )
+    assert response.status_code == 409
+    assert "at most 16" in response.text
+
+
 def test_identity_rejects_reserved_local_part(test_client: TestClient):
     response = test_client.post(
         "/api/nip05/identities",

@@ -15,7 +15,9 @@ from ..ln_address_store import LNAddressStore
 from ..nostr_signer_store import NostrSignerStore
 from ..nip05_store import (
     IdentityConflictError,
+    IdentityDomainLimitError,
     IdentityNotFoundError,
+    MAX_IDENTITIES_PER_DOMAIN,
     NostrIdentityStore,
 )
 from ..nip05_utils import NpubFormatError, hex_to_npub, npub_to_hex
@@ -29,6 +31,9 @@ LOCAL_PART_PATTERN = re.compile(r"^[a-z0-9._-]+$")
 DOMAIN_PATTERN = re.compile(r"^[a-z0-9.-]+$")
 ALLOWED_RELAY_SCHEMES = {"ws", "wss"}
 MAX_RELAYS = 16
+MAX_RELAY_URL_LENGTH = 512
+MAX_LOCAL_PART_LENGTH = 64
+MAX_DOMAIN_LENGTH = 253
 RESERVED_LOCAL_PARTS = {"nip-profile"}
 
 
@@ -44,6 +49,8 @@ class IdentityPayload(BaseModel):
         normalized = value.strip().lower()
         if not normalized:
             raise ValueError("local-part is required")
+        if len(normalized) > MAX_LOCAL_PART_LENGTH:
+            raise ValueError(f"local-part must be at most {MAX_LOCAL_PART_LENGTH} characters")
         if "@" in normalized:
             raise ValueError("Do not include '@' in the local-part")
         if not LOCAL_PART_PATTERN.fullmatch(normalized):
@@ -58,6 +65,8 @@ class IdentityPayload(BaseModel):
         normalized = value.strip().lower()
         if not normalized:
             raise ValueError("domain is required")
+        if len(normalized) > MAX_DOMAIN_LENGTH:
+            raise ValueError(f"domain must be at most {MAX_DOMAIN_LENGTH} characters")
         if "://" in normalized:
             raise ValueError("domain must not include a URL scheme")
         normalized = normalized.rstrip(".")
@@ -82,6 +91,10 @@ def _normalize_relays(relays: Sequence[str]) -> List[str]:
         cleaned = relay.strip()
         if not cleaned:
             continue
+        if len(cleaned) > MAX_RELAY_URL_LENGTH:
+            raise ValueError(
+                f"Relay URL is too long; maximum is {MAX_RELAY_URL_LENGTH} characters"
+            )
         parsed = urlsplit(cleaned if "://" in cleaned else f"wss://{cleaned}")
         if parsed.scheme.lower() not in ALLOWED_RELAY_SCHEMES:
             raise ValueError("Relay URLs must use ws:// or wss://")
@@ -107,7 +120,7 @@ def _public_relays(relays: Any) -> List[str]:
         return []
     normalized: List[str] = []
     seen = set()
-    for relay in relays:
+    for relay in relays[:MAX_RELAYS]:
         if not isinstance(relay, str):
             continue
         try:
@@ -171,7 +184,7 @@ async def create_identity(
     data = _prepare_payload(payload)
     try:
         created = await store.add_identity(**data)
-    except IdentityConflictError as exc:
+    except (IdentityConflictError, IdentityDomainLimitError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return {"item": _serialize_identity(created)}
 
@@ -187,7 +200,7 @@ async def update_identity(
         updated = await store.update_identity(identity_id, **data)
     except IdentityNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Identity not found") from exc
-    except IdentityConflictError as exc:
+    except (IdentityConflictError, IdentityDomainLimitError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return {"item": _serialize_identity(updated)}
 
@@ -222,6 +235,8 @@ async def nostr_well_known(
     if name:
         target = name.strip().lower()
         entries = [entry for entry in entries if entry["local_part"] == target]
+    else:
+        entries = entries[:MAX_IDENTITIES_PER_DOMAIN]
     names = {entry["local_part"]: entry["pubkey_hex"] for entry in entries}
     relays_map: Dict[str, List[str]] = {}
     for entry in entries:

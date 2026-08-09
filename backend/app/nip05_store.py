@@ -69,6 +69,13 @@ class IdentityNotFoundError(KeyError):
     """Raised when an identity record cannot be found."""
 
 
+class IdentityDomainLimitError(ValueError):
+    """Raised when a domain cannot safely add another public identity."""
+
+
+MAX_IDENTITIES_PER_DOMAIN = 16
+
+
 class NostrIdentityStore:
     """SQLite-backed identity registry with coarse locking."""
 
@@ -165,6 +172,14 @@ class NostrIdentityStore:
             }
             try:
                 with self._connect() as conn:
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM nostr_identities WHERE domain = ?",
+                        (normalized_domain,),
+                    ).fetchone()[0]
+                    if int(count) >= MAX_IDENTITIES_PER_DOMAIN:
+                        raise IdentityDomainLimitError(
+                            f"A domain may have at most {MAX_IDENTITIES_PER_DOMAIN} NIP-05 identities"
+                        )
                     conn.execute(
                         """
                         INSERT INTO nostr_identities (
@@ -203,6 +218,20 @@ class NostrIdentityStore:
             now_iso = _now_iso()
             try:
                 with self._connect() as conn:
+                    current = conn.execute(
+                        "SELECT domain FROM nostr_identities WHERE id = ?", (identity_id,)
+                    ).fetchone()
+                    if current is None:
+                        raise IdentityNotFoundError(identity_id)
+                    if str(current[0]) != normalized_domain:
+                        count = conn.execute(
+                            "SELECT COUNT(*) FROM nostr_identities WHERE domain = ?",
+                            (normalized_domain,),
+                        ).fetchone()[0]
+                        if int(count) >= MAX_IDENTITIES_PER_DOMAIN:
+                            raise IdentityDomainLimitError(
+                                f"A domain may have at most {MAX_IDENTITIES_PER_DOMAIN} NIP-05 identities"
+                            )
                     result = conn.execute(
                         """
                         UPDATE nostr_identities

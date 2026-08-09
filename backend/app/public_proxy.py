@@ -11,7 +11,6 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response
 
-_MAX_PUBLIC_REQUEST_BYTES = 1024 * 1024
 _MAX_PUBLIC_RESPONSE_BYTES = 1024 * 1024
 _MAX_PUBLIC_HEADER_COUNT = 100
 _MAX_PUBLIC_HEADER_BYTES = 16 * 1024
@@ -26,6 +25,16 @@ _HOP_BY_HOP = {
     b"upgrade",
 }
 _INTERNAL_CLIENT_HEADER = b"x-lns-internal-client-ip"
+
+
+def _connection_nominated_headers(headers: list[tuple[bytes, bytes]]) -> set[bytes]:
+    nominated: set[bytes] = set()
+    for name, value in headers:
+        if name.lower() == b"connection":
+            nominated.update(
+                token.strip().lower() for token in value.split(b",") if token.strip()
+            )
+    return nominated
 
 
 @asynccontextmanager
@@ -75,16 +84,21 @@ async def proxy_public_request(request: Request, path: str) -> Response:
         len(name) + len(value) for name, value in raw_headers
     ) > _MAX_PUBLIC_HEADER_BYTES:
         return PlainTextResponse("Request headers too large", status_code=431)
-    body = bytearray()
-    async for chunk in request.stream():
-        if len(body) + len(chunk) > _MAX_PUBLIC_REQUEST_BYTES:
-            return PlainTextResponse("Request body too large", status_code=413)
-        body.extend(chunk)
+    if request.method not in {"GET", "HEAD"}:
+        return PlainTextResponse("Method not allowed", status_code=405)
+    if any(
+        name.lower() == b"transfer-encoding"
+        or (name.lower() == b"content-length" and value.strip() not in {b"", b"0"})
+        for name, value in raw_headers
+    ):
+        return PlainTextResponse("Request body not permitted", status_code=413)
 
+    request_nominated = _connection_nominated_headers(raw_headers)
     headers = [
         (name, value)
         for name, value in request.scope["headers"]
         if name.lower() not in _HOP_BY_HOP
+        and name.lower() not in request_nominated
         and name.lower() != b"content-length"
         and name.lower() != _INTERNAL_CLIENT_HEADER
     ]
@@ -95,7 +109,7 @@ async def proxy_public_request(request: Request, path: str) -> Response:
         target = f"{target}?{request.url.query}"
     try:
         async with request.app.state.backend_client.stream(
-            request.method, target, content=bytes(body), headers=headers
+            request.method, target, content=b"", headers=headers
         ) as backend:
             raw_response_headers = backend.headers.raw
             if len(raw_response_headers) > _MAX_PUBLIC_HEADER_COUNT or sum(
@@ -111,10 +125,12 @@ async def proxy_public_request(request: Request, path: str) -> Response:
                         "Public backend response too large", status_code=502
                     )
                 response_body.extend(chunk)
+            response_nominated = _connection_nominated_headers(raw_response_headers)
             response_headers = [
                 (name, value)
                 for name, value in backend.headers.raw
                 if name.lower() not in _HOP_BY_HOP
+                and name.lower() not in response_nominated
                 and name.lower() != b"content-length"
             ]
             response_status = backend.status_code
