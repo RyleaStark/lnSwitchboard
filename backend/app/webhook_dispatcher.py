@@ -416,10 +416,11 @@ class WebhookDispatcher:
                     response_body=None,
                     delivery_status="delivered",
                 )
-            if attempt == 1:
-                self._logger.info("Webhook delivered to %s", url)
-            else:
-                self._logger.info("Webhook delivered to %s on attempt %s", url, attempt)
+            self._logger.info(
+                "Webhook delivered (delivery_id=%s, attempt=%s)",
+                delivery_id,
+                attempt,
+            )
             return True
         except Exception as exc:  # pragma: no cover - network runtime
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -450,14 +451,25 @@ class WebhookDispatcher:
                     delivery_status=delivery_status,
                 )
             if attempt >= self._max_attempts or self._max_retries == 0:
-                self._logger.warning("Webhook delivery failed for %s after %s attempts: %s", url, attempt, exc)
+                self._logger.warning(
+                    "Webhook delivery failed "
+                    "(delivery_id=%s, attempt=%s/%s, error_type=%s, status_code=%s)",
+                    delivery_id,
+                    attempt,
+                    self._max_attempts,
+                    type(exc).__name__,
+                    status_code,
+                )
                 return False
             self._logger.warning(
-                "Webhook delivery failed for %s (attempt %s/%s): %s; retrying in %.2fs",
-                url,
+                "Webhook delivery failed; retrying "
+                "(delivery_id=%s, attempt=%s/%s, error_type=%s, "
+                "status_code=%s, retry_delay_seconds=%.2f)",
+                delivery_id,
                 attempt,
                 self._max_attempts,
-                exc,
+                type(exc).__name__,
+                status_code,
                 self._retry_interval,
             )
             self._schedule_retry(url=url, payload=payload, headers=headers, next_attempt=attempt + 1, delivery_id=delivery_id)
@@ -487,7 +499,12 @@ class WebhookDispatcher:
             except asyncio.CancelledError:  # pragma: no cover - defensive
                 raise
             except Exception as exc:  # pragma: no cover - defensive
-                self._logger.warning("Unhandled error during webhook retry for %s: %s", url, exc)
+                self._logger.warning(
+                    "Unhandled error during webhook retry "
+                    "(delivery_id=%s, error_type=%s)",
+                    delivery_id,
+                    type(exc).__name__,
+                )
 
         task = asyncio.create_task(_retry())
         self._retry_tasks.add(task)
