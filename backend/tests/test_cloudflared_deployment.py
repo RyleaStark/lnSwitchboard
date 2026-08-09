@@ -45,7 +45,13 @@ def test_compose_mesh_sidecar_contract_is_isolated_and_digest_pinned() -> None:
         "/app/secrets/cloudflare-mesh/node.env"
     )
     assert app["environment"]["CLOUDFLARED_ORIGIN_URL"] == "http://lnswitchboard:21212"
-    assert app["environment"]["CLOUDFLARED_TOKEN_GID"] == "${CLOUDFLARED_TOKEN_GID:-0}"
+    assert app["environment"]["CLOUDFLARED_TOKEN_GID"] == (
+        "${CLOUDFLARED_TOKEN_GID:-1000}"
+    )
+    assert mesh["group_add"] == ["1000"]
+    assert mesh["depends_on"]["permissions-init"]["condition"] == (
+        "service_completed_successfully"
+    )
     assert app["networks"]["default"]["aliases"] == ["lns.internal"]
 
 

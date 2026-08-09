@@ -36,9 +36,16 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY backend/app ./backend/app
 COPY scripts/lnswitchboard-diagnose-lnd /usr/local/bin/lnswitchboard-diagnose-lnd
-RUN chmod +x /usr/local/bin/lnswitchboard-diagnose-lnd
+RUN groupadd --gid 1000 lnswitchboard && \
+    useradd --uid 1000 --gid 1000 --home-dir /app --shell /usr/sbin/nologin lnswitchboard && \
+    mkdir -p /app/secrets/tailscale /app/secrets/cloudflare-mesh && \
+    chown -R 1000:1000 /app/secrets && \
+    chmod 0700 /app/secrets /app/secrets/tailscale /app/secrets/cloudflare-mesh && \
+    chmod +x /usr/local/bin/lnswitchboard-diagnose-lnd
 COPY --from=frontend-builder /build/frontend/static ./frontend/static
 COPY VERSION ./VERSION
+
+USER 1000:1000
 
 EXPOSE 22121 21212
 

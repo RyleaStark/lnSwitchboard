@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
+import idna
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_core import PydanticUndefined
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -251,14 +253,23 @@ class Settings(BaseSettings):
     def _expand_path(cls, value: Optional[str | Path]) -> Path:
         if value is None:
             raise ValueError("Path cannot be None")
-        return Path(value).expanduser().resolve()
+        # Keep the final configured path component intact. Resolving here would
+        # turn a pre-positioned symlink into its target before storage classes
+        # can apply O_NOFOLLOW and explicit symlink rejection.
+        candidate = Path(os.path.abspath(Path(value).expanduser()))
+        if any(parent.is_symlink() for parent in candidate.parents):
+            raise ValueError("Configured path parent must not be a symbolic link")
+        return candidate
 
     @field_validator("lnd_macaroon_path", "lnd_readonly_macaroon_path", mode="before")
     @classmethod
     def _expand_optional_path(cls, value: Optional[str | Path]) -> Optional[Path]:
         if value is None or value == "":
             return None
-        return Path(value).expanduser().resolve()
+        candidate = Path(os.path.abspath(Path(value).expanduser()))
+        if any(parent.is_symlink() for parent in candidate.parents):
+            raise ValueError("Configured path parent must not be a symbolic link")
+        return candidate
 
     @field_validator("lnd_tls_server_name", mode="before")
     @classmethod
@@ -400,11 +411,16 @@ class Settings(BaseSettings):
                     )
                     if lowered.startswith("xn--"):
                         try:
-                            unicode_label = lowered.encode("ascii").decode("idna")
-                            valid_idna_labels.append(
-                                unicode_label.encode("idna").decode("ascii") == lowered
+                            unicode_label = idna.decode(
+                                lowered.encode("ascii"), uts46=False, strict=True
                             )
-                        except UnicodeError:
+                            valid_idna_labels.append(
+                                idna.encode(
+                                    unicode_label, uts46=False, strict=True
+                                ).decode("ascii")
+                                == lowered
+                            )
+                        except (idna.IDNAError, UnicodeError):
                             valid_idna_labels.append(False)
                     else:
                         valid_idna_labels.append(True)

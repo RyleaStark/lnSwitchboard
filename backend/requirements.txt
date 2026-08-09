@@ -3,6 +3,7 @@ uvicorn[standard]==0.52.1
 grpcio==1.83.0
 protobuf==7.35.1
 httpx==0.28.1
+idna==3.18
 cryptography==50.0.0
 python-dotenv==1.2.2
 pydantic-settings==2.14.2

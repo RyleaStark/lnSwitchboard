@@ -458,6 +458,49 @@ class RequestLogStorage:
                 "CREATE INDEX IF NOT EXISTS idx_webhook_attempts_delivery ON webhook_attempts(delivery_id)"
             )
             self._redact_legacy_webhook_history(conn)
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=self._retention_days)
+            self._cleanup_expired_rows(conn, cutoff.isoformat())
+
+    @staticmethod
+    def _cleanup_expired_rows(conn: sqlite3.Connection, cutoff_iso: str) -> None:
+        terminal_statuses = "'delivered', 'failed', 'skipped'"
+        conn.execute(
+            "DELETE FROM request_logs WHERE timestamp < ?",
+            (cutoff_iso,),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM webhook_attempts
+            WHERE delivery_id IN (
+                SELECT id
+                FROM webhook_deliveries
+                WHERE updated_at < ?
+                  AND status IN ({terminal_statuses})
+            )
+            """,
+            (cutoff_iso,),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM webhook_deliveries
+            WHERE updated_at < ?
+              AND status IN ({terminal_statuses})
+            """,
+            (cutoff_iso,),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM invoice_events
+            WHERE created_at < ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM webhook_deliveries
+                  WHERE webhook_deliveries.invoice_event_id = invoice_events.id
+                    AND webhook_deliveries.status NOT IN ({terminal_statuses})
+              )
+            """,
+            (cutoff_iso,),
+        )
 
     def _redact_legacy_webhook_history(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -1268,43 +1311,7 @@ class RequestLogStorage:
             try:
                 with self._connect() as conn:
                     cutoff_iso = cutoff.isoformat()
-                    conn.execute(
-                        "DELETE FROM request_logs WHERE timestamp < ?",
-                        (cutoff_iso,),
-                    )
-                    conn.execute(
-                        """
-                        DELETE FROM webhook_attempts
-                        WHERE delivery_id IN (
-                            SELECT id
-                            FROM webhook_deliveries
-                            WHERE updated_at < ?
-                              AND status IN ('delivered', 'failed')
-                        )
-                        """,
-                        (cutoff_iso,),
-                    )
-                    conn.execute(
-                        """
-                        DELETE FROM webhook_deliveries
-                        WHERE updated_at < ?
-                          AND status IN ('delivered', 'failed')
-                        """,
-                        (cutoff_iso,),
-                    )
-                    conn.execute(
-                        """
-                        DELETE FROM invoice_events
-                        WHERE created_at < ?
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM webhook_deliveries
-                              WHERE webhook_deliveries.invoice_event_id = invoice_events.id
-                                AND webhook_deliveries.status NOT IN ('delivered', 'failed')
-                          )
-                        """,
-                        (cutoff_iso,),
-                    )
+                    self._cleanup_expired_rows(conn, cutoff_iso)
             except sqlite3.Error:
                 return
             filtered = deque(maxlen=self._max_recent)

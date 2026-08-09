@@ -6,8 +6,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 TAILSCALE_IMAGE = (
-    "tailscale/tailscale:v1.98.10@"
-    "sha256:cdf5612ded5be1344f1a704b8c5e53496db97376bb533e5e15f141e48bf60cc0"
+    "tailscale/tailscale:v1.102.2@"
+    "sha256:321ce041508c19079b57a28b6666c8d81ab0b08accc0a2585b3ab663d557ac24"
 )
 
 
@@ -25,10 +25,16 @@ def test_compose_tailscale_runtime_is_isolated_userspace_and_digest_pinned() -> 
         "/usr/local/bin/lnswitchboard-tailscale-supervisor"
     ]
     assert tailscale["read_only"] is True
+    assert tailscale["user"] == "1000:1000"
     assert tailscale["restart"] == "unless-stopped"
     assert tailscale["stop_grace_period"] == "30s"
     assert tailscale["depends_on"]["lnswitchboard"]["condition"] == "service_healthy"
-    assert tailscale["tmpfs"] == ["/var/run/tailscale:mode=0750"]
+    assert tailscale["tmpfs"] == [
+        "/var/run/tailscale:size=16m,mode=0750,uid=1000,gid=1000"
+    ]
+    assert tailscale["depends_on"]["permissions-init"]["condition"] == (
+        "service_completed_successfully"
+    )
     assert tailscale["healthcheck"]["test"] == [
         "CMD-SHELL",
         "test -S /var/run/tailscale/tailscaled.sock",
@@ -54,7 +60,8 @@ def test_compose_tailscale_runtime_is_isolated_userspace_and_digest_pinned() -> 
     environment = tailscale["environment"]
     assert environment["TS_STATE_DIR"] == "/var/lib/tailscale"
     assert environment["TS_SOCKET"] == "/var/run/tailscale/tailscaled.sock"
-    assert environment["TS_USERSPACE"] == "true"
+    assert tailscale["environment"]["TS_USERSPACE"] == "true"
+    assert tailscale["environment"]["TS_NO_LOGS_NO_SUPPORT"] == "true"
     assert environment["TS_CONTROL_DIR"] == "/run/lnswitchboard/control"
     assert environment["TS_STATUS_DIR"] == "/run/lnswitchboard/status"
     assert environment["TS_LOGIN_RETENTION_SECONDS"] == "300"
@@ -87,7 +94,7 @@ def test_tailscale_runtime_never_exposes_host_or_admin_boundaries() -> None:
 def test_readme_documents_tailscale_runtime_security_boundary() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "tailscale/tailscale:v1.98.10" in readme
+    assert "tailscale/tailscale:v1.102.2" in readme
     assert "http://127.0.0.1:21212" in readme
     assert "never exposes the administration listener on `22121`" in readme
     assert "five-minute fallback" in readme

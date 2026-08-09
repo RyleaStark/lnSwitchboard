@@ -55,6 +55,30 @@ def test_rc_registry_vacancy_probe_authenticates_with_the_fetched_token() -> Non
     )
 
 
+def test_primary_application_container_is_least_privilege() -> None:
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    app = compose["services"]["lnswitchboard"]
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert re.search(r"(?m)^USER 1000:1000$", dockerfile)
+    assert app["user"] == "1000:1000"
+    assert app["read_only"] is True
+    assert app["cap_drop"] == ["ALL"]
+    assert app["security_opt"] == ["no-new-privileges:true"]
+    assert "/tmp:size=64m,mode=1777" in app["tmpfs"]
+    assert app["depends_on"]["permissions-init"]["condition"] == (
+        "service_completed_successfully"
+    )
+    assert app.get("privileged") is not True
+
+    initializer = compose["services"]["permissions-init"]
+    assert initializer["network_mode"] == "none"
+    assert initializer["read_only"] is True
+    assert initializer["cap_drop"] == ["ALL"]
+    assert set(initializer["cap_add"]) == {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
+    assert initializer["security_opt"] == ["no-new-privileges:true"]
+
+
 def test_compose_application_image_matches_version_file() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()

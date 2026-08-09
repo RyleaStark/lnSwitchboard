@@ -75,6 +75,10 @@ def test_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
     asyncio.run(_exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path))
 
 
+def test_successful_manual_replay_prevents_stale_scheduled_retry(tmp_path):
+    asyncio.run(_exercise_manual_replay_prevents_stale_scheduled_retry(tmp_path))
+
+
 def test_unreconstructable_delivery_replay_returns_conflict() -> None:
     class Storage:
         async def get_delivery(self, delivery_id):
@@ -445,7 +449,7 @@ def test_cleanup_expires_terminal_history_but_preserves_retry_authority(tmp_path
     old = "2000-01-01T00:00:00+00:00"
     with sqlite3.connect(db_path) as conn:
         invoice_ids = []
-        for payment_hash in ("11" * 32, "22" * 32):
+        for payment_hash in ("11" * 32, "22" * 32, "33" * 32):
             conn.execute(
                 """
                 INSERT INTO invoice_events (
@@ -457,7 +461,9 @@ def test_cleanup_expires_terminal_history_but_preserves_retry_authority(tmp_path
             )
             invoice_ids.append(int(conn.execute("SELECT last_insert_rowid()").fetchone()[0]))
         delivery_ids = []
-        for status_value, invoice_id in zip(("delivered", "retrying"), invoice_ids):
+        for status_value, invoice_id in zip(
+            ("delivered", "retrying", "skipped"), invoice_ids, strict=True
+        ):
             conn.execute(
                 """
                 INSERT INTO webhook_deliveries (
@@ -491,6 +497,50 @@ def test_cleanup_expires_terminal_history_but_preserves_retry_authority(tmp_path
         assert conn.execute(
             "SELECT id FROM invoice_events ORDER BY id"
         ).fetchall() == [(invoice_ids[1],)]
+
+
+def test_startup_applies_retention_before_loading_operator_history(tmp_path) -> None:
+    db_path = tmp_path / "startup-retention.db"
+    RequestLogStorage(db_path, retention_days=1)
+    old = "2000-01-01T00:00:00+00:00"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO invoice_events (
+                created_at, username, domain, ip, amount_msat, payment_hash,
+                details, settled, expired, check_interval_seconds
+            ) VALUES (?, 'pay', 'testserver', 'redacted', 1000, ?, '{}', 1, 0, 60)
+            """,
+            (old, "44" * 32),
+        )
+        invoice_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO webhook_deliveries (
+                created_at, updated_at, kind, event, target, status, payload,
+                headers, invoice_event_id, delivery_key
+            ) VALUES (?, ?, 'http.webhook', 'payment.settled', 'webhook:safe',
+                      'skipped', NULL, '{}', ?, 'startup-retention')
+            """,
+            (old, old, invoice_id),
+        )
+        delivery_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO webhook_attempts (
+                delivery_id, attempted_at, attempt_number, success, error
+            ) VALUES (?, ?, 1, 0, 'type:DeliveryError')
+            """,
+            (delivery_id, old),
+        )
+
+    restarted = RequestLogStorage(db_path, retention_days=1)
+
+    assert asyncio.run(restarted.get_recent()) == []
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM webhook_attempts").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM webhook_deliveries").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM invoice_events").fetchone()[0] == 0
 
 
 async def _exercise_retry_eventually_succeeds(tmp_path):
@@ -622,6 +672,84 @@ async def _exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
     ).encode()
     expected = hmac.new(b"current-secret", signed, hashlib.sha256).hexdigest()
     assert headers["X-LnSwitchboard-Signature"] == f"sha256={expected}"
+
+
+async def _exercise_manual_replay_prevents_stale_scheduled_retry(tmp_path) -> None:
+    db_path = tmp_path / "manual-replay-race.db"
+    address_store = LNAddressStore(db_path)
+    address = await address_store.add_address(
+        local_part="pay",
+        domain="testserver",
+        min_sendable_sat=None,
+        max_sendable_sat=None,
+        metadata_description=None,
+        success_message=None,
+        webhook_urls=[],
+        webhook_endpoints=[
+            {
+                "id": "stable",
+                "url": "https://current.example.invalid/endpoint",
+                "secret": "current-secret",
+                "filters": {},
+            }
+        ],
+    )
+    storage = RequestLogStorage(db_path)
+    event, details = _make_event(address)
+    settled_at = datetime.now(tz=timezone.utc)
+    await storage.log_invoice_event(
+        username=event.username,
+        domain=event.domain,
+        amount_msat=event.amount_msat,
+        ip=event.ip,
+        payment_hash=event.payment_hash,
+        payment_request=event.payment_request,
+        details=details,
+        request_log_id=event.request_log_id,
+    )
+    await storage.apply_invoice_event_update(
+        event=event,
+        details=details,
+        settled=True,
+        expired=False,
+        next_check=None,
+        expires_at=None,
+        interval_seconds=60,
+        settled_at=settled_at,
+    )
+
+    calls: list[tuple[str, dict, dict]] = []
+
+    async def sender(url, payload, headers):
+        calls.append((url, payload, headers))
+        if len(calls) == 1:
+            raise RuntimeError("schedule one retry")
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+        max_retries=1,
+        retry_window_seconds=0.2,
+    )
+    assert not await dispatcher.dispatch_payment_settled(
+        event=event,
+        details=details,
+        settled_at=settled_at,
+    )
+    delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
+    assert await dispatcher.replay_delivery(delivery)
+
+    await asyncio.sleep(0.3)
+
+    assert len(calls) == 2
+    refreshed = await storage.get_delivery(int(delivery["id"]))
+    assert refreshed is not None
+    assert refreshed["status"] == "delivered"
+    assert [
+        attempt["attempt_number"]
+        for attempt in await storage.list_delivery_attempts(int(delivery["id"]))
+    ] == [1, 2]
 
 
 def test_webhook_retry_stops_after_max_attempts(tmp_path):

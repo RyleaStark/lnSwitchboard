@@ -5,6 +5,7 @@ import stat
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 
 from backend.app.connection_secret_store import ConnectionSecretStore
 from backend.app.connection_store import ConnectionStore
@@ -107,6 +108,23 @@ def test_secret_store_encrypts_payload_and_uses_restricted_key_permissions(tmp_p
     assert b"access-secret" not in raw_db
     assert b"refresh-secret" not in raw_db
     assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+
+
+def test_secret_store_rejects_existing_key_symlink_without_mutating_target(tmp_path: Path) -> None:
+    database_path = tmp_path / "connections.db"
+    target_path = tmp_path / "outside.key"
+    target_key = Fernet.generate_key()
+    target_path.write_bytes(target_key)
+    target_path.chmod(0o644)
+    key_path = tmp_path / "connection-secrets.key"
+    key_path.symlink_to(target_path)
+
+    with pytest.raises(OSError, match="symbolic link"):
+        ConnectionSecretStore(database_path, key_path)
+
+    assert target_path.read_bytes() == target_key
+    assert stat.S_IMODE(target_path.stat().st_mode) == 0o644
+    assert not database_path.exists()
 
 
 def test_secret_store_rejects_non_object_payload(tmp_path: Path) -> None:
