@@ -15,6 +15,7 @@ from ..ln_address_store import LNAddressStore
 from ..nostr_signer_store import NostrSignerStore
 from ..nip05_store import (
     IdentityConflictError,
+    IdentityDomainLimitError,
     IdentityNotFoundError,
     NostrIdentityStore,
 )
@@ -27,8 +28,12 @@ public_router = APIRouter(include_in_schema=False)
 
 LOCAL_PART_PATTERN = re.compile(r"^[a-z0-9._-]+$")
 DOMAIN_PATTERN = re.compile(r"^[a-z0-9.-]+$")
+PUBKEY_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 ALLOWED_RELAY_SCHEMES = {"ws", "wss"}
 MAX_RELAYS = 16
+MAX_RELAY_URL_LENGTH = 512
+MAX_LOCAL_PART_LENGTH = 64
+MAX_DOMAIN_LENGTH = 253
 RESERVED_LOCAL_PARTS = {"nip-profile"}
 
 
@@ -44,6 +49,8 @@ class IdentityPayload(BaseModel):
         normalized = value.strip().lower()
         if not normalized:
             raise ValueError("local-part is required")
+        if len(normalized) > MAX_LOCAL_PART_LENGTH:
+            raise ValueError(f"local-part must be at most {MAX_LOCAL_PART_LENGTH} characters")
         if "@" in normalized:
             raise ValueError("Do not include '@' in the local-part")
         if not LOCAL_PART_PATTERN.fullmatch(normalized):
@@ -58,6 +65,8 @@ class IdentityPayload(BaseModel):
         normalized = value.strip().lower()
         if not normalized:
             raise ValueError("domain is required")
+        if len(normalized) > MAX_DOMAIN_LENGTH:
+            raise ValueError(f"domain must be at most {MAX_DOMAIN_LENGTH} characters")
         if "://" in normalized:
             raise ValueError("domain must not include a URL scheme")
         normalized = normalized.rstrip(".")
@@ -82,6 +91,10 @@ def _normalize_relays(relays: Sequence[str]) -> List[str]:
         cleaned = relay.strip()
         if not cleaned:
             continue
+        if len(cleaned) > MAX_RELAY_URL_LENGTH:
+            raise ValueError(
+                f"Relay URL is too long; maximum is {MAX_RELAY_URL_LENGTH} characters"
+            )
         parsed = urlsplit(cleaned if "://" in cleaned else f"wss://{cleaned}")
         if parsed.scheme.lower() not in ALLOWED_RELAY_SCHEMES:
             raise ValueError("Relay URLs must use ws:// or wss://")
@@ -107,7 +120,7 @@ def _public_relays(relays: Any) -> List[str]:
         return []
     normalized: List[str] = []
     seen = set()
-    for relay in relays:
+    for relay in relays[:MAX_RELAYS]:
         if not isinstance(relay, str):
             continue
         try:
@@ -119,6 +132,18 @@ def _public_relays(relays: Any) -> List[str]:
                 seen.add(candidate)
                 normalized.append(candidate)
     return normalized
+
+
+def _valid_public_identity(entry: Dict[str, Any]) -> bool:
+    local_part = entry.get("local_part")
+    pubkey_hex = entry.get("pubkey_hex")
+    return (
+        isinstance(local_part, str)
+        and len(local_part) <= MAX_LOCAL_PART_LENGTH
+        and LOCAL_PART_PATTERN.fullmatch(local_part) is not None
+        and isinstance(pubkey_hex, str)
+        and PUBKEY_HEX_PATTERN.fullmatch(pubkey_hex) is not None
+    )
 
 
 def _serialize_identity(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,7 +196,7 @@ async def create_identity(
     data = _prepare_payload(payload)
     try:
         created = await store.add_identity(**data)
-    except IdentityConflictError as exc:
+    except (IdentityConflictError, IdentityDomainLimitError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return {"item": _serialize_identity(created)}
 
@@ -187,7 +212,7 @@ async def update_identity(
         updated = await store.update_identity(identity_id, **data)
     except IdentityNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Identity not found") from exc
-    except IdentityConflictError as exc:
+    except (IdentityConflictError, IdentityDomainLimitError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return {"item": _serialize_identity(updated)}
 
@@ -218,9 +243,18 @@ async def nostr_well_known(
     store: NostrIdentityStore = Depends(get_nip05_store_dep),
 ) -> JSONResponse:
     domain = _resolve_domain(request)
-    entries = await store.get_by_domain(domain) if domain else []
+    target = name.strip().lower() if name else None
+    target_is_valid = target is None or (
+        len(target) <= MAX_LOCAL_PART_LENGTH
+        and LOCAL_PART_PATTERN.fullmatch(target) is not None
+    )
+    entries = (
+        await store.get_public_by_domain(domain, local_part=target)
+        if domain and target_is_valid
+        else []
+    )
+    entries = [entry for entry in entries if _valid_public_identity(entry)]
     if name:
-        target = name.strip().lower()
         entries = [entry for entry in entries if entry["local_part"] == target]
     names = {entry["local_part"]: entry["pubkey_hex"] for entry in entries}
     relays_map: Dict[str, List[str]] = {}
@@ -247,11 +281,11 @@ async def public_profile(
 ) -> JSONResponse:
     domain = _resolve_domain(request)
     local = local_part.strip().lower()
-    if not LOCAL_PART_PATTERN.fullmatch(local):
+    if len(local) > MAX_LOCAL_PART_LENGTH or not LOCAL_PART_PATTERN.fullmatch(local):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
     identity = None
-    for entry in await identity_store.get_by_domain(domain):
-        if entry.get("local_part") == local:
+    for entry in await identity_store.get_public_by_domain(domain, local_part=local):
+        if _valid_public_identity(entry) and entry.get("local_part") == local:
             identity = entry
             break
     address = await address_store.get_by_identifier(local_part=local, domain=domain)

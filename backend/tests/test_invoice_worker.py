@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import stat
 from datetime import datetime, timezone
 
@@ -190,6 +191,36 @@ async def _exercise_full_refresh_skip_expired(tmp_path):
 
 def test_full_refresh_worker_runs_on_startup(tmp_path):
     asyncio.run(_exercise_full_refresh_worker(tmp_path))
+
+
+def test_invoice_lookup_logs_never_disclose_payment_hashes(tmp_path, caplog):
+    asyncio.run(_exercise_invoice_lookup_log_privacy(tmp_path, caplog))
+
+
+async def _exercise_invoice_lookup_log_privacy(tmp_path, caplog):
+    storage = RequestLogStorage(tmp_path / "private-logs.db")
+    sentinels = ["not-hex-private", "ab" * 32, "cd" * 32]
+    for payment_hash in sentinels:
+        await storage.log_invoice_event(
+            username="tester", domain="example.com", amount_msat=1000,
+            ip="127.0.0.1", payment_hash=payment_hash, payment_request="private",
+            details={}, request_log_id=None, expires_at=None,
+        )
+
+    class FailingLookup:
+        async def lookup_invoice(self, payment_hash_bytes):
+            if payment_hash_bytes.hex() == sentinels[1]:
+                raise LookupError("missing")
+            raise RuntimeError("private-runtime-detail")
+
+    caplog.set_level(logging.INFO)
+    events = await storage.get_due_invoice_events(limit=10)
+    await refresh_invoice_statuses(storage, FailingLookup(), events=events)
+    rendered = caplog.text
+    for sentinel in (*sentinels, "private-runtime-detail"):
+        assert sentinel not in rendered
+    for event in events:
+        assert f"invoice event {event.id}" in rendered
 
 
 async def _exercise_full_refresh_worker(tmp_path):

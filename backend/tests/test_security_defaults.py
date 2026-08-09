@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from ..app import deps
 from ..app.config import Settings, get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
@@ -186,6 +187,34 @@ def test_trusted_hosts_support_exact_and_wildcard_entries() -> None:
     )
 
 
+def test_sensitive_config_path_preserves_final_symlink_for_store_rejection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "outside.hex"
+    target.write_text("outside", encoding="utf-8")
+    configured = tmp_path / "configured-macaroon-alias.hex"
+    configured.symlink_to(target)
+    monkeypatch.setenv("MACAROON_STORE_PATH", str(configured))
+
+    resolved = Settings().macaroon_store_path
+
+    assert resolved == configured.absolute()
+    assert resolved.is_symlink()
+
+
+def test_sensitive_config_path_rejects_symlinked_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target_parent = tmp_path / "target"
+    target_parent.mkdir()
+    alias_parent = tmp_path / "alias"
+    alias_parent.symlink_to(target_parent, target_is_directory=True)
+    monkeypatch.setenv("DATA_STORE_PATH", str(alias_parent / "lnswitchboard.db"))
+
+    with pytest.raises(ValidationError, match="parent must not be a symbolic link"):
+        Settings()
+
+
 def test_invalid_trusted_proxy_setting_is_rejected(monkeypatch) -> None:
     monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "not-a-network")
 
@@ -290,6 +319,8 @@ def test_cloudflare_query_callback_accepts_ipv4_and_ipv6_loopback(
         "https://oauth.example/a/%2E%2E/callback/",
         "https://xn--0.example/callback/",
         "https://xn--abc.example/callback/",
+        "https://xn--bbd.example/callback/",
+        "https://xn--ls8h.example/callback/",
         "https://oauth.example/%/",
         "https://oauth.example/%zz/",
     ],

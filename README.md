@@ -65,6 +65,8 @@ environment:
 
 `DEP_ENV` controls the upstream host shown in the in-app reverse proxy reference. Use `DOCKER` for standalone Compose, `UMBREL` for the Umbrel store app, or `UMBREL-DEV` for the extended Umbrel dev app name.
 
+The stack runs the application and Tailscale sidecar as UID/GID `1000:1000`. A network-isolated, capability-minimized one-shot initializer prepares existing `./secrets` and Tailscale volumes for that owner before the application starts; it rejects symlinks rather than traversing them. The application root filesystem is read-only and all durable writes stay under the mounted secrets directory.
+
 Then run:
 
 ```bash
@@ -75,7 +77,7 @@ The Compose stack includes a dedicated Cloudflare Mesh node pinned to the immuta
 
 Before Cloudflare onboarding is complete, the Mesh sidecar restarts with backoff while waiting for `./secrets/cloudflare-mesh/node.env`; this is expected. The wrapper reads the token without placing it in Compose, a command line, browser storage, or application logs. The Connections page distinguishes an installed Mesh capability from an active Cloudflare connection.
 
-The Compose stack also includes a dedicated Tailscale userspace sidecar, pinned to `tailscale/tailscale:v1.98.10` by immutable multi-platform digest. It uses a private daemon-state volume and a separate named control/status volume shared only with lnSwitchboard. The container has a read-only root filesystem, drops every Linux capability, enables `no-new-privileges`, publishes no host ports, and mounts neither `/dev/net/tun` nor the Docker socket.
+The Compose stack also includes a dedicated Tailscale userspace sidecar, pinned to `tailscale/tailscale:v1.102.2` by immutable multi-platform digest. It uses a private daemon-state volume and a separate named control/status volume shared only with lnSwitchboard. The container has a read-only root filesystem, drops every Linux capability, enables `no-new-privileges`, publishes no host ports, and mounts neither `/dev/net/tun` nor the Docker socket.
 
 The runtime starts in Tailscale's `NeedsLogin` state and waits for lnSwitchboard's authenticated lifecycle controller. Authorization is intentionally absent from Compose: no OAuth client, API token, or reusable auth key is accepted through environment variables. Control is restricted to fixed marker operations, and the only user-derived runtime value is a separately validated single-label device name. Normal onboarding deletes authorization output immediately; a five-minute fallback removes it if the application exits before cleanup.
 

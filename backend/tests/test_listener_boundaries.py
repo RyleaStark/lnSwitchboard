@@ -28,6 +28,9 @@ class AppClient:
     def get(self, path: str, **kwargs: Any) -> httpx.Response:
         return self.request("GET", path, **kwargs)
 
+    def head(self, path: str, **kwargs: Any) -> httpx.Response:
+        return self.request("HEAD", path, **kwargs)
+
     def post(self, path: str, **kwargs: Any) -> httpx.Response:
         return self.request("POST", path, **kwargs)
 
@@ -59,6 +62,141 @@ def test_listener_route_tables_are_separate(listener_clients: tuple[AppClient, A
     assert public.get("/api/health").status_code == 404
     assert public.get("/").status_code == 404
     assert public.get("/docs").status_code == 404
+
+
+def test_standalone_public_listener_enforces_bodyless_get_and_head_contract(
+    listener_clients: tuple[AppClient, AppClient],
+) -> None:
+    _admin, public = listener_clients
+    get_response = public.get("/missing-public")
+    head_response = public.head("/missing-public")
+
+    assert get_response.status_code == 404
+    assert head_response.status_code == 404
+    assert head_response.content == b""
+    assert head_response.headers["content-length"] == str(len(get_response.content))
+    assert public.get("/.well-known/nostr.json", content=b"x").status_code == 413
+    assert public.post("/.well-known/nostr.json").status_code == 405
+
+
+def test_standalone_public_contract_strips_fixed_and_nominated_hop_headers() -> None:
+    observed_headers: list[tuple[bytes, bytes]] = []
+
+    async def target(scope: Any, receive: Any, send: Any) -> None:
+        del receive
+        observed_headers.extend(scope["headers"])
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"text/plain"),
+                    (b"connection", b"x-response-hop"),
+                    (b"x-response-hop", b"secret"),
+                    (b"keep-alive", b"timeout=5"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    messages: list[dict[str, Any]] = []
+
+    async def exercise() -> None:
+        async def receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            messages.append(message)
+
+        await main.StandalonePublicContractApp(target)(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/",
+                "raw_path": b"/",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"connection", b"x-request-hop"),
+                    (b"x-request-hop", b"attacker"),
+                    (b"keep-alive", b"timeout=5"),
+                ],
+                "client": ("127.0.0.1", 12345),
+                "server": ("127.0.0.1", 21212),
+            },
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert observed_headers == [(b"host", b"testserver")]
+    response_headers = messages[0]["headers"]
+    assert (b"content-type", b"text/plain") in response_headers
+    assert (b"content-length", b"2") in response_headers
+    assert all(
+        name.lower() not in {b"connection", b"keep-alive", b"x-response-hop"}
+        for name, _value in response_headers
+    )
+
+
+def test_standalone_public_contract_counts_hop_headers_before_stripping() -> None:
+    async def target(scope: Any, receive: Any, send: Any) -> None:
+        del scope, receive
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"connection", b"close")] * 101,
+            }
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    response = AppClient(
+        main.StandalonePublicContractApp(target), port=21212
+    ).get("/")
+    assert response.status_code == 502
+    assert response.text == "Public response headers too large"
+
+
+def test_standalone_public_contract_counts_generated_framing_header() -> None:
+    async def target(scope: Any, receive: Any, send: Any) -> None:
+        del scope, receive
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(f"x-field-{index}".encode(), b"value") for index in range(100)],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    response = AppClient(
+        main.StandalonePublicContractApp(target), port=21212
+    ).get("/")
+    assert response.status_code == 502
+    assert response.text == "Public response headers too large"
+
+
+def test_standalone_public_contract_reserves_wire_header_bytes() -> None:
+    async def target(scope: Any, receive: Any, send: Any) -> None:
+        del scope, receive
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"x-large", b"x" * ((16 * 1024) - len(b"x-large")))],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    response = AppClient(
+        main.StandalonePublicContractApp(target), port=21212
+    ).get("/")
+    assert response.status_code == 502
+    assert response.text == "Public response headers too large"
 
 
 def test_dispatcher_uses_configured_public_port(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -398,6 +536,7 @@ def _seed_cloudflare_mesh_domain(hostname: str, ingress_key: str) -> None:
         connection.id,
         [{"hostname": hostname, "status": "active", "zone_id": "b" * 32}],
     )
+    store.set_public_ingress_key(connection.id, ingress_key)
     deps._get_connection_secret_store().set(
         connection.id,
         {"grant_id": "test-grant", "mesh_ingress_key": ingress_key},

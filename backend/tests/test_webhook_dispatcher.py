@@ -6,7 +6,7 @@ import hmac
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -75,7 +75,27 @@ def test_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
     asyncio.run(_exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path))
 
 
-def test_unreconstructable_delivery_replay_returns_conflict() -> None:
+def test_manual_replay_conflicts_with_pending_successful_retry(tmp_path):
+    asyncio.run(_exercise_manual_replay_conflicts_with_pending_success(tmp_path))
+
+
+def test_manual_replay_conflicts_with_pending_failed_retry(tmp_path):
+    asyncio.run(_exercise_manual_replay_conflicts_with_pending_failure(tmp_path))
+
+
+def test_two_dispatchers_share_one_persistent_retry_claim(tmp_path):
+    asyncio.run(_exercise_two_dispatchers_share_one_persistent_retry_claim(tmp_path))
+
+
+def test_manual_replay_cannot_overlap_initial_delivery_claim(tmp_path):
+    asyncio.run(_exercise_manual_replay_cannot_overlap_initial_claim(tmp_path))
+
+
+def test_manual_replay_rejects_inflight_claim_without_cancelling_owner(tmp_path):
+    asyncio.run(_exercise_manual_replay_rejects_inflight_claim(tmp_path))
+
+
+def test_unreconstructable_delivery_replay_returns_conflict(tmp_path):
     class Storage:
         async def get_delivery(self, delivery_id):
             return {"id": delivery_id, "kind": "http.webhook"}
@@ -445,7 +465,7 @@ def test_cleanup_expires_terminal_history_but_preserves_retry_authority(tmp_path
     old = "2000-01-01T00:00:00+00:00"
     with sqlite3.connect(db_path) as conn:
         invoice_ids = []
-        for payment_hash in ("11" * 32, "22" * 32):
+        for payment_hash in ("11" * 32, "22" * 32, "33" * 32):
             conn.execute(
                 """
                 INSERT INTO invoice_events (
@@ -457,7 +477,9 @@ def test_cleanup_expires_terminal_history_but_preserves_retry_authority(tmp_path
             )
             invoice_ids.append(int(conn.execute("SELECT last_insert_rowid()").fetchone()[0]))
         delivery_ids = []
-        for status_value, invoice_id in zip(("delivered", "retrying"), invoice_ids):
+        for status_value, invoice_id in zip(
+            ("delivered", "retrying", "skipped"), invoice_ids, strict=True
+        ):
             conn.execute(
                 """
                 INSERT INTO webhook_deliveries (
@@ -491,6 +513,50 @@ def test_cleanup_expires_terminal_history_but_preserves_retry_authority(tmp_path
         assert conn.execute(
             "SELECT id FROM invoice_events ORDER BY id"
         ).fetchall() == [(invoice_ids[1],)]
+
+
+def test_startup_applies_retention_before_loading_operator_history(tmp_path) -> None:
+    db_path = tmp_path / "startup-retention.db"
+    RequestLogStorage(db_path, retention_days=1)
+    old = "2000-01-01T00:00:00+00:00"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO invoice_events (
+                created_at, username, domain, ip, amount_msat, payment_hash,
+                details, settled, expired, check_interval_seconds
+            ) VALUES (?, 'pay', 'testserver', 'redacted', 1000, ?, '{}', 1, 0, 60)
+            """,
+            (old, "44" * 32),
+        )
+        invoice_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO webhook_deliveries (
+                created_at, updated_at, kind, event, target, status, payload,
+                headers, invoice_event_id, delivery_key
+            ) VALUES (?, ?, 'http.webhook', 'payment.settled', 'webhook:safe',
+                      'skipped', NULL, '{}', ?, 'startup-retention')
+            """,
+            (old, old, invoice_id),
+        )
+        delivery_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO webhook_attempts (
+                delivery_id, attempted_at, attempt_number, success, error
+            ) VALUES (?, ?, 1, 0, 'type:DeliveryError')
+            """,
+            (delivery_id, old),
+        )
+
+    restarted = RequestLogStorage(db_path, retention_days=1)
+
+    assert asyncio.run(restarted.get_recent()) == []
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM webhook_attempts").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM webhook_deliveries").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM invoice_events").fetchone()[0] == 0
 
 
 async def _exercise_retry_eventually_succeeds(tmp_path):
@@ -622,6 +688,310 @@ async def _exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
     ).encode()
     expected = hmac.new(b"current-secret", signed, hashlib.sha256).hexdigest()
     assert headers["X-LnSwitchboard-Signature"] == f"sha256={expected}"
+
+
+async def _seed_retry_authority(tmp_path, filename: str):
+    db_path = tmp_path / filename
+    address_store = LNAddressStore(db_path)
+    address = await address_store.add_address(
+        local_part="pay",
+        domain="testserver",
+        min_sendable_sat=None,
+        max_sendable_sat=None,
+        metadata_description=None,
+        success_message=None,
+        webhook_urls=[],
+        webhook_endpoints=[
+            {
+                "id": "stable",
+                "url": "https://current.example.invalid/endpoint",
+                "secret": "current-secret",
+                "filters": {},
+            }
+        ],
+    )
+    storage = RequestLogStorage(db_path)
+    event, details = _make_event(address)
+    settled_at = datetime.now(tz=timezone.utc)
+    await storage.log_invoice_event(
+        username=event.username,
+        domain=event.domain,
+        amount_msat=event.amount_msat,
+        ip=event.ip,
+        payment_hash=event.payment_hash,
+        payment_request=event.payment_request,
+        details=details,
+        request_log_id=event.request_log_id,
+    )
+    await storage.apply_invoice_event_update(
+        event=event,
+        details=details,
+        settled=True,
+        expired=False,
+        next_check=None,
+        expires_at=None,
+        interval_seconds=60,
+        settled_at=settled_at,
+    )
+    return db_path, address_store, storage, event, details, settled_at
+
+
+async def _exercise_manual_replay_conflicts_with_pending_success(tmp_path) -> None:
+    _, address_store, storage, event, details, settled_at = (
+        await _seed_retry_authority(tmp_path, "manual-replay-race.db")
+    )
+
+    calls: list[tuple[str, dict, dict]] = []
+
+    async def sender(url, payload, headers):
+        calls.append((url, payload, headers))
+        if len(calls) == 1:
+            raise RuntimeError("schedule one retry")
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+        max_retries=1,
+        retry_window_seconds=0.2,
+    )
+    assert not await dispatcher.dispatch_payment_settled(
+        event=event,
+        details=details,
+        settled_at=settled_at,
+    )
+    delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
+    with pytest.raises(ValueError, match="in progress"):
+        await dispatcher.replay_delivery(delivery)
+
+    await asyncio.sleep(0.3)
+
+    assert len(calls) == 2
+    refreshed = await storage.get_delivery(int(delivery["id"]))
+    assert refreshed is not None
+    assert refreshed["status"] == "delivered"
+    assert [
+        attempt["attempt_number"]
+        for attempt in await storage.list_delivery_attempts(int(delivery["id"]))
+    ] == [1, 2]
+
+
+async def _cancel_retry_tasks(dispatcher: WebhookDispatcher) -> None:
+    tasks = tuple(dispatcher._retry_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _exercise_manual_replay_conflicts_with_pending_failure(tmp_path) -> None:
+    _, address_store, storage, event, details, settled_at = (
+        await _seed_retry_authority(tmp_path, "failed-manual-replay.db")
+    )
+    calls = 0
+
+    async def sender(_url, _payload, _headers):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("inert failure")
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+        max_retries=1,
+        retry_window_seconds=0.2,
+    )
+    assert not await dispatcher.dispatch_payment_settled(
+        event=event, details=details, settled_at=settled_at
+    )
+    delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
+    with pytest.raises(ValueError, match="in progress"):
+        await dispatcher.replay_delivery(delivery)
+    await asyncio.sleep(0.3)
+    await _cancel_retry_tasks(dispatcher)
+
+    assert calls == 2
+    refreshed = await storage.get_delivery(int(delivery["id"]))
+    assert refreshed is not None and refreshed["status"] == "failed"
+    attempts = await storage.list_delivery_attempts(int(delivery["id"]))
+    assert [item["attempt_number"] for item in attempts] == [1, 2]
+
+
+async def _exercise_two_dispatchers_share_one_persistent_retry_claim(tmp_path) -> None:
+    db_path, address_store, seed_storage, event, details, settled_at = (
+        await _seed_retry_authority(tmp_path, "persistent-retry-claim.db")
+    )
+
+    async def fail_seed(_url, _payload, _headers):
+        raise RuntimeError("seed retryable state")
+
+    seed_dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=seed_storage,
+        sender=fail_seed,
+        max_retries=1,
+        retry_window_seconds=60,
+    )
+    assert not await seed_dispatcher.dispatch_payment_settled(
+        event=event, details=details, settled_at=settled_at
+    )
+    await _cancel_retry_tasks(seed_dispatcher)
+
+    calls = 0
+
+    async def succeed_once(_url, _payload, _headers):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+
+    storages = [RequestLogStorage(db_path), RequestLogStorage(db_path)]
+    dispatchers = [
+        WebhookDispatcher(
+            address_store=address_store,
+            delivery_storage=storage,
+            sender=succeed_once,
+            max_retries=1,
+            retry_window_seconds=0.02,
+        )
+        for storage in storages
+    ]
+    await asyncio.gather(
+        *(dispatcher.resume_pending_retries() for dispatcher in dispatchers)
+    )
+    await asyncio.sleep(0.2)
+    for dispatcher in dispatchers:
+        await _cancel_retry_tasks(dispatcher)
+
+    assert calls == 1
+    delivery = (await seed_storage.list_deliveries(page=1, page_size=10))["items"][0]
+    refreshed = await seed_storage.get_delivery(int(delivery["id"]))
+    assert refreshed is not None and refreshed["status"] == "delivered"
+    attempts = await seed_storage.list_delivery_attempts(int(delivery["id"]))
+    assert [item["attempt_number"] for item in attempts] == [1, 2]
+
+
+def test_restart_wakes_retry_after_crash_claim_expires(tmp_path):
+    asyncio.run(_exercise_restart_wakes_retry_after_crash_claim_expires(tmp_path))
+
+
+async def _exercise_restart_wakes_retry_after_crash_claim_expires(tmp_path):
+    db_path, address_store, storage, event, details, settled_at = (
+        await _seed_retry_authority(tmp_path, "expired-crash-claim.db")
+    )
+
+    async def fail_seed(_url, _payload, _headers):
+        raise RuntimeError("seed")
+
+    seed = WebhookDispatcher(
+        address_store=address_store, delivery_storage=storage, sender=fail_seed,
+        max_retries=2, retry_window_seconds=60,
+    )
+    assert not await seed.dispatch_payment_settled(
+        event=event, details=details, settled_at=settled_at
+    )
+    await _cancel_retry_tasks(seed)
+    delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
+    expires = (datetime.now(tz=timezone.utc) + timedelta(seconds=0.15)).isoformat()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE webhook_deliveries SET claim_token='crashed', claim_expires_at=?, "
+            "claim_attempt_number=2 WHERE id=?",
+            (expires, delivery["id"]),
+        )
+
+    calls = 0
+
+    async def succeed(_url, _payload, _headers):
+        nonlocal calls
+        calls += 1
+
+    restarted = WebhookDispatcher(
+        address_store=address_store, delivery_storage=RequestLogStorage(db_path),
+        sender=succeed, max_retries=2, retry_window_seconds=0.1,
+    )
+    assert await restarted.resume_pending_retries() == 1
+    await asyncio.sleep(0.35)
+    await _cancel_retry_tasks(restarted)
+    assert calls == 1
+
+
+async def _exercise_manual_replay_cannot_overlap_initial_claim(tmp_path) -> None:
+    _, address_store, storage, event, details, settled_at = (
+        await _seed_retry_authority(tmp_path, "initial-delivery-claim.db")
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def sender(_url, _payload, _headers):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+        max_retries=1,
+        retry_window_seconds=0.2,
+    )
+    initial = asyncio.create_task(
+        dispatcher.dispatch_payment_settled(
+            event=event, details=details, settled_at=settled_at
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
+    with pytest.raises(ValueError, match="in progress"):
+        await dispatcher.replay_delivery(delivery)
+    release.set()
+    assert await initial
+
+    assert calls == 1
+    attempts = await storage.list_delivery_attempts(int(delivery["id"]))
+    assert [item["attempt_number"] for item in attempts] == [1]
+
+
+async def _exercise_manual_replay_rejects_inflight_claim(tmp_path) -> None:
+    _, address_store, storage, event, details, settled_at = (
+        await _seed_retry_authority(tmp_path, "inflight-retry-claim.db")
+    )
+    entered_retry = asyncio.Event()
+    release_retry = asyncio.Event()
+    calls = 0
+
+    async def sender(_url, _payload, _headers):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("seed")
+        entered_retry.set()
+        await release_retry.wait()
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+        max_retries=1,
+        retry_window_seconds=0.02,
+    )
+    assert not await dispatcher.dispatch_payment_settled(
+        event=event, details=details, settled_at=settled_at
+    )
+    await asyncio.wait_for(entered_retry.wait(), timeout=1)
+    delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
+    with pytest.raises(ValueError, match="in progress"):
+        await dispatcher.replay_delivery(delivery)
+    assert calls == 2
+    release_retry.set()
+    await asyncio.sleep(0.05)
+    await _cancel_retry_tasks(dispatcher)
+    refreshed = await storage.get_delivery(int(delivery["id"]))
+    assert refreshed is not None and refreshed["status"] == "delivered"
+    attempts = await storage.list_delivery_attempts(int(delivery["id"]))
+    assert [item["attempt_number"] for item in attempts] == [1, 2]
 
 
 def test_webhook_retry_stops_after_max_attempts(tmp_path):

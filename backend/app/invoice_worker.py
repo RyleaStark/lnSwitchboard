@@ -300,7 +300,7 @@ async def refresh_invoice_statuses(
         try:
             payment_hash_bytes = bytes.fromhex(payment_hash_hex)
         except ValueError:
-            logger.warning("Invalid payment hash %s on invoice event %s", payment_hash_hex, event.id)
+            logger.warning("Invalid payment hash on invoice event %s", event.id)
             await storage.apply_invoice_event_update(
                 event=event,
                 details=event.details,
@@ -316,7 +316,7 @@ async def refresh_invoice_statuses(
         try:
             snapshot = await ln_client.lookup_invoice(payment_hash_bytes)
         except LookupError:
-            logger.info("Invoice lookup returned not found for %s", payment_hash_hex)
+            logger.info("Invoice lookup returned not found for invoice event %s", event.id)
             await storage.apply_invoice_event_update(
                 event=event,
                 details=event.details,
@@ -330,8 +330,8 @@ async def refresh_invoice_statuses(
             continue
         except Exception as exc:  # pragma: no cover - network/runtime
             logger.warning(
-                "Invoice lookup failed for %s (error_type=%s)",
-                payment_hash_hex,
+                "Invoice lookup failed for invoice event %s (error_type=%s)",
+                event.id,
                 type(exc).__name__,
             )
             next_check = now + quick_interval

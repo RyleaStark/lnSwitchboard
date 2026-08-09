@@ -104,7 +104,8 @@ def _resolve_client_ip(
     from .config import get_settings, parse_trusted_proxy_cidrs
 
     headers = request.headers
-    peer = request.client.host if request.client else None
+    internal_client = getattr(request.state, "internal_client_ip", None)
+    peer = internal_client or (request.client.host if request.client else None)
 
     def _trusted(value: Optional[str]) -> bool:
         if not value:
@@ -113,12 +114,18 @@ def _resolve_client_ip(
             address = ip_address(value)
         except ValueError:
             return False
+        if internal_client and value == internal_client and address.is_loopback:
+            return True
         networks = parse_trusted_proxy_cidrs(get_settings().trusted_proxy_cidrs)
         return any(
             address in network for network in networks if address.version == network.version
         )
 
     candidates: List[Dict[str, Optional[str]]] = []
+    if internal_client:
+        candidates.append(
+            {"source": "internal-public-gateway", "value": internal_client}
+        )
     xff_raw = headers.get("x-forwarded-for")
     hops = [part.strip() for part in xff_raw.split(",") if part.strip()] if xff_raw else []
     if xff_raw:

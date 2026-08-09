@@ -69,6 +69,13 @@ class IdentityNotFoundError(KeyError):
     """Raised when an identity record cannot be found."""
 
 
+class IdentityDomainLimitError(ValueError):
+    """Raised when a domain cannot safely add another public identity."""
+
+
+MAX_IDENTITIES_PER_DOMAIN = 16
+
+
 class NostrIdentityStore:
     """SQLite-backed identity registry with coarse locking."""
 
@@ -102,6 +109,15 @@ class NostrIdentityStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_nostr_identity_domain ON nostr_identities(domain)"
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_nostr_identity_public_bounded
+                ON nostr_identities(domain, local_part)
+                WHERE length(CAST(local_part AS BLOB)) <= 64
+                  AND length(CAST(domain AS BLOB)) <= 253
+                  AND length(CAST(pubkey_hex AS BLOB)) = 64
+                """
             )
 
     def _norm(self, value: str) -> str:
@@ -165,6 +181,14 @@ class NostrIdentityStore:
             }
             try:
                 with self._connect() as conn:
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM nostr_identities WHERE domain = ?",
+                        (normalized_domain,),
+                    ).fetchone()[0]
+                    if int(count) >= MAX_IDENTITIES_PER_DOMAIN:
+                        raise IdentityDomainLimitError(
+                            f"A domain may have at most {MAX_IDENTITIES_PER_DOMAIN} NIP-05 identities"
+                        )
                     conn.execute(
                         """
                         INSERT INTO nostr_identities (
@@ -203,6 +227,20 @@ class NostrIdentityStore:
             now_iso = _now_iso()
             try:
                 with self._connect() as conn:
+                    current = conn.execute(
+                        "SELECT domain FROM nostr_identities WHERE id = ?", (identity_id,)
+                    ).fetchone()
+                    if current is None:
+                        raise IdentityNotFoundError(identity_id)
+                    if str(current[0]) != normalized_domain:
+                        count = conn.execute(
+                            "SELECT COUNT(*) FROM nostr_identities WHERE domain = ?",
+                            (normalized_domain,),
+                        ).fetchone()[0]
+                        if int(count) >= MAX_IDENTITIES_PER_DOMAIN:
+                            raise IdentityDomainLimitError(
+                                f"A domain may have at most {MAX_IDENTITIES_PER_DOMAIN} NIP-05 identities"
+                            )
                     result = conn.execute(
                         """
                         UPDATE nostr_identities
@@ -267,6 +305,69 @@ class NostrIdentityStore:
                 return []
         records = [self._row_to_dict(row) for row in rows]
         return deepcopy(records)
+
+    async def get_public_by_domain(
+        self, domain: str, *, local_part: str | None = None
+    ) -> List[Dict[str, Any]]:
+        """Read a bounded public projection, including legacy oversized rows safely."""
+
+        normalized_domain = self._norm(domain)
+        normalized_local = self._norm(local_part) if local_part is not None else None
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    if normalized_local is None:
+                        rows = conn.execute(
+                            """
+                            SELECT id,
+                                   CASE WHEN length(CAST(local_part AS BLOB)) <= 64
+                                        THEN local_part ELSE '' END AS local_part,
+                                   CASE WHEN length(CAST(domain AS BLOB)) <= 253
+                                        THEN domain ELSE '' END AS domain,
+                                   CASE WHEN length(CAST(npub AS BLOB)) <= 128
+                                        THEN npub ELSE '' END AS npub,
+                                   CASE WHEN length(CAST(pubkey_hex AS BLOB)) = 64
+                                        THEN pubkey_hex ELSE '' END AS pubkey_hex,
+                                   CASE WHEN length(CAST(relays AS BLOB)) <= 16384
+                                        THEN relays ELSE '[]' END AS relays,
+                                   created_at, updated_at
+                            FROM nostr_identities INDEXED BY idx_nostr_identity_public_bounded
+                            WHERE domain = ?
+                              AND length(CAST(local_part AS BLOB)) <= 64
+                              AND length(CAST(domain AS BLOB)) <= 253
+                              AND length(CAST(pubkey_hex AS BLOB)) = 64
+                            ORDER BY nostr_identities.local_part
+                            LIMIT ?
+                            """,
+                            (normalized_domain, MAX_IDENTITIES_PER_DOMAIN),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            """
+                            SELECT id,
+                                   CASE WHEN length(CAST(local_part AS BLOB)) <= 64
+                                        THEN local_part ELSE '' END AS local_part,
+                                   CASE WHEN length(CAST(domain AS BLOB)) <= 253
+                                        THEN domain ELSE '' END AS domain,
+                                   CASE WHEN length(CAST(npub AS BLOB)) <= 128
+                                        THEN npub ELSE '' END AS npub,
+                                   CASE WHEN length(CAST(pubkey_hex AS BLOB)) = 64
+                                        THEN pubkey_hex ELSE '' END AS pubkey_hex,
+                                   CASE WHEN length(CAST(relays AS BLOB)) <= 16384
+                                        THEN relays ELSE '[]' END AS relays,
+                                   created_at, updated_at
+                            FROM nostr_identities
+                            WHERE domain = ? AND local_part = ?
+                              AND length(CAST(local_part AS BLOB)) <= 64
+                              AND length(CAST(domain AS BLOB)) <= 253
+                              AND length(CAST(pubkey_hex AS BLOB)) = 64
+                            LIMIT 1
+                            """,
+                            (normalized_domain, normalized_local),
+                        ).fetchall()
+            except sqlite3.Error:
+                return []
+        return deepcopy([self._row_to_dict(row) for row in rows])
 
     async def has_domain(self, domain: str) -> bool:
         normalized_domain = self._norm(domain)

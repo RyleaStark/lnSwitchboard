@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Mapping
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from .secure_files import create_private_file, read_private_file
 from .sqlite_utils import sqlite_connection
 
 
@@ -18,22 +18,16 @@ class ConnectionSecretStore:
     def __init__(self, database_path: Path, key_path: Path) -> None:
         self.database_path = Path(database_path)
         self.key_path = Path(key_path)
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self.key_path.parent.mkdir(parents=True, exist_ok=True)
         self._fernet = Fernet(self._load_or_create_key())
         self._init_schema()
 
     def _load_or_create_key(self) -> bytes:
-        try:
-            descriptor = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            os.chmod(self.key_path, 0o600)
-        else:
-            try:
-                os.write(descriptor, Fernet.generate_key())
-            finally:
-                os.close(descriptor)
-        key = self.key_path.read_bytes().strip()
+        generated = Fernet.generate_key()
+        key = (
+            generated
+            if create_private_file(self.key_path, generated, mode=0o600)
+            else read_private_file(self.key_path, chmod=True).strip()
+        )
         Fernet(key)  # Validate before accepting it for credential encryption.
         return key
 

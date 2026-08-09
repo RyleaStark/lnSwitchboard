@@ -44,9 +44,27 @@ def test_compose_mesh_sidecar_contract_is_isolated_and_digest_pinned() -> None:
     assert app["environment"]["CLOUDFLARED_TOKEN_PATH"] == (
         "/app/secrets/cloudflare-mesh/node.env"
     )
-    assert app["environment"]["CLOUDFLARED_ORIGIN_URL"] == "http://lnswitchboard:21212"
-    assert app["environment"]["CLOUDFLARED_TOKEN_GID"] == "${CLOUDFLARED_TOKEN_GID:-0}"
-    assert app["networks"]["default"]["aliases"] == ["lns.internal"]
+    assert app["environment"]["CLOUDFLARED_ORIGIN_URL"] == (
+        "http://lnswitchboard-public:21212"
+    )
+    assert app["environment"]["CLOUDFLARED_TOKEN_GID"] == (
+        "${CLOUDFLARED_TOKEN_GID:-1000}"
+    )
+    assert mesh["group_add"] == ["1000"]
+    assert mesh["networks"] == ["cloudflare-egress"]
+    assert "default" not in mesh["networks"]
+    assert mesh["depends_on"]["permissions-init"]["condition"] == (
+        "service_completed_successfully"
+    )
+    assert mesh["depends_on"]["lnswitchboard-public"]["condition"] == (
+        "service_healthy"
+    )
+    public = services["lnswitchboard-public"]
+    assert "lns.internal" not in app["networks"].get("default", {}).get("aliases", [])
+    assert public["networks"]["cloudflare-egress"]["aliases"] == [
+        "lnswitchboard-public",
+        "lns.internal",
+    ]
 
 
 def test_compose_never_exposes_docker_socket_or_admin_origin_to_mesh() -> None:

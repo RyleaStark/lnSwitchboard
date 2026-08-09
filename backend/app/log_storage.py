@@ -8,6 +8,7 @@ import hashlib
 import json
 import sqlite3
 import math
+import secrets
 from collections import deque
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass
@@ -418,7 +419,10 @@ class RequestLogStorage:
                     address_id TEXT,
                     invoice_event_id INTEGER,
                     request_log_id INTEGER,
-                    delivery_key TEXT
+                    delivery_key TEXT,
+                    claim_token TEXT,
+                    claim_expires_at TEXT,
+                    claim_attempt_number INTEGER
                 )
                 """
             )
@@ -438,6 +442,7 @@ class RequestLogStorage:
                 """
             )
             self._ensure_invoice_event_columns(conn)
+            self._ensure_webhook_delivery_columns(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp)")
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_events_payment_hash ON invoice_events(payment_hash)"
@@ -458,6 +463,49 @@ class RequestLogStorage:
                 "CREATE INDEX IF NOT EXISTS idx_webhook_attempts_delivery ON webhook_attempts(delivery_id)"
             )
             self._redact_legacy_webhook_history(conn)
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=self._retention_days)
+            self._cleanup_expired_rows(conn, cutoff.isoformat())
+
+    @staticmethod
+    def _cleanup_expired_rows(conn: sqlite3.Connection, cutoff_iso: str) -> None:
+        terminal_statuses = "'delivered', 'failed', 'skipped'"
+        conn.execute(
+            "DELETE FROM request_logs WHERE timestamp < ?",
+            (cutoff_iso,),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM webhook_attempts
+            WHERE delivery_id IN (
+                SELECT id
+                FROM webhook_deliveries
+                WHERE updated_at < ?
+                  AND status IN ({terminal_statuses})
+            )
+            """,
+            (cutoff_iso,),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM webhook_deliveries
+            WHERE updated_at < ?
+              AND status IN ({terminal_statuses})
+            """,
+            (cutoff_iso,),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM invoice_events
+            WHERE created_at < ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM webhook_deliveries
+                  WHERE webhook_deliveries.invoice_event_id = invoice_events.id
+                    AND webhook_deliveries.status NOT IN ({terminal_statuses})
+              )
+            """,
+            (cutoff_iso,),
+        )
 
     def _redact_legacy_webhook_history(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -569,6 +617,21 @@ class RequestLogStorage:
             "INSERT OR IGNORE INTO lnswitchboard_migrations (name, applied_at) VALUES (?, ?)",
             (migration_name, datetime.now(tz=timezone.utc).isoformat()),
         )
+
+    def _ensure_webhook_delivery_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(webhook_deliveries)")
+        }
+        alterations = {
+            "claim_token": "TEXT",
+            "claim_expires_at": "TEXT",
+            "claim_attempt_number": "INTEGER",
+        }
+        for name, definition in alterations.items():
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE webhook_deliveries ADD COLUMN {name} {definition}"
+                )
 
     def _ensure_invoice_event_columns(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(invoice_events)")}
@@ -1028,23 +1091,243 @@ class RequestLogStorage:
         async with self._lock:
             try:
                 with self._connect() as conn:
+                    clear_claim = status not in {"pending", "retrying"}
                     if headers is None:
-                        conn.execute(
-                            "UPDATE webhook_deliveries SET status = ?, updated_at = ? WHERE id = ?",
-                            (status, now_iso, delivery_id),
-                        )
+                        if clear_claim:
+                            conn.execute(
+                                """
+                                UPDATE webhook_deliveries
+                                SET status = ?, updated_at = ?, claim_token = NULL,
+                                    claim_expires_at = NULL, claim_attempt_number = NULL
+                                WHERE id = ?
+                                """,
+                                (status, now_iso, delivery_id),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE webhook_deliveries SET status = ?, updated_at = ? WHERE id = ?",
+                                (status, now_iso, delivery_id),
+                            )
                     else:
-                        conn.execute(
-                            "UPDATE webhook_deliveries SET status = ?, headers = ?, updated_at = ? WHERE id = ?",
-                            (
-                                status,
-                                self._serialize_details(_safe_delivery_headers(headers)),
-                                now_iso,
-                                delivery_id,
-                            ),
+                        safe_headers = self._serialize_details(
+                            _safe_delivery_headers(headers)
                         )
+                        if clear_claim:
+                            conn.execute(
+                                """
+                                UPDATE webhook_deliveries
+                                SET status = ?, headers = ?, updated_at = ?,
+                                    claim_token = NULL, claim_expires_at = NULL,
+                                    claim_attempt_number = NULL
+                                WHERE id = ?
+                                """,
+                                (status, safe_headers, now_iso, delivery_id),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE webhook_deliveries SET status = ?, headers = ?, updated_at = ? WHERE id = ?",
+                                (status, safe_headers, now_iso, delivery_id),
+                            )
             except sqlite3.Error:
                 return
+
+    async def claim_delivery_attempt(
+        self,
+        *,
+        delivery_id: int,
+        max_attempts: int,
+        manual: bool = False,
+        lease_seconds: int = 300,
+    ) -> Optional[Dict[str, Any]]:
+        """Persistently lease the next attempt so only one dispatcher may send."""
+
+        if delivery_id <= 0:
+            return None
+        now = datetime.now(tz=timezone.utc)
+        now_iso = now.isoformat()
+        expires_iso = (now + timedelta(seconds=max(30, lease_seconds))).isoformat()
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute(
+                        """
+                        SELECT status, claim_token, claim_expires_at,
+                               (SELECT COALESCE(MAX(attempt_number), 0)
+                                FROM webhook_attempts
+                                WHERE delivery_id = webhook_deliveries.id) AS last_attempt
+                        FROM webhook_deliveries
+                        WHERE id = ?
+                        """,
+                        (delivery_id,),
+                    ).fetchone()
+                    if row is None:
+                        return None
+                    claim_token = str(row["claim_token"] or "")
+                    claim_expires_at = str(row["claim_expires_at"] or "")
+                    if claim_token and claim_expires_at > now_iso:
+                        return None
+                    status_value = str(row["status"] or "")
+                    attempt_number = int(row["last_attempt"] or 0) + 1
+                    if not manual and status_value not in {"pending", "retrying"}:
+                        return None
+                    if not manual and attempt_number > max(1, int(max_attempts)):
+                        conn.execute(
+                            """
+                            UPDATE webhook_deliveries
+                            SET status = 'failed', updated_at = ?,
+                                claim_token = NULL, claim_expires_at = NULL,
+                                claim_attempt_number = NULL
+                            WHERE id = ?
+                            """,
+                            (now_iso, delivery_id),
+                        )
+                        return None
+                    token = secrets.token_urlsafe(32)
+                    conn.execute(
+                        """
+                        UPDATE webhook_deliveries
+                        SET claim_token = ?, claim_expires_at = ?,
+                            claim_attempt_number = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (token, expires_iso, attempt_number, now_iso, delivery_id),
+                    )
+                    return {
+                        "token": token,
+                        "attempt_number": attempt_number,
+                    }
+            except sqlite3.Error:
+                return None
+
+    async def get_delivery_claim_retry_delay(self, delivery_id: int) -> Optional[float]:
+        """Return seconds until an active delivery lease may be reclaimed."""
+
+        now = datetime.now(tz=timezone.utc)
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        "SELECT status, claim_token, claim_expires_at "
+                        "FROM webhook_deliveries WHERE id = ?",
+                        (delivery_id,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return None
+        if row is None or str(row["status"] or "") not in {"pending", "retrying"}:
+            return None
+        if not str(row["claim_token"] or ""):
+            return None
+        try:
+            expires = datetime.fromisoformat(str(row["claim_expires_at"] or ""))
+        except ValueError:
+            return 0.05
+        return max(0.0, (expires - now).total_seconds()) + 0.05
+
+    async def complete_claimed_delivery_attempt(
+        self,
+        *,
+        delivery_id: int,
+        claim_token: str,
+        success: bool,
+        error: Optional[str],
+        status_code: Optional[int],
+        latency_ms: Optional[int],
+        response_body: Optional[str],
+        delivery_status: str,
+        headers: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Record one leased attempt and release its persistent ownership."""
+
+        if delivery_id <= 0 or not claim_token:
+            return False
+        attempted_at = datetime.now(tz=timezone.utc).isoformat()
+        safe_error = _encoded_delivery_error(error)
+        redacted_response = None
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    claim = conn.execute(
+                        """
+                        SELECT claim_token, claim_attempt_number
+                        FROM webhook_deliveries
+                        WHERE id = ?
+                        """,
+                        (delivery_id,),
+                    ).fetchone()
+                    if (
+                        claim is None
+                        or str(claim["claim_token"] or "") != claim_token
+                        or int(claim["claim_attempt_number"] or 0) <= 0
+                    ):
+                        return False
+                    attempt_number = int(claim["claim_attempt_number"])
+                    conn.execute(
+                        """
+                        INSERT INTO webhook_attempts (
+                            delivery_id, attempted_at, attempt_number, success,
+                            status_code, latency_ms, error, response_body
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            delivery_id,
+                            attempted_at,
+                            attempt_number,
+                            1 if success else 0,
+                            status_code,
+                            latency_ms,
+                            safe_error,
+                            redacted_response,
+                        ),
+                    )
+                    cursor = conn.execute(
+                        """
+                        UPDATE webhook_deliveries
+                        SET status = ?, headers = ?, updated_at = ?, claim_token = NULL,
+                            claim_expires_at = NULL, claim_attempt_number = NULL
+                        WHERE id = ? AND claim_token = ?
+                        """,
+                        (
+                            delivery_status,
+                            self._serialize_details(_safe_delivery_headers(headers or {})),
+                            attempted_at,
+                            delivery_id,
+                            claim_token,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise sqlite3.IntegrityError("delivery attempt claim changed")
+                    delivery_row = conn.execute(
+                        """
+                        SELECT id, created_at, updated_at, kind, event, target, status,
+                               payload, headers, address_id, invoice_event_id,
+                               request_log_id, delivery_key
+                        FROM webhook_deliveries
+                        WHERE id = ?
+                        """,
+                        (delivery_id,),
+                    ).fetchone()
+                    if delivery_row:
+                        self._insert_delivery_request_log_locked(
+                            conn,
+                            delivery=self._row_to_delivery(delivery_row),
+                            timestamp=attempted_at,
+                            delivery_status=delivery_status,
+                            attempt=self._row_to_delivery_log_attempt(
+                                delivery_id=delivery_id,
+                                attempted_at=attempted_at,
+                                attempt_number=attempt_number,
+                                success=success,
+                                status_code=status_code,
+                                latency_ms=latency_ms,
+                                error=safe_error,
+                                response_body=redacted_response,
+                            ),
+                        )
+                return True
+            except sqlite3.Error:
+                return False
 
     async def record_delivery_attempt(
         self,
@@ -1268,43 +1551,7 @@ class RequestLogStorage:
             try:
                 with self._connect() as conn:
                     cutoff_iso = cutoff.isoformat()
-                    conn.execute(
-                        "DELETE FROM request_logs WHERE timestamp < ?",
-                        (cutoff_iso,),
-                    )
-                    conn.execute(
-                        """
-                        DELETE FROM webhook_attempts
-                        WHERE delivery_id IN (
-                            SELECT id
-                            FROM webhook_deliveries
-                            WHERE updated_at < ?
-                              AND status IN ('delivered', 'failed')
-                        )
-                        """,
-                        (cutoff_iso,),
-                    )
-                    conn.execute(
-                        """
-                        DELETE FROM webhook_deliveries
-                        WHERE updated_at < ?
-                          AND status IN ('delivered', 'failed')
-                        """,
-                        (cutoff_iso,),
-                    )
-                    conn.execute(
-                        """
-                        DELETE FROM invoice_events
-                        WHERE created_at < ?
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM webhook_deliveries
-                              WHERE webhook_deliveries.invoice_event_id = invoice_events.id
-                                AND webhook_deliveries.status NOT IN ('delivered', 'failed')
-                          )
-                        """,
-                        (cutoff_iso,),
-                    )
+                    self._cleanup_expired_rows(conn, cutoff_iso)
             except sqlite3.Error:
                 return
             filtered = deque(maxlen=self._max_recent)

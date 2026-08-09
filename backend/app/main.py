@@ -3,26 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import logging
+import stat
 from contextlib import asynccontextmanager, suppress
 from ipaddress import IPv6Address, ip_address, ip_network
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import grpc
+import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from .deps import (
     get_cloudflare_oauth_manager_dep,
     get_cloudflare_service_dep,
-    get_connection_secret_store_dep,
     get_connection_store_dep,
     get_ln_address_store_dep,
     get_ln_client_dep,
@@ -37,6 +39,10 @@ from .ln_address_store import LNAddressStore
 from .logging_utils import configure_logging
 from .macaroon_store import MacaroonNotConfiguredError
 from .nip05_store import NostrIdentityStore
+from .public_proxy import (
+    public_response_headers_within_wire_budget,
+    sanitize_hop_by_hop_headers,
+)
 from .request_utils import get_public_domain, get_public_host
 from .routers import connections as connections_router
 from .routers import cloudflare_oauth as cloudflare_oauth_router
@@ -194,6 +200,56 @@ def _parse_forwarded_ip(value: str):
     return _normalized_address(cleaned)
 
 
+async def _periodic_log_cleanup(storage, *, interval_seconds: float = 3600.0) -> None:
+    """Enforce retention even while the service is idle."""
+
+    while True:
+        await asyncio.sleep(max(0.01, float(interval_seconds)))
+        try:
+            await storage.cleanup()
+        except Exception as exc:  # pragma: no cover - storage runtime
+            LOGGER.warning(
+                "Unable to run periodic history cleanup (error_type=%s)",
+                type(exc).__name__,
+            )
+
+
+async def _start_public_backend(
+    socket_path: Path,
+) -> tuple[uvicorn.Server, asyncio.Task[None]]:
+    """Start the public-only ASGI surface on a private Unix socket."""
+
+    try:
+        existing = socket_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISSOCK(existing.st_mode) or existing.st_uid != os.getuid():
+            raise OSError("Public backend socket path is unsafe")
+        socket_path.unlink()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app=public_app,
+            uds=str(socket_path),
+            proxy_headers=False,
+            access_log=False,
+            lifespan="off",
+        )
+    )
+    task = asyncio.create_task(server.serve())
+    for _ in range(500):
+        if server.started and socket_path.exists():
+            return server, task
+        if task.done():
+            await task
+            raise RuntimeError("Public backend stopped before readiness")
+        await asyncio.sleep(0.01)
+    server.should_exit = True
+    with suppress(asyncio.CancelledError):
+        await task
+    raise RuntimeError("Public backend socket did not become ready")
+
+
 def _get_admin_proxy_client(request: Request, cidrs: str) -> str | None:
     """Resolve X-Forwarded-For from right to left across local trusted proxies."""
 
@@ -216,6 +272,11 @@ def _get_admin_proxy_client(request: Request, cidrs: str) -> str | None:
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.data_store_path.parent)
+    if settings.listener_mode == "public":
+        # The public-only container serves LNURL/NIP-05 requests. The admin
+        # container owns settlement workers, retries, and provider recovery.
+        yield
+        return
     ln_client = await get_ln_client_dep()
     storage = await get_log_storage_dep()
     webhook_dispatcher = await get_webhook_dispatcher_dep()
@@ -234,6 +295,7 @@ async def lifespan(app: FastAPI):
     if settings.cloudflared_connector_enabled:
         try:
             cloudflare_service = await get_cloudflare_service_dep()
+            cloudflare_service.sync_public_ingress_authorities()
             await cloudflare_service.recover_incomplete_provisioning()
         except Exception:  # pragma: no cover - network runtime
             LOGGER.error("Unable to recover incomplete Cloudflare provisioning")
@@ -292,11 +354,25 @@ async def lifespan(app: FastAPI):
             "Unable to verify LND connection (error_type=%s)",
             type(exc).__name__,
         )
+    public_backend_server: uvicorn.Server | None = None
+    public_backend_task: asyncio.Task[None] | None = None
+    if settings.listener_mode == "admin":
+        public_backend_server, public_backend_task = await _start_public_backend(
+            settings.public_backend_socket_path
+        )
+    log_cleanup_task = asyncio.create_task(_periodic_log_cleanup(storage))
     yield
+    log_cleanup_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await log_cleanup_task
     if cloudflare_authorization_cleanup_task is not None:
         cloudflare_authorization_cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cloudflare_authorization_cleanup_task
+    if public_backend_server is not None and public_backend_task is not None:
+        public_backend_server.should_exit = True
+        with suppress(asyncio.CancelledError):
+            await public_backend_task
     await invoice_full_refresh_worker.stop()
     await invoice_subscription_worker.stop()
     await ln_client.close()
@@ -308,13 +384,44 @@ def _add_request_security(target_app: FastAPI) -> None:
         """Honor forwarding headers only when the immediate peer is trusted."""
 
         settings = get_settings()
+        internal_client = next(
+            (
+                value.decode("ascii", errors="ignore")
+                for name, value in request.scope["headers"]
+                if name.lower() == b"x-lns-internal-client-ip"
+            ),
+            "",
+        )
+        if request.client is None and internal_client:
+            try:
+                request.state.internal_client_ip = str(ip_address(internal_client))
+            except ValueError:
+                pass
+        request.scope["headers"] = [
+            (name, value)
+            for name, value in request.scope["headers"]
+            if name.lower() != b"x-lns-internal-client-ip"
+        ]
         trusted_networks = parse_trusted_proxy_cidrs(settings.trusted_proxy_cidrs)
-        client_host = request.client.host if request.client else ""
+        client_host = (
+            request.client.host
+            if request.client is not None
+            else getattr(request.state, "internal_client_ip", "")
+        )
         try:
             client_ip = ip_address(client_host)
         except ValueError:
             client_ip = None
-        if client_ip is None or not any(client_ip in network for network in trusted_networks):
+        internal_loopback = (
+            request.client is None
+            and bool(internal_client)
+            and client_ip is not None
+            and client_ip.is_loopback
+        )
+        if client_ip is None or not (
+            internal_loopback
+            or any(client_ip in network for network in trusted_networks)
+        ):
             request.scope["headers"] = [
                 (name, value)
                 for name, value in request.scope["headers"]
@@ -329,25 +436,11 @@ def _add_request_security(target_app: FastAPI) -> None:
             candidate_hostname = _normalized_authority_hostname(mesh_candidate)
             if candidate_hostname is not None:
                 connection_store = await get_connection_store_dep()
-                secret_store = await get_connection_secret_store_dep()
-                for connection in connection_store.list_connections():
-                    if connection.provider != "cloudflare":
-                        continue
-                    if not any(
-                        domain.hostname == candidate_hostname
-                        and domain.status in {"pending", "active"}
-                        for domain in connection.domains
-                    ):
-                        continue
-                    credential = secret_store.get(connection.id) or {}
-                    expected_key = credential.get("mesh_ingress_key")
-                    if (
-                        isinstance(expected_key, str)
-                        and expected_key
-                        and secrets.compare_digest(mesh_key, expected_key)
-                    ):
-                        mesh_public_host = candidate_hostname
-                    break
+                expected_key = connection_store.get_public_ingress_key(
+                    candidate_hostname
+                )
+                if expected_key and secrets.compare_digest(mesh_key, expected_key):
+                    mesh_public_host = candidate_hostname
         if mesh_public_host is not None:
             request.state.mesh_public_host = mesh_public_host
         public_host = get_public_host(request)
@@ -513,6 +606,123 @@ if STATIC_DIR.exists():
     admin_app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 
+class StandalonePublicContractApp:
+    """Apply the split gateway's bounded HTTP contract in standalone both mode."""
+
+    MAX_HEADER_COUNT = 100
+    MAX_HEADER_BYTES = 16 * 1024
+    MAX_RESPONSE_BYTES = 1024 * 1024
+
+    def __init__(self, target: ASGIApp) -> None:
+        self.target = target
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.target(scope, receive, send)
+            return
+        headers = list(scope.get("headers", []))
+        if len(headers) > self.MAX_HEADER_COUNT or sum(
+            len(name) + len(value) for name, value in headers
+        ) > self.MAX_HEADER_BYTES:
+            await PlainTextResponse("Request headers too large", status_code=431)(
+                scope, receive, send
+            )
+            return
+        method = str(scope.get("method", ""))
+        if method not in {"GET", "HEAD"}:
+            await PlainTextResponse("Method not allowed", status_code=405)(scope, receive, send)
+            return
+        if any(
+            name.lower() == b"transfer-encoding"
+            or (name.lower() == b"content-length" and value.strip() not in {b"", b"0"})
+            for name, value in headers
+        ):
+            await PlainTextResponse("Request body not permitted", status_code=413)(
+                scope, receive, send
+            )
+            return
+
+        try:
+            forwarded_headers = sanitize_hop_by_hop_headers(
+                headers,
+                excluded={b"content-length", b"x-lns-internal-client-ip"},
+            )
+        except ValueError:
+            await PlainTextResponse("Malformed Connection header", status_code=400)(
+                scope, receive, send
+            )
+            return
+
+        target_scope = dict(scope)
+        target_scope["headers"] = forwarded_headers
+        if method == "HEAD":
+            target_scope["method"] = "GET"
+        response_start: Message | None = None
+        response_body = bytearray()
+        response_too_large = False
+
+        async def capture(message: Message) -> None:
+            nonlocal response_start, response_too_large
+            if message["type"] == "http.response.start":
+                response_start = message
+                return
+            if message["type"] == "http.response.body":
+                chunk = message.get("body", b"")
+                if len(response_body) + len(chunk) > self.MAX_RESPONSE_BYTES:
+                    response_too_large = True
+                    return
+                response_body.extend(chunk)
+
+        await self.target(target_scope, receive, capture)
+        if response_too_large:
+            await PlainTextResponse("Public response too large", status_code=502)(
+                scope, receive, send
+            )
+            return
+        if response_start is None:  # pragma: no cover - defensive ASGI guard
+            await PlainTextResponse("Public response unavailable", status_code=502)(
+                scope, receive, send
+            )
+            return
+        raw_response_headers = list(response_start.get("headers", []))
+        if len(raw_response_headers) > self.MAX_HEADER_COUNT or sum(
+            len(name) + len(value) for name, value in raw_response_headers
+        ) > self.MAX_HEADER_BYTES:
+            await PlainTextResponse("Public response headers too large", status_code=502)(
+                scope, receive, send
+            )
+            return
+        try:
+            response_headers = sanitize_hop_by_hop_headers(
+                raw_response_headers,
+                excluded={b"content-length", b"content-encoding"},
+            )
+        except ValueError:
+            await PlainTextResponse(
+                "Malformed public response headers", status_code=502
+            )(scope, receive, send)
+            return
+        response_headers.append((b"content-length", str(len(response_body)).encode("ascii")))
+        if not public_response_headers_within_wire_budget(response_headers):
+            await PlainTextResponse("Public response headers too large", status_code=502)(
+                scope, receive, send
+            )
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": response_start["status"],
+                "headers": response_headers,
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"" if method == "HEAD" else bytes(response_body),
+            }
+        )
+
+
 class ListenerDispatchApp:
     """Dispatch requests to route-isolated ASGI apps by local listener port."""
 
@@ -533,5 +743,5 @@ class ListenerDispatchApp:
 
 app = ListenerDispatchApp(
     admin=admin_app,
-    public=public_app,
+    public=StandalonePublicContractApp(public_app),
 )

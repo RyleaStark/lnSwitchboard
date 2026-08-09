@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Prepare standalone Compose state without following filesystem aliases."""
+
+from __future__ import annotations
+
+import errno
+import os
+import stat
+from collections.abc import Iterable
+
+ROOTS = (
+    ("/app-secrets", (("cloudflare-mesh",),)),
+    ("/tailscale-control", (("control",), ("status",))),
+    ("/tailscale-state", ()),
+)
+UID = 1000
+GID = 1000
+DIR_MODE = 0o700
+FILE_MODE = 0o600
+TOKEN_MODE = 0o640
+MESH_DIR_MODE = 0o750
+DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | os.O_DIRECTORY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+FILE_FLAGS = (
+    os.O_RDWR
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+
+
+
+def fail() -> None:
+    raise SystemExit("lnSwitchboard state preparation refused unsafe filesystem state")
+
+
+def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def open_directory(name: str, *, parent_fd: int | None = None) -> int:
+    try:
+        if parent_fd is None:
+            descriptor = os.open(name, DIRECTORY_FLAGS)
+        else:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            descriptor = os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+            if not same_inode(before, os.fstat(descriptor)):
+                os.close(descriptor)
+                fail()
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            fail()
+        return descriptor
+    except (OSError, ValueError):
+        fail()
+
+
+def ensure_directory(parent_fd: int, name: str) -> None:
+    try:
+        os.mkdir(name, DIR_MODE, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except FileExistsError:
+        pass
+    child = open_directory(name, parent_fd=parent_fd)
+    try:
+        os.fchown(child, UID, GID)
+        os.fchmod(child, DIR_MODE)
+        os.fsync(child)
+    finally:
+        os.close(child)
+
+
+def required_mode(relative: tuple[str, ...]) -> int:
+    if relative == ("cloudflare-mesh", "node.env"):
+        return TOKEN_MODE
+    return FILE_MODE
+
+
+def required_directory_mode(relative: tuple[str, ...]) -> int:
+    if relative == ("cloudflare-mesh",):
+        return MESH_DIR_MODE
+    return DIR_MODE
+
+
+def harden_tree(directory_fd: int, relative: tuple[str, ...] = ()) -> None:
+    try:
+        names: Iterable[str] = os.listdir(directory_fd)
+    except OSError:
+        fail()
+    for name in sorted(names):
+        if name in {"", ".", ".."}:
+            fail()
+        try:
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError:
+            fail()
+        child_relative = (*relative, name)
+        if stat.S_ISDIR(before.st_mode):
+            child = open_directory(name, parent_fd=directory_fd)
+            try:
+                harden_tree(child, child_relative)
+                os.fchown(child, UID, GID)
+                os.fchmod(child, required_directory_mode(child_relative))
+                os.fsync(child)
+            finally:
+                os.close(child)
+            continue
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            fail()
+        try:
+            descriptor = os.open(name, FILE_FLAGS, dir_fd=directory_fd)
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.ENXIO}:
+                fail()
+            raise
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not same_inode(before, opened)
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+            ):
+                fail()
+            os.fchown(descriptor, UID, GID)
+            os.fchmod(descriptor, required_mode(child_relative))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def validate_tree(directory_fd: int, relative: tuple[str, ...] = ()) -> None:
+    for name in sorted(os.listdir(directory_fd)):
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        child_relative = (*relative, name)
+        if stat.S_ISDIR(info.st_mode):
+            if (
+                (info.st_uid, info.st_gid) != (UID, GID)
+                or stat.S_IMODE(info.st_mode)
+                != required_directory_mode(child_relative)
+            ):
+                fail()
+            child = open_directory(name, parent_fd=directory_fd)
+            try:
+                validate_tree(child, child_relative)
+            finally:
+                os.close(child)
+        else:
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or (info.st_uid, info.st_gid) != (UID, GID)
+                or stat.S_IMODE(info.st_mode) != required_mode(child_relative)
+            ):
+                fail()
+
+
+def prepare_public_socket_root() -> None:
+    descriptor = open_directory("/public-socket")
+    try:
+        entries = os.listdir(descriptor)
+        if entries:
+            if entries != ["public.sock"]:
+                fail()
+            try:
+                leaf = os.stat(
+                    "public.sock", dir_fd=descriptor, follow_symlinks=False
+                )
+            except OSError:
+                fail()
+            if (
+                not stat.S_ISSOCK(leaf.st_mode)
+                or leaf.st_uid != UID
+                or leaf.st_gid != GID
+            ):
+                fail()
+        os.fchown(descriptor, UID, GID)
+        os.fchmod(descriptor, DIR_MODE)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def main() -> None:
+    prepare_public_socket_root()
+    for root, required in ROOTS:
+        descriptor = open_directory(root)
+        try:
+            for path in required:
+                parent = descriptor
+                opened: list[int] = []
+                try:
+                    for component in path:
+                        ensure_directory(parent, component)
+                        child = open_directory(component, parent_fd=parent)
+                        opened.append(child)
+                        parent = child
+                finally:
+                    for child in reversed(opened):
+                        os.close(child)
+            harden_tree(descriptor)
+            os.fchown(descriptor, UID, GID)
+            os.fchmod(descriptor, DIR_MODE)
+            os.fsync(descriptor)
+            validate_tree(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+if __name__ == "__main__":
+    main()
