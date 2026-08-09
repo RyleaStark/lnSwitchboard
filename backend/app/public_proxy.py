@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,16 +26,25 @@ _HOP_BY_HOP = {
     b"upgrade",
 }
 _INTERNAL_CLIENT_HEADER = b"x-lns-internal-client-ip"
+_HEADER_NAME_PATTERN = re.compile(rb"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 
-def _connection_nominated_headers(headers: list[tuple[bytes, bytes]]) -> set[bytes]:
+def sanitize_hop_by_hop_headers(
+    headers: list[tuple[bytes, bytes]], *, excluded: set[bytes] | None = None
+) -> list[tuple[bytes, bytes]]:
+    """Validate names and remove fixed and Connection-nominated hop fields."""
     nominated: set[bytes] = set()
     for name, value in headers:
+        if _HEADER_NAME_PATTERN.fullmatch(name) is None:
+            raise ValueError("Invalid HTTP field name")
         if name.lower() == b"connection":
-            nominated.update(
-                token.strip().lower() for token in value.split(b",") if token.strip()
-            )
-    return nominated
+            for raw_token in value.split(b","):
+                token = raw_token.strip()
+                if not token or _HEADER_NAME_PATTERN.fullmatch(token) is None:
+                    raise ValueError("Invalid Connection field-name token")
+                nominated.add(token.lower())
+    removed = _HOP_BY_HOP | nominated | (excluded or set())
+    return [(name, value) for name, value in headers if name.lower() not in removed]
 
 
 @asynccontextmanager
@@ -93,15 +103,13 @@ async def proxy_public_request(request: Request, path: str) -> Response:
     ):
         return PlainTextResponse("Request body not permitted", status_code=413)
 
-    request_nominated = _connection_nominated_headers(raw_headers)
-    headers = [
-        (name, value)
-        for name, value in request.scope["headers"]
-        if name.lower() not in _HOP_BY_HOP
-        and name.lower() not in request_nominated
-        and name.lower() != b"content-length"
-        and name.lower() != _INTERNAL_CLIENT_HEADER
-    ]
+    try:
+        headers = sanitize_hop_by_hop_headers(
+            raw_headers,
+            excluded={b"content-length", _INTERNAL_CLIENT_HEADER},
+        )
+    except ValueError:
+        return PlainTextResponse("Malformed Connection header", status_code=400)
     if request.client is not None:
         headers.append((_INTERNAL_CLIENT_HEADER, request.client.host.encode("ascii")))
     target = request.url.path
@@ -126,15 +134,15 @@ async def proxy_public_request(request: Request, path: str) -> Response:
                         "Public backend response too large", status_code=502
                     )
                 response_body.extend(chunk)
-            response_nominated = _connection_nominated_headers(raw_response_headers)
-            response_headers = [
-                (name, value)
-                for name, value in backend.headers.raw
-                if name.lower() not in _HOP_BY_HOP
-                and name.lower() not in response_nominated
-                and name.lower() != b"content-length"
-                and name.lower() != b"content-encoding"
-            ]
+            try:
+                response_headers = sanitize_hop_by_hop_headers(
+                    raw_response_headers,
+                    excluded={b"content-length", b"content-encoding"},
+                )
+            except ValueError:
+                return PlainTextResponse(
+                    "Malformed public backend response headers", status_code=502
+                )
             response_status = backend.status_code
     except httpx.HTTPError:
         return PlainTextResponse("Public backend unavailable", status_code=503)

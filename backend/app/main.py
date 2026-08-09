@@ -39,6 +39,7 @@ from .ln_address_store import LNAddressStore
 from .logging_utils import configure_logging
 from .macaroon_store import MacaroonNotConfiguredError
 from .nip05_store import NostrIdentityStore
+from .public_proxy import sanitize_hop_by_hop_headers
 from .request_utils import get_public_domain, get_public_host
 from .routers import connections as connections_router
 from .routers import cloudflare_oauth as cloudflare_oauth_router
@@ -638,7 +639,19 @@ class StandalonePublicContractApp:
             )
             return
 
+        try:
+            forwarded_headers = sanitize_hop_by_hop_headers(
+                headers,
+                excluded={b"content-length", b"x-lns-internal-client-ip"},
+            )
+        except ValueError:
+            await PlainTextResponse("Malformed Connection header", status_code=400)(
+                scope, receive, send
+            )
+            return
+
         target_scope = dict(scope)
+        target_scope["headers"] = forwarded_headers
         if method == "HEAD":
             target_scope["method"] = "GET"
         response_start: Message | None = None
@@ -668,11 +681,16 @@ class StandalonePublicContractApp:
                 scope, receive, send
             )
             return
-        response_headers = [
-            (name, value)
-            for name, value in response_start.get("headers", [])
-            if name.lower() not in {b"content-length", b"transfer-encoding"}
-        ]
+        try:
+            response_headers = sanitize_hop_by_hop_headers(
+                list(response_start.get("headers", [])),
+                excluded={b"content-length", b"content-encoding"},
+            )
+        except ValueError:
+            await PlainTextResponse(
+                "Malformed public response headers", status_code=502
+            )(scope, receive, send)
+            return
         if len(response_headers) > self.MAX_HEADER_COUNT or sum(
             len(name) + len(value) for name, value in response_headers
         ) > self.MAX_HEADER_BYTES:

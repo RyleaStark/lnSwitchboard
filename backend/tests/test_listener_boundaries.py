@@ -79,6 +79,69 @@ def test_standalone_public_listener_enforces_bodyless_get_and_head_contract(
     assert public.post("/.well-known/nostr.json").status_code == 405
 
 
+def test_standalone_public_contract_strips_fixed_and_nominated_hop_headers() -> None:
+    observed_headers: list[tuple[bytes, bytes]] = []
+
+    async def target(scope: Any, receive: Any, send: Any) -> None:
+        del receive
+        observed_headers.extend(scope["headers"])
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"text/plain"),
+                    (b"connection", b"x-response-hop"),
+                    (b"x-response-hop", b"secret"),
+                    (b"keep-alive", b"timeout=5"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    messages: list[dict[str, Any]] = []
+
+    async def exercise() -> None:
+        async def receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            messages.append(message)
+
+        await main.StandalonePublicContractApp(target)(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/",
+                "raw_path": b"/",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"connection", b"x-request-hop"),
+                    (b"x-request-hop", b"attacker"),
+                    (b"keep-alive", b"timeout=5"),
+                ],
+                "client": ("127.0.0.1", 12345),
+                "server": ("127.0.0.1", 21212),
+            },
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert observed_headers == [(b"host", b"testserver")]
+    response_headers = messages[0]["headers"]
+    assert (b"content-type", b"text/plain") in response_headers
+    assert (b"content-length", b"2") in response_headers
+    assert all(
+        name.lower() not in {b"connection", b"keep-alive", b"x-response-hop"}
+        for name, _value in response_headers
+    )
+
+
 def test_dispatcher_uses_configured_public_port(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PUBLIC_SERVICE_PORT", "31212")
     config.get_settings.cache_clear()
