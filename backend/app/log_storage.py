@@ -51,14 +51,26 @@ def _delivery_target_reference(target: Any) -> str:
     return f"webhook:{digest}"
 
 
+def _error_type_name(value: str) -> str | None:
+    if not value.startswith("type:"):
+        return None
+    name = value[5:]
+    if not name or len(name) > 128 or not name.isidentifier():
+        return None
+    return name
+
+
+def _encoded_delivery_error(error: Any) -> str | None:
+    if error in (None, ""):
+        return None
+    name = _error_type_name(str(error))
+    return f"type:{name or 'DeliveryError'}"
+
+
 def _safe_delivery_error(error: Any) -> str | None:
     if error in (None, ""):
         return None
-    value = str(error)
-    normalized = value.replace(".", "").replace("_", "")
-    if value.endswith(("Error", "Exception")) and normalized.isalnum():
-        return value[:128]
-    return "DeliveryError"
+    return _error_type_name(str(error)) or "DeliveryError"
 
 
 def _safe_delivery_headers(headers: Any) -> Dict[str, Any]:
@@ -327,7 +339,7 @@ class RequestLogStorage:
         for attempt in attempts:
             conn.execute(
                 "UPDATE webhook_attempts SET error = ?, response_body = NULL WHERE id = ?",
-                (_safe_delivery_error(attempt["error"]), int(attempt["id"])),
+                (_encoded_delivery_error(attempt["error"]), int(attempt["id"])),
             )
         # RC15/RC16 request-log details mixed operational fields with full
         # destinations and remote error text. Rebuild this duplicate projection
@@ -863,7 +875,7 @@ class RequestLogStorage:
             return
         attempted_at = datetime.now(tz=timezone.utc).isoformat()
         final_status = delivery_status or ("delivered" if success else "failed")
-        safe_error = _safe_delivery_error(error)
+        safe_error = _encoded_delivery_error(error)
         redacted_response = None
         async with self._lock:
             try:

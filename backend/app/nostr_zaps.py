@@ -207,12 +207,16 @@ class NostrZapPublisher:
         try:
             await self._send(relay_url, receipt)
         except Exception as exc:  # pragma: no cover - runtime network path
-            LOGGER.warning("Zap receipt publish failed for %s: %s", relay_url, exc)
+            LOGGER.warning(
+                "Zap receipt publish failed (delivery_id=%s, error_type=%s)",
+                delivery_id,
+                type(exc).__name__,
+            )
             if self._storage is not None and delivery_id is not None:
                 await self._storage.record_delivery_attempt(
                     delivery_id=delivery_id,
                     success=False,
-                    error=str(exc),
+                    error=f"type:{type(exc).__name__}",
                     status_code=None,
                     latency_ms=None,
                     response_body=None,

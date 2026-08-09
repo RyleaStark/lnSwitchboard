@@ -485,7 +485,7 @@ class WebhookDispatcher:
                 await self._delivery_storage.record_delivery_attempt(
                     delivery_id=delivery_id,
                     success=False,
-                    error=str(exc),
+                    error=f"type:{type(exc).__name__}",
                     status_code=status_code,
                     latency_ms=latency_ms,
                     response_body=response_body,
