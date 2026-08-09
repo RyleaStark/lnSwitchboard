@@ -8,7 +8,7 @@ Published on the [Umbrel App Store](https://umbrel.com/), shipped on [Docker Hub
 
 ## What is lnSwitchboard? (ELI5)
 
-Think of your Lightning node as a call center. Every time someone zaps `yourname@yourdomain`, a little switchboard operator (lnSwitchboard) picks up, makes sure the line isn’t being spammed, and then patches the call through with a freshly minted invoice. The operator keeps privacy-preserving status notes so you can inspect routing and settlement without retaining payer comments, webhook bodies, provider responses, or secret-bearing URLs.
+Think of your Lightning node as a call center. Every time someone zaps `yourname@yourdomain`, a little switchboard operator (lnSwitchboard) picks up, makes sure the line isn’t being spammed, and then patches the call through with a freshly minted invoice. Operator-visible status notes are privacy-preserving: payer comments, webhook bodies, provider responses, and secret-bearing URLs are excluded, while narrowly scoped internal invoice state supports settlement and retry after restart.
 
 - 🧑‍💼 **For node runners:** keep your Lightning Address front door open while the sensitive admin UI stays on your LAN / VPN.
 - 🧑‍🎓 **For newcomers:** no need to memorize LNURL specs - lnSwitchboard bakes in the right metadata, comment limits, payer identity rules, and verification endpoints automatically.
