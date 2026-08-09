@@ -12,6 +12,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response
 
 _MAX_PUBLIC_REQUEST_BYTES = 1024 * 1024
+_MAX_PUBLIC_RESPONSE_BYTES = 1024 * 1024
+_MAX_PUBLIC_HEADER_COUNT = 100
+_MAX_PUBLIC_HEADER_BYTES = 16 * 1024
 _HOP_BY_HOP = {
     b"connection",
     b"keep-alive",
@@ -67,6 +70,11 @@ app = FastAPI(
     include_in_schema=False,
 )
 async def proxy_public_request(request: Request, path: str) -> Response:
+    raw_headers = request.scope["headers"]
+    if len(raw_headers) > _MAX_PUBLIC_HEADER_COUNT or sum(
+        len(name) + len(value) for name, value in raw_headers
+    ) > _MAX_PUBLIC_HEADER_BYTES:
+        return PlainTextResponse("Request headers too large", status_code=431)
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
@@ -86,23 +94,36 @@ async def proxy_public_request(request: Request, path: str) -> Response:
     if request.url.query:
         target = f"{target}?{request.url.query}"
     try:
-        backend = await request.app.state.backend_client.request(
-            request.method,
-            target,
-            content=bytes(body),
-            headers=headers,
-        )
+        async with request.app.state.backend_client.stream(
+            request.method, target, content=bytes(body), headers=headers
+        ) as backend:
+            raw_response_headers = backend.headers.raw
+            if len(raw_response_headers) > _MAX_PUBLIC_HEADER_COUNT or sum(
+                len(name) + len(value) for name, value in raw_response_headers
+            ) > _MAX_PUBLIC_HEADER_BYTES:
+                return PlainTextResponse(
+                    "Public backend response headers too large", status_code=502
+                )
+            response_body = bytearray()
+            async for chunk in backend.aiter_bytes():
+                response_body.extend(chunk)
+                if len(response_body) > _MAX_PUBLIC_RESPONSE_BYTES:
+                    return PlainTextResponse(
+                        "Public backend response too large", status_code=502
+                    )
+            response_headers = [
+                (name, value)
+                for name, value in backend.headers.raw
+                if name.lower() not in _HOP_BY_HOP
+                and name.lower() != b"content-length"
+            ]
+            response_status = backend.status_code
     except httpx.HTTPError:
         return PlainTextResponse("Public backend unavailable", status_code=503)
 
-    response_headers = [
-        (name, value)
-        for name, value in backend.headers.raw
-        if name.lower() not in _HOP_BY_HOP and name.lower() != b"content-length"
-    ]
     response = Response(
-        content=backend.content,
-        status_code=backend.status_code,
+        content=bytes(response_body),
+        status_code=response_status,
     )
     response.raw_headers = response_headers
     return response

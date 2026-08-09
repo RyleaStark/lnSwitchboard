@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 import httpx
 
@@ -11,9 +12,10 @@ class BackendClient:
     def __init__(self) -> None:
         self.request_details = None
 
-    async def request(self, method, target, *, content, headers):
+    @asynccontextmanager
+    async def stream(self, method, target, *, content, headers):
         self.request_details = (method, target, content, headers)
-        return httpx.Response(
+        yield httpx.Response(
             201,
             content=b"proxied",
             headers={"content-type": "text/plain", "connection": "close"},
@@ -64,3 +66,83 @@ def test_public_gateway_rejects_oversized_bodies_without_backend_access() -> Non
 
     assert response.status_code == 413
     assert backend.request_details is None
+
+
+def test_public_gateway_rejects_excessive_request_headers() -> None:
+    async def exercise():
+        backend = BackendClient()
+        app.state.backend_client = backend
+        transport = httpx.ASGITransport(app=app)
+        headers = [(f"x-header-{index}", "value") for index in range(101)]
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://public.example"
+        ) as client:
+            response = await client.get("/", headers=headers)
+        return backend, response
+
+    backend, response = asyncio.run(exercise())
+
+    assert response.status_code == 431
+    assert backend.request_details is None
+
+
+def test_public_gateway_rejects_excessive_request_header_bytes() -> None:
+    async def exercise():
+        backend = BackendClient()
+        app.state.backend_client = backend
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://public.example"
+        ) as client:
+            response = await client.get("/", headers={"x-large": "x" * (16 * 1024)})
+        return backend, response
+
+    backend, response = asyncio.run(exercise())
+
+    assert response.status_code == 431
+    assert backend.request_details is None
+
+
+def test_public_gateway_rejects_oversized_backend_responses() -> None:
+    async def exercise():
+        class LargeBackend(BackendClient):
+            @asynccontextmanager
+            async def stream(self, method, target, *, content, headers):
+                self.request_details = (method, target, content, headers)
+                yield httpx.Response(200, content=b"x" * (1024 * 1024 + 1))
+
+        backend = LargeBackend()
+        app.state.backend_client = backend
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://public.example"
+        ) as client:
+            return await client.get("/.well-known/lnurlp/alice")
+
+    response = asyncio.run(exercise())
+
+    assert response.status_code == 502
+    assert response.content == b"Public backend response too large"
+
+
+def test_public_gateway_rejects_excessive_backend_response_headers() -> None:
+    async def exercise():
+        class LargeHeadersBackend(BackendClient):
+            @asynccontextmanager
+            async def stream(self, method, target, *, content, headers):
+                self.request_details = (method, target, content, headers)
+                response_headers = [(f"x-header-{index}", "value") for index in range(101)]
+                yield httpx.Response(200, content=b"ok", headers=response_headers)
+
+        backend = LargeHeadersBackend()
+        app.state.backend_client = backend
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://public.example"
+        ) as client:
+            return await client.get("/.well-known/lnurlp/alice")
+
+    response = asyncio.run(exercise())
+
+    assert response.status_code == 502
+    assert response.content == b"Public backend response headers too large"

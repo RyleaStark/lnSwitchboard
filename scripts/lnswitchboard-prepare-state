@@ -178,10 +178,6 @@ def prepare_public_socket_root() -> None:
                 or leaf.st_gid != GID
             ):
                 fail()
-            try:
-                os.unlink("public.sock", dir_fd=descriptor)
-            except OSError:
-                fail()
         os.fchown(descriptor, UID, GID)
         os.fchmod(descriptor, DIR_MODE)
         os.fsync(descriptor)

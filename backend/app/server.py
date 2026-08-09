@@ -56,6 +56,8 @@ def main() -> None:
             port=endpoints[0][1],
             proxy_headers=False,
             access_log=False,
+            http="h11",
+            h11_max_incomplete_event_size=16 * 1024,
         )
         uvicorn.Server(config).run(sockets=listeners)
     finally:

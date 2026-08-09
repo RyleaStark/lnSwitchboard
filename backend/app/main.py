@@ -399,7 +399,11 @@ def _add_request_security(target_app: FastAPI) -> None:
             if name.lower() != b"x-lns-internal-client-ip"
         ]
         trusted_networks = parse_trusted_proxy_cidrs(settings.trusted_proxy_cidrs)
-        client_host = request.client.host if request.client else ""
+        client_host = (
+            request.client.host
+            if request.client is not None
+            else getattr(request.state, "internal_client_ip", "")
+        )
         try:
             client_ip = ip_address(client_host)
         except ValueError:

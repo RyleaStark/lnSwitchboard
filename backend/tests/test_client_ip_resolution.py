@@ -63,6 +63,16 @@ def test_peer_is_used_without_forwarding_headers(trusted_cidrs) -> None:
     assert get_client_ip(_request("10.0.0.2")) == "10.0.0.2"
 
 
+def test_internal_gateway_peer_still_walks_the_trusted_proxy_chain(trusted_cidrs) -> None:
+    request = _request(
+        None,
+        {"x-forwarded-for": "198.51.100.9, 10.0.0.9"},
+    )
+    request.state.internal_client_ip = "10.0.0.2"
+
+    assert get_client_ip(request) == "198.51.100.9"
+
+
 def test_edge_headers_no_longer_override_the_chain(trusted_cidrs) -> None:
     request = _request(
         "10.0.0.2",

@@ -87,6 +87,7 @@ services:
         condition: service_healthy
     user: "1000:1000"
     read_only: true
+    mem_limit: 128m
     cap_drop:
       - ALL
     security_opt:
@@ -107,7 +108,16 @@ services:
           - lnswitchboard-public
           - lns.internal
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 21212), 2).close()"]
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.error, urllib.request;
+          url='http://127.0.0.1:21212/api/health';
+          code=None;
+          exec("try:\n urllib.request.urlopen(url, timeout=2).read()\nexcept urllib.error.HTTPError as exc:\n code=exc.code");
+          raise SystemExit(0 if code == 404 else 1)
       interval: 30s
       timeout: 5s
       retries: 3

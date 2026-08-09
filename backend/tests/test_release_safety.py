@@ -25,7 +25,7 @@ def test_initializer_preserves_the_rollback_compatible_database_authority() -> N
     assert "migrate_public_state" not in initializer
 
 
-def test_initializer_removes_only_its_owned_stale_public_socket(tmp_path) -> None:
+def test_initializer_preserves_an_owned_stale_public_socket(tmp_path) -> None:
     root = tmp_path / "socket-root"
     root.mkdir()
     socket_path = root / "public.sock"
@@ -44,7 +44,37 @@ def test_initializer_removes_only_its_owned_stale_public_socket(tmp_path) -> Non
 
     namespace["prepare_public_socket_root"]()
 
-    assert list(root.iterdir()) == []
+    assert list(root.iterdir()) == [socket_path]
+
+
+def test_initializer_preserves_an_owned_live_public_socket(tmp_path) -> None:
+    root = tmp_path / "socket-root"
+    root.mkdir()
+    socket_path = root / "public.sock"
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+    namespace = runpy.run_path(
+        str(ROOT / "scripts" / "lnswitchboard-prepare-state")
+    )
+    globals_dict = namespace["prepare_public_socket_root"].__globals__
+    globals_dict["open_directory"] = lambda _path: os.open(
+        root, os.O_RDONLY | os.O_DIRECTORY
+    )
+    globals_dict["UID"] = os.getuid()
+    globals_dict["GID"] = os.getgid()
+
+    try:
+        namespace["prepare_public_socket_root"]()
+        probe = socket.socket(socket.AF_UNIX)
+        try:
+            probe.connect(str(socket_path))
+        finally:
+            probe.close()
+    finally:
+        listener.close()
+
+    assert socket_path.exists()
 
 
 def test_initializer_rejects_a_public_socket_symlink_without_mutation(tmp_path) -> None:
@@ -171,6 +201,7 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert public["read_only"] is True
     assert public["cap_drop"] == ["ALL"]
     assert public["security_opt"] == ["no-new-privileges:true"]
+    assert public["mem_limit"] == "128m"
     assert public["environment"]["LISTENER_MODE"] == "public"
     assert set(public["environment"]) == {
         "LISTENER_MODE",
@@ -193,7 +224,12 @@ def test_primary_application_container_is_least_privilege() -> None:
         "CMD",
         "python",
         "-c",
-        "import socket; socket.create_connection(('127.0.0.1', 21212), 2).close()",
+        "import urllib.error, urllib.request; "
+        "url='http://127.0.0.1:21212/api/health'; "
+        "code=None; "
+        "exec(\"try:\\n urllib.request.urlopen(url, timeout=2).read()\\n"
+        "except urllib.error.HTTPError as exc:\\n code=exc.code\"); "
+        "raise SystemExit(0 if code == 404 else 1)",
     ]
 
     initializer = compose["services"]["permissions-init"]
