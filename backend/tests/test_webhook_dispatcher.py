@@ -69,6 +69,10 @@ def test_webhook_retry_eventually_succeeds(tmp_path):
     asyncio.run(_exercise_retry_eventually_succeeds(tmp_path))
 
 
+def test_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
+    asyncio.run(_exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path))
+
+
 def test_private_webhook_targets_are_blocked_by_default(tmp_path) -> None:
     async def exercise() -> None:
         address_store, _address = await _create_address(tmp_path)
@@ -399,6 +403,107 @@ async def _exercise_retry_eventually_succeeds(tmp_path):
     assert delivered is False
     await asyncio.wait_for(success_event.wait(), timeout=1.0)
     assert attempts == [1, 2, 3]
+
+
+async def _exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
+    db_path = tmp_path / "retry-rotation.db"
+    address_store = LNAddressStore(db_path)
+    address = await address_store.add_address(
+        local_part="pay",
+        domain="testserver",
+        min_sendable_sat=None,
+        max_sendable_sat=None,
+        metadata_description=None,
+        success_message=None,
+        webhook_urls=[],
+        webhook_endpoints=[
+            {
+                "id": "stable",
+                "url": "https://old.example.invalid/endpoint",
+                "secret": "old-secret",
+                "filters": {},
+            }
+        ],
+    )
+    storage = RequestLogStorage(db_path)
+    event, details = _make_event(address)
+    settled_at = datetime.now(tz=timezone.utc)
+    await storage.log_invoice_event(
+        username=event.username,
+        domain=event.domain,
+        amount_msat=event.amount_msat,
+        ip=event.ip,
+        payment_hash=event.payment_hash,
+        payment_request=event.payment_request,
+        details=details,
+        request_log_id=event.request_log_id,
+    )
+    await storage.apply_invoice_event_update(
+        event=event,
+        details=details,
+        settled=True,
+        expired=False,
+        next_check=None,
+        expires_at=None,
+        interval_seconds=60,
+        settled_at=settled_at,
+    )
+
+    calls: list[tuple[str, dict, dict]] = []
+    retried = asyncio.Event()
+
+    async def sender(url, payload, headers):
+        calls.append((url, payload, headers))
+        if len(calls) == 1:
+            await address_store.update_address(
+                address["id"],
+                local_part=address["local_part"],
+                domain=address["domain"],
+                min_sendable_sat=address.get("min_sendable_sat"),
+                max_sendable_sat=address.get("max_sendable_sat"),
+                metadata_description=address.get("metadata_description"),
+                success_message=address.get("success_message"),
+                webhook_urls=[],
+                webhook_endpoints=[
+                    {
+                        "id": "stable",
+                        "url": "https://current.example.invalid/endpoint",
+                        "secret": "current-secret",
+                        "filters": {},
+                    }
+                ],
+                payer_data=address.get("payer_data") or {},
+                routing_mode=address.get("routing_mode") or "local",
+                forward_to=address.get("forward_to"),
+            )
+            raise RuntimeError("retry")
+        retried.set()
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+        max_retries=1,
+        retry_window_seconds=0.1,
+    )
+    assert not await dispatcher.dispatch_payment_settled(
+        event=event,
+        details=details,
+        settled_at=settled_at,
+    )
+    await asyncio.wait_for(retried.wait(), timeout=1.0)
+    assert [call[0] for call in calls] == [
+        "https://old.example.invalid/endpoint",
+        "https://current.example.invalid/endpoint",
+    ]
+    headers = calls[1][2]
+    signed = (
+        f'{headers["X-LnSwitchboard-Signature-Timestamp"]}.'
+        f'{headers["X-LnSwitchboard-Delivery-Id"]}.'
+        f'{WebhookDispatcher._payload_body(calls[1][1])}'
+    ).encode()
+    expected = hmac.new(b"current-secret", signed, hashlib.sha256).hexdigest()
+    assert headers["X-LnSwitchboard-Signature"] == f"sha256={expected}"
 
 
 def test_webhook_retry_stops_after_max_attempts(tmp_path):

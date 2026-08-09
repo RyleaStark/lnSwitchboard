@@ -639,7 +639,7 @@ def test_callback_and_ip_respect_forwarded_headers(monkeypatch, test_client: Tes
         None,
     )
     assert entry is not None
-    assert entry["ip"] == "203.0.113.10"
+    assert entry["ip"] == "redacted"
     for key in ("callback", "callback_http", "callback_lnurl", "proxy", "response"):
         assert key not in entry["details"]
     expected_metadata = data["metadata"]
@@ -685,7 +685,7 @@ def test_client_ip_walks_xff_from_the_trusted_peer(monkeypatch, test_client: Tes
         None,
     )
     assert entry is not None
-    assert entry["ip"] == "198.51.100.23"
+    assert entry["ip"] == "redacted"
     for key in ("callback", "callback_http", "callback_lnurl", "proxy", "response"):
         assert key not in entry["details"]
     expected_metadata = data["metadata"]

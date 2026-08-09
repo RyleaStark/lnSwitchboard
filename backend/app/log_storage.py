@@ -149,7 +149,27 @@ _REQUEST_HISTORY_SECRET_KEYS = {
     "verify_url",
     "verify_url_http",
     "zap_request",
+    "oauth_code",
+    "state",
+    "pr",
 }
+
+_REQUEST_HISTORY_SECRET_FRAGMENTS = (
+    "body",
+    "callback",
+    "comment",
+    "credential",
+    "exception",
+    "header",
+    "password",
+    "payer",
+    "preimage",
+    "response",
+    "secret",
+    "token",
+    "verify_url",
+    "webhook_url",
+)
 
 
 def _safe_request_history_details(event: str, details: Any) -> Dict[str, Any] | None:
@@ -166,7 +186,21 @@ def _safe_request_history_details(event: str, details: Any) -> Dict[str, Any] | 
                     if item:
                         cleaned[normalized_key] = {"type": "OperationError"}
                     continue
-                if normalized_key in _REQUEST_HISTORY_SECRET_KEYS:
+                lowered_key = normalized_key.lower()
+                if lowered_key == "comment_length":
+                    cleaned[normalized_key] = scrub(item)
+                    continue
+                if lowered_key == "state" and str(item).upper() in {
+                    "ACCEPTED",
+                    "CANCELED",
+                    "OPEN",
+                    "SETTLED",
+                }:
+                    cleaned[normalized_key] = scrub(item)
+                    continue
+                if lowered_key in _REQUEST_HISTORY_SECRET_KEYS or any(
+                    fragment in lowered_key for fragment in _REQUEST_HISTORY_SECRET_FRAGMENTS
+                ):
                     continue
                 cleaned[normalized_key] = scrub(item)
             return cleaned
@@ -193,7 +227,21 @@ _INVOICE_OPERATIONAL_DROP_KEYS = {
     "query",
     "remote_callback",
     "response",
+    "oauth_code",
+    "state",
+    "pr",
 }
+
+_INVOICE_OPERATIONAL_DROP_FRAGMENTS = (
+    "body",
+    "credential",
+    "exception",
+    "header",
+    "password",
+    "response",
+    "secret",
+    "token",
+)
 
 
 def _safe_invoice_event_details(details: Any) -> Dict[str, Any] | None:
@@ -210,7 +258,18 @@ def _safe_invoice_event_details(details: Any) -> Dict[str, Any] | None:
                     if item:
                         cleaned[normalized_key] = {"type": "OperationError"}
                     continue
-                if normalized_key in _INVOICE_OPERATIONAL_DROP_KEYS:
+                lowered_key = normalized_key.lower()
+                if lowered_key == "state" and str(item).upper() in {
+                    "ACCEPTED",
+                    "CANCELED",
+                    "OPEN",
+                    "SETTLED",
+                }:
+                    cleaned[normalized_key] = scrub(item)
+                    continue
+                if lowered_key in _INVOICE_OPERATIONAL_DROP_KEYS or any(
+                    fragment in lowered_key for fragment in _INVOICE_OPERATIONAL_DROP_FRAGMENTS
+                ):
                     continue
                 cleaned[normalized_key] = scrub(item)
             return cleaned
@@ -448,7 +507,7 @@ class RequestLogStorage:
                 or "unknown"
             )
             conn.execute(
-                "UPDATE request_logs SET message = ?, details = ? WHERE id = ?",
+                "UPDATE request_logs SET message = ?, details = ?, ip = 'redacted' WHERE id = ?",
                 (
                     f"Webhook delivery {status}",
                     self._serialize_details(safe_details),
@@ -476,7 +535,7 @@ class RequestLogStorage:
             if str(request_log["status"] or "") == "error" and message:
                 message = failure_messages.get(event, "Request failed")
             conn.execute(
-                "UPDATE request_logs SET message = ?, details = ? WHERE id = ?",
+                "UPDATE request_logs SET message = ?, details = ?, ip = 'redacted' WHERE id = ?",
                 (
                     message,
                     self._serialize_details(safe_details),
@@ -491,7 +550,7 @@ class RequestLogStorage:
                 self._deserialize_details(invoice_event["details"])
             )
             conn.execute(
-                "UPDATE invoice_events SET details = ? WHERE id = ?",
+                "UPDATE invoice_events SET details = ?, ip = 'redacted' WHERE id = ?",
                 (
                     self._serialize_details(safe_details),
                     int(invoice_event["id"]),
@@ -804,6 +863,8 @@ class RequestLogStorage:
     async def append(self, entry: LogEntry) -> Optional[int]:
         payload = asdict(entry)
         event = str(payload.get("event") or "")
+        if event in {"discovery", "forward", "invoice", "verify"}:
+            payload["ip"] = "redacted"
         payload["details"] = _safe_request_history_details(event, payload.get("details"))
         if str(payload.get("status") or "") == "error" and payload.get("message"):
             payload["message"] = {
@@ -1270,7 +1331,7 @@ class RequestLogStorage:
                             created_at,
                             username,
                             domain,
-                            ip,
+                            "redacted",
                             amount_msat,
                             payment_hash,
                             payment_request,

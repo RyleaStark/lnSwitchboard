@@ -232,16 +232,7 @@ class WebhookDispatcher:
             if next_attempt > self._max_attempts:
                 await self._delivery_storage.update_delivery_status(delivery_id=delivery_id, status="failed")
                 continue
-            headers = self._build_headers(
-                address_id=str(delivery.get("address_id") or "") or None,
-                delivery_id=delivery_id,
-                endpoint=endpoint,
-                payload=payload,
-            )
             self._schedule_retry(
-                url=str(endpoint["url"]),
-                payload=payload,
-                headers=headers,
                 next_attempt=next_attempt,
                 delivery_id=delivery_id,
                 delay_seconds=0.01,
@@ -549,27 +540,58 @@ class WebhookDispatcher:
                 status_code,
                 self._retry_interval,
             )
-            self._schedule_retry(url=url, payload=payload, headers=headers, next_attempt=attempt + 1, delivery_id=delivery_id)
+            self._schedule_retry(
+                next_attempt=attempt + 1,
+                delivery_id=delivery_id,
+                fallback_url=url,
+                fallback_payload=payload,
+                fallback_headers=headers,
+            )
             return False
 
     def _schedule_retry(
         self,
         *,
-        url: str,
-        payload: Dict[str, Any],
-        headers: Dict[str, str],
         next_attempt: int,
         delivery_id: int,
         delay_seconds: Optional[float] = None,
+        fallback_url: Optional[str] = None,
+        fallback_payload: Optional[Dict[str, Any]] = None,
+        fallback_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         async def _retry() -> None:
             try:
                 delay = self._retry_interval if delay_seconds is None else max(0.0, float(delay_seconds))
                 await asyncio.sleep(delay)
+                retry_url = fallback_url
+                retry_payload = fallback_payload
+                retry_headers = fallback_headers
+                if self._delivery_storage is not None and delivery_id > 0:
+                    delivery = await self._delivery_storage.get_delivery(delivery_id)
+                    if delivery is None:
+                        return
+                    endpoint = await self._resolve_delivery_endpoint(delivery)
+                    retry_payload = await self._rebuild_delivery_payload(delivery)
+                    if endpoint is None or retry_payload is None:
+                        await self._delivery_storage.update_delivery_status(
+                            delivery_id=delivery_id,
+                            status="failed",
+                            headers={},
+                        )
+                        return
+                    retry_url = str(endpoint["url"])
+                    retry_headers = self._build_headers(
+                        address_id=str(delivery.get("address_id") or "") or None,
+                        delivery_id=delivery_id,
+                        endpoint=endpoint,
+                        payload=retry_payload,
+                    )
+                if retry_url is None or retry_payload is None or retry_headers is None:
+                    return
                 await self._attempt_delivery(
-                    url=url,
-                    payload=payload,
-                    headers=headers,
+                    url=retry_url,
+                    payload=retry_payload,
+                    headers=retry_headers,
                     attempt=next_attempt,
                     delivery_id=delivery_id,
                 )

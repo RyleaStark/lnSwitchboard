@@ -267,6 +267,31 @@ def test_cloudflare_query_callback_accepts_ipv4_and_ipv6_loopback(
         "https://oauth.example/callback/?",
         "https://oauth.example/callback/#",
         "https://127.0.0.1/callback/",
+        "https://oauth.example:00443/callback/",
+        "https://oauth.example:443/callback/",
+        "https://OAUTH.EXAMPLE/callback/",
+        "https://XN--BCHER-KVA.example/callback/",
+        "https://xn--a.example/callback/",
+        "https://0x/callback/",
+        "https://0X/callback/",
+        "https://oauth.0x/callback/",
+        "https://oauth.0X/callback/",
+        "https://[2001:DB8::1]/callback/",
+        "https://oauth.example/a/../callback/",
+        "https://oauth.example/a/%2e%2e/callback/",
+        "https://oauth.example/a/./callback/",
+        "https://oauth.example",
+        "https://oauth.example:00444/callback/",
+        "https://oauth.example:00001/callback/",
+        "https://192.0.2.1:443/callback/",
+        "https://[2001:db8::1]:443/callback/",
+        "https://oauth.example/a/%2e/callback/",
+        "https://oauth.example/a/%2E./callback/",
+        "https://oauth.example/a/%2E%2E/callback/",
+        "https://xn--0.example/callback/",
+        "https://xn--abc.example/callback/",
+        "https://oauth.example/%/",
+        "https://oauth.example/%zz/",
     ],
 )
 def test_cloudflare_remote_callback_requires_a_clean_https_page(
@@ -278,10 +303,21 @@ def test_cloudflare_remote_callback_requires_a_clean_https_page(
         Settings()
 
 
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "https://oauth.lnswitchboard.app/callback/",
+        "https://oauth.example/",
+        "https://oauth.example:444/callback/",
+        "https://xn--bcher-kva.example/callback/",
+        "https://oauth.0xg/callback/",
+        "https://192.0.2.1/callback/",
+        "https://[2001:db8::1]/callback/",
+    ],
+)
 def test_cloudflare_remote_callback_accepts_a_clean_https_page(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, redirect_uri: str
 ) -> None:
-    redirect_uri = "https://oauth.lnswitchboard.app/callback/"
     monkeypatch.setenv("CLOUDFLARE_OAUTH_REDIRECT_PAGE", redirect_uri)
 
     assert Settings().cloudflare_oauth_redirect_page == redirect_uri

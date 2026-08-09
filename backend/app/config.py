@@ -340,47 +340,86 @@ class Settings(BaseSettings):
                 or "?" in value
                 or "#" in value
                 or any(
-                character.isspace()
-                or ord(character) < 0x20
-                or ord(character) == 0x7F
-                for character in value
+                    character.isspace()
+                    or ord(character) < 0x20
+                    or ord(character) == 0x7F
+                    for character in value
                 )
             ):
                 raise ValueError
             parsed = urlsplit(value)
             port = parsed.port
             hostname = parsed.hostname
+            path = parsed.path
             if (
                 hostname is None
                 or not hostname.isascii()
                 or len(hostname) > 253
                 or parsed.netloc.endswith(":")
+                or not path.startswith("/")
             ):
                 raise ValueError
+
+            hex_digits = "0123456789abcdefABCDEF"
+            for index, character in enumerate(path):
+                if character != "%":
+                    continue
+                if (
+                    index + 2 >= len(path)
+                    or path[index + 1] not in hex_digits
+                    or path[index + 2] not in hex_digits
+                    or path[index + 1 : index + 3] != path[index + 1 : index + 3].upper()
+                ):
+                    raise ValueError
+            for segment in path.split("/"):
+                dot_normalized = segment.lower().replace("%2e", ".")
+                if dot_normalized in {".", ".."}:
+                    raise ValueError
+
+            address = None
             try:
                 address = ip_address(hostname)
             except ValueError:
                 labels = hostname.split(".")
                 numeric_labels = []
+                valid_idna_labels = []
                 for label in labels:
                     lowered = label.lower()
-                    if lowered.startswith("0x"):
-                        numeric_labels.append(
-                            len(lowered) > 2
-                            and all(
-                                character in "0123456789abcdef"
-                                for character in lowered[2:]
+                    numeric_labels.append(
+                        label.isdigit()
+                        or (
+                            lowered.startswith("0x")
+                            and (
+                                len(lowered) == 2
+                                or all(
+                                    character in "0123456789abcdef"
+                                    for character in lowered[2:]
+                                )
                             )
                         )
+                    )
+                    if lowered.startswith("xn--"):
+                        try:
+                            unicode_label = lowered.encode("ascii").decode("idna")
+                            valid_idna_labels.append(
+                                unicode_label.encode("idna").decode("ascii") == lowered
+                            )
+                        except UnicodeError:
+                            valid_idna_labels.append(False)
                     else:
-                        numeric_labels.append(label.isdigit())
-                valid_hostname = all(
-                    0 < len(label) <= 63
-                    and label[0].isalnum()
-                    and label[-1].isalnum()
-                    and all(character.isalnum() or character == "-" for character in label)
-                    for label in labels
-                ) and not numeric_labels[-1]
+                        valid_idna_labels.append(True)
+                valid_hostname = (
+                    all(
+                        0 < len(label) <= 63
+                        and label[0].isalnum()
+                        and label[-1].isalnum()
+                        and all(character.isalnum() or character == "-" for character in label)
+                        for label in labels
+                    )
+                    and all(valid_idna_labels)
+                    and not numeric_labels[-1]
+                )
+                canonical_host = hostname.lower()
             else:
                 valid_hostname = (
                     getattr(address, "scope_id", None) is None
@@ -388,20 +427,29 @@ class Settings(BaseSettings):
                     and not address.is_loopback
                     and getattr(address, "ipv4_mapped", None) is None
                 )
+                canonical_host = str(address)
+
+            if address is not None and address.version == 6:
+                authority = f"[{canonical_host}]"
+            else:
+                authority = canonical_host
+            if port is not None and port != 443:
+                authority = f"{authority}:{port}"
+            expected = f"https://{authority}{path}"
             if not (
-                value.startswith("https://")
-                and parsed.scheme == "https"
+                parsed.scheme == "https"
                 and valid_hostname
                 and (port is None or port > 0)
                 and parsed.username is None
                 and parsed.password is None
                 and not parsed.query
                 and not parsed.fragment
+                and value == expected
             ):
                 raise ValueError
         except ValueError as exc:
             raise ValueError(
-                "CLOUDFLARE_OAUTH_REDIRECT_PAGE must be a clean HTTPS callback URL"
+                "CLOUDFLARE_OAUTH_REDIRECT_PAGE must be a clean canonical HTTPS callback URL"
             ) from exc
         return value
 
