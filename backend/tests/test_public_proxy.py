@@ -71,6 +71,34 @@ def test_public_gateway_translates_head_to_backend_get_without_returning_a_body(
     assert backend.request_details[0] == "GET"
 
 
+def test_public_gateway_counts_generated_head_framing_header() -> None:
+    async def exercise():
+        class ManyHeaderBackend(BackendClient):
+            @asynccontextmanager
+            async def stream(self, method, target, *, content, headers):
+                self.request_details = (method, target, content, headers)
+                yield httpx.Response(
+                    200,
+                    headers=[(f"x-field-{index}", "value") for index in range(100)],
+                    stream=httpx.ByteStream(b"ok"),
+                )
+
+        backend = ManyHeaderBackend()
+        app.state.backend_client = backend
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://public.example"
+        ) as client:
+            return await client.head("/.well-known/nostr.json")
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 502
+    assert response.text == ""
+    assert response.headers["content-length"] == str(
+        len(b"Public backend response headers too large")
+    )
+
+
 def test_public_gateway_rejects_all_request_bodies_without_backend_access() -> None:
     async def exercise():
         backend = BackendClient()

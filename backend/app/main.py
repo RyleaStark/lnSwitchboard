@@ -700,6 +700,13 @@ class StandalonePublicContractApp:
             )(scope, receive, send)
             return
         response_headers.append((b"content-length", str(len(response_body)).encode("ascii")))
+        if len(response_headers) > self.MAX_HEADER_COUNT or sum(
+            len(name) + len(value) for name, value in response_headers
+        ) > self.MAX_HEADER_BYTES:
+            await PlainTextResponse("Public response headers too large", status_code=502)(
+                scope, receive, send
+            )
+            return
         await send(
             {
                 "type": "http.response.start",

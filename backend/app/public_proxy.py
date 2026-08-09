@@ -149,6 +149,10 @@ async def proxy_public_request(request: Request, path: str) -> Response:
 
     if request.method == "HEAD":
         response_headers.append((b"content-length", str(len(response_body)).encode("ascii")))
+    if len(response_headers) > _MAX_PUBLIC_HEADER_COUNT or sum(
+        len(name) + len(value) for name, value in response_headers
+    ) > _MAX_PUBLIC_HEADER_BYTES:
+        return PlainTextResponse("Public backend response headers too large", status_code=502)
     response = Response(
         content=b"" if request.method == "HEAD" else bytes(response_body),
         status_code=response_status,
