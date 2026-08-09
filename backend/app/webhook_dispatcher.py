@@ -20,6 +20,7 @@ from .outbound_security import OutboundHTTPStatusError, ensure_public_endpoint, 
 from .version import get_version
 
 Sender = Callable[[str, Dict[str, Any], Dict[str, str]], Awaitable[None]]
+WEBHOOK_PAYLOAD_SCHEMA_VERSION = "1"
 
 
 def _split_username_tag(username: str) -> Tuple[str, Optional[str]]:
@@ -153,7 +154,7 @@ class WebhookDispatcher:
         test_payload = payload or {
             "event": "payment.settled",
             "source": "lnswitchboard",
-            "version": self._version,
+            "version": WEBHOOK_PAYLOAD_SCHEMA_VERSION,
             "ln_address": "test@example.com",
             "local_part": "test",
             "username": "test",
@@ -167,15 +168,10 @@ class WebhookDispatcher:
             "invoice_event_id": None,
             "request_log_id": None,
         }
+        # Test payloads have no authoritative invoice/address record from which
+        # they can be safely reconstructed after restart. Keep them transient
+        # rather than creating an unreplayable payload-less history row.
         delivery_id = 0
-        if self._delivery_storage is not None:
-            delivery_id = await self._delivery_storage.create_delivery(
-                kind="http.webhook",
-                target=url,
-                event="payment.settled",
-                payload=test_payload,
-                status="pending",
-            )
         headers = self._build_headers(address_id=None, delivery_id=delivery_id, endpoint=endpoint, payload=test_payload)
         return await self._attempt_delivery(
             url=url,
@@ -402,7 +398,7 @@ class WebhookDispatcher:
         payload: Dict[str, Any] = {
             "event": "payment.settled",
             "source": "lnswitchboard",
-            "version": self._version,
+            "version": WEBHOOK_PAYLOAD_SCHEMA_VERSION,
             "address_id": address.get("id"),
             "ln_address": ln_address,
             "local_part": base_local,

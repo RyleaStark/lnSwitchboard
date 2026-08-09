@@ -9,9 +9,11 @@ import sqlite3
 from datetime import datetime, timezone
 
 import pytest
+from fastapi import HTTPException
 
 from backend.app.ln_address_store import LNAddressStore
 from backend.app.log_storage import InvoiceEvent, RequestLogStorage
+from backend.app.routers.webhooks import replay_delivery as replay_delivery_route
 from ..app.outbound_security import OutboundHTTPStatusError, UnsafeOutboundTarget
 from backend.app.webhook_dispatcher import WebhookDispatcher
 
@@ -71,6 +73,53 @@ def test_webhook_retry_eventually_succeeds(tmp_path):
 
 def test_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
     asyncio.run(_exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path))
+
+
+def test_unreconstructable_delivery_replay_returns_conflict() -> None:
+    class Storage:
+        async def get_delivery(self, delivery_id):
+            return {"id": delivery_id, "kind": "http.webhook"}
+
+    class Dispatcher:
+        async def replay_delivery(self, delivery):
+            raise ValueError("Delivery payload is unavailable")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            replay_delivery_route(
+                1,
+                storage=Storage(),
+                dispatcher=Dispatcher(),
+            )
+        )
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Delivery can no longer be replayed from authoritative state"
+
+
+def test_webhook_test_payload_is_transient(tmp_path) -> None:
+    async def exercise() -> None:
+        address_store, _address = await _create_address(tmp_path)
+        storage = RequestLogStorage(tmp_path / "test-delivery.db")
+        sent = []
+
+        async def sender(url, payload, headers):
+            sent.append((url, payload, headers))
+
+        dispatcher = WebhookDispatcher(
+            address_store=address_store,
+            delivery_storage=storage,
+            sender=sender,
+        )
+        assert await dispatcher.dispatch_test(
+            url="https://hooks.example.invalid/test",
+            payload={"body": "TRANSIENT_TEST_PAYLOAD_SECRET"},
+            secret="TRANSIENT_TEST_HMAC_SECRET",
+        )
+        assert sent[0][1] == {"body": "TRANSIENT_TEST_PAYLOAD_SECRET"}
+        deliveries = await storage.list_deliveries(page=1, page_size=10)
+        assert deliveries["items"] == []
+
+    asyncio.run(exercise())
 
 
 def test_private_webhook_targets_are_blocked_by_default(tmp_path) -> None:
@@ -390,6 +439,60 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         assert secret not in exposed
 
 
+def test_cleanup_expires_terminal_history_but_preserves_retry_authority(tmp_path) -> None:
+    db_path = tmp_path / "retention.db"
+    storage = RequestLogStorage(db_path, retention_days=1)
+    old = "2000-01-01T00:00:00+00:00"
+    with sqlite3.connect(db_path) as conn:
+        invoice_ids = []
+        for payment_hash in ("11" * 32, "22" * 32):
+            conn.execute(
+                """
+                INSERT INTO invoice_events (
+                    created_at, username, domain, ip, amount_msat, payment_hash,
+                    details, settled, expired, check_interval_seconds
+                ) VALUES (?, 'pay', 'testserver', 'redacted', 1000, ?, '{}', 1, 0, 60)
+                """,
+                (old, payment_hash),
+            )
+            invoice_ids.append(int(conn.execute("SELECT last_insert_rowid()").fetchone()[0]))
+        delivery_ids = []
+        for status_value, invoice_id in zip(("delivered", "retrying"), invoice_ids):
+            conn.execute(
+                """
+                INSERT INTO webhook_deliveries (
+                    created_at, updated_at, kind, event, target, status, payload,
+                    headers, invoice_event_id, delivery_key
+                ) VALUES (?, ?, 'http.webhook', 'payment.settled', 'webhook:safe', ?,
+                          NULL, '{}', ?, ?)
+                """,
+                (old, old, status_value, invoice_id, f"retention-{invoice_id}"),
+            )
+            delivery_ids.append(int(conn.execute("SELECT last_insert_rowid()").fetchone()[0]))
+        for delivery_id in delivery_ids:
+            conn.execute(
+                """
+                INSERT INTO webhook_attempts (
+                    delivery_id, attempted_at, attempt_number, success, error
+                ) VALUES (?, ?, 1, 0, 'type:DeliveryError')
+                """,
+                (delivery_id, old),
+            )
+
+    asyncio.run(storage.cleanup())
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT id FROM webhook_deliveries ORDER BY id"
+        ).fetchall() == [(delivery_ids[1],)]
+        assert conn.execute(
+            "SELECT delivery_id FROM webhook_attempts ORDER BY delivery_id"
+        ).fetchall() == [(delivery_ids[1],)]
+        assert conn.execute(
+            "SELECT id FROM invoice_events ORDER BY id"
+        ).fetchall() == [(invoice_ids[1],)]
+
+
 async def _exercise_retry_eventually_succeeds(tmp_path):
     address_store, address = await _create_address(tmp_path)
     event, details = _make_event(address)
@@ -509,6 +612,8 @@ async def _exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
         "https://old.example.invalid/endpoint",
         "https://current.example.invalid/endpoint",
     ]
+    assert calls[0][1] == calls[1][1]
+    assert calls[1][1]["version"] == "1"
     headers = calls[1][2]
     signed = (
         f'{headers["X-LnSwitchboard-Signature-Timestamp"]}.'

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import stat
 from datetime import datetime, timezone
 
 from backend.app.invoice_worker import (
@@ -316,7 +317,7 @@ async def _exercise_webhook_dispatch(tmp_path):
     assert payload["address_id"] == address["id"]
     assert payload["invoice_event_id"] == events[0].id
     assert payload["source"] == "lnswitchboard"
-    assert payload["version"] == get_version()
+    assert payload["version"] == "1"
     assert payload["settled_at"].endswith("+00:00")
     headers = delivery["headers"]
     assert headers["User-Agent"] == f"lnSwitchboard/{get_version()}"
@@ -428,6 +429,7 @@ async def _exercise_zap_receipt_delivery_on_settlement(tmp_path):
     signer_store = NostrSignerStore(tmp_path / "zap-signer.hex")
     signer = await signer_store.generate()
     assert signer.pubkey
+    assert stat.S_IMODE((tmp_path / "zap-signer.hex").stat().st_mode) == 0o600
     zapper_secret = generate_private_key_hex()
     recipient_pubkey = public_key_from_private_hex(generate_private_key_hex())
     zap_request_event = sign_event(
