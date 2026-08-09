@@ -165,9 +165,9 @@ services:
     depends_on:
       permissions-init:
         condition: service_completed_successfully
-      lnswitchboard:
+      lnswitchboard-public:
         condition: service_healthy
-    network_mode: service:lnswitchboard
+    network_mode: service:lnswitchboard-public
     read_only: true
     cap_drop:
       - ALL

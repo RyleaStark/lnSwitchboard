@@ -20,7 +20,7 @@ def test_compose_tailscale_runtime_is_isolated_userspace_and_digest_pinned() -> 
     assert tailscale["image"] == TAILSCALE_IMAGE
     assert ":latest" not in tailscale["image"]
     assert ":stable" not in tailscale["image"]
-    assert tailscale["network_mode"] == "service:lnswitchboard"
+    assert tailscale["network_mode"] == "service:lnswitchboard-public"
     assert tailscale["entrypoint"] == [
         "/usr/local/bin/lnswitchboard-tailscale-supervisor"
     ]
@@ -28,7 +28,9 @@ def test_compose_tailscale_runtime_is_isolated_userspace_and_digest_pinned() -> 
     assert tailscale["user"] == "1000:1000"
     assert tailscale["restart"] == "unless-stopped"
     assert tailscale["stop_grace_period"] == "30s"
-    assert tailscale["depends_on"]["lnswitchboard"]["condition"] == "service_healthy"
+    assert tailscale["depends_on"]["lnswitchboard-public"]["condition"] == (
+        "service_healthy"
+    )
     assert tailscale["tmpfs"] == [
         "/var/run/tailscale:size=16m,mode=0750,uid=1000,gid=1000"
     ]
