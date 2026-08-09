@@ -6,6 +6,7 @@ import errno
 import os
 import sqlite3
 import stat
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +16,7 @@ from .secure_files import private_regular
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_SQLITE_OPEN_LOCK = threading.Lock()
 
 
 def _validate_regular_single_link(info: os.stat_result, *, label: str) -> None:
@@ -45,6 +47,24 @@ def _secure_existing_sidecars(parent_fd: int, name: str) -> None:
             os.close(descriptor)
 
 
+def _count_open_inode_descriptors(info: os.stat_result) -> int:
+    """Count process descriptors referencing the validated database inode."""
+
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError as exc:
+        raise OSError("Cannot verify SQLite database descriptor binding") from exc
+    count = 0
+    for name in names:
+        try:
+            current = os.fstat(int(name))
+        except (OSError, ValueError):
+            continue
+        if (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino):
+            count += 1
+    return count
+
+
 @contextmanager
 def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
     """Yield a transactional SQLite connection bound to a stable parent."""
@@ -56,12 +76,17 @@ def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
     ):
         _secure_existing_sidecars(parent_fd, name)
         stable_path = f"/proc/self/fd/{parent_fd}/{name}"
-        connection = sqlite3.connect(
-            stable_path,
-            detect_types=sqlite3.PARSE_DECLTYPES,
-            check_same_thread=False,
-        )
         opened = os.fstat(descriptor)
+        with _SQLITE_OPEN_LOCK:
+            descriptor_count = _count_open_inode_descriptors(opened)
+            connection = sqlite3.connect(
+                stable_path,
+                detect_types=sqlite3.PARSE_DECLTYPES,
+                check_same_thread=False,
+            )
+            if _count_open_inode_descriptors(opened) <= descriptor_count:
+                connection.close()
+                raise OSError("SQLite opened a different inode than the validated database")
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
             connection.close()

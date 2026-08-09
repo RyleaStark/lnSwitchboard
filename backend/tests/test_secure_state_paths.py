@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from ..app import sqlite_utils
 from ..app.connection_secret_store import ConnectionSecretStore
 from ..app.log_storage import RequestLogStorage
 from ..app.macaroon_store import MacaroonNotConfiguredError, MacaroonStore
@@ -42,6 +43,36 @@ def test_primary_database_hardlink_is_rejected_without_mutation(tmp_path: Path) 
         }
     assert names == {"sentinel"}
     assert _mode(target) == 0o644
+
+
+def test_sqlite_connection_rejects_swap_open_restore_before_writes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "state.db"
+    outside = tmp_path / "outside.db"
+    sqlite3.connect(database).close()
+    sqlite3.connect(outside).close()
+    backup = tmp_path / "state.original"
+    real_connect = sqlite_utils.sqlite3.connect
+
+    def raced_connect(path, *args, **kwargs):
+        os.rename(database, backup)
+        os.symlink(outside, database)
+        try:
+            return real_connect(path, *args, **kwargs)
+        finally:
+            os.unlink(database)
+            os.rename(backup, database)
+
+    monkeypatch.setattr(sqlite_utils.sqlite3, "connect", raced_connect)
+    with pytest.raises(OSError, match="different inode"):
+        with sqlite_connection(database) as connection:
+            connection.execute("CREATE TABLE escaped(secret TEXT)")
+
+    with real_connect(outside) as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='escaped'"
+        ).fetchall() == []
 
 
 @pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
