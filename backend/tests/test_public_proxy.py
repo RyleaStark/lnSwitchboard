@@ -5,8 +5,9 @@ import gzip
 from contextlib import asynccontextmanager
 
 import httpx
+from starlette.requests import Request
 
-from backend.app.public_proxy import app
+from backend.app.public_proxy import app, proxy_public_request
 
 
 class BackendClient:
@@ -113,6 +114,33 @@ def test_public_gateway_rejects_all_request_bodies_without_backend_access() -> N
     backend, response = asyncio.run(exercise())
 
     assert response.status_code == 405
+    assert backend.request_details is None
+
+
+def test_public_gateway_counts_internal_identity_header_before_forwarding() -> None:
+    async def exercise():
+        backend = BackendClient()
+        app.state.backend_client = backend
+        scope = {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"host", b"public.example")]
+            + [(f"x-field-{index}".encode(), b"value") for index in range(99)],
+            "client": ("203.0.113.7", 1234),
+            "server": ("127.0.0.1", 21212),
+            "app": app,
+        }
+        response = await proxy_public_request(Request(scope), "")
+        return backend, response
+
+    backend, response = asyncio.run(exercise())
+    assert response.status_code == 431
     assert backend.request_details is None
 
 

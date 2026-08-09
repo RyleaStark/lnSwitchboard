@@ -15,6 +15,8 @@ from fastapi.responses import PlainTextResponse, Response
 _MAX_PUBLIC_RESPONSE_BYTES = 1024 * 1024
 _MAX_PUBLIC_HEADER_COUNT = 100
 _MAX_PUBLIC_HEADER_BYTES = 16 * 1024
+_SERVER_RESPONSE_HEADER_COUNT_RESERVE = 2
+_SERVER_RESPONSE_HEADER_BYTES_RESERVE = 128
 _HOP_BY_HOP = {
     b"connection",
     b"keep-alive",
@@ -45,6 +47,25 @@ def sanitize_hop_by_hop_headers(
                 nominated.add(token.lower())
     removed = _HOP_BY_HOP | nominated | (excluded or set())
     return [(name, value) for name, value in headers if name.lower() not in removed]
+
+
+def public_headers_within_budget(headers: list[tuple[bytes, bytes]]) -> bool:
+    return len(headers) <= _MAX_PUBLIC_HEADER_COUNT and sum(
+        len(name) + len(value) for name, value in headers
+    ) <= _MAX_PUBLIC_HEADER_BYTES
+
+
+def public_response_headers_within_wire_budget(
+    headers: list[tuple[bytes, bytes]],
+) -> bool:
+    """Reserve wire slots/bytes for Uvicorn's Date and Server fields."""
+    wire_bytes = sum(len(name) + len(value) + 4 for name, value in headers)
+    return (
+        len(headers) + _SERVER_RESPONSE_HEADER_COUNT_RESERVE
+        <= _MAX_PUBLIC_HEADER_COUNT
+        and wire_bytes + _SERVER_RESPONSE_HEADER_BYTES_RESERVE
+        <= _MAX_PUBLIC_HEADER_BYTES
+    )
 
 
 @asynccontextmanager
@@ -112,6 +133,8 @@ async def proxy_public_request(request: Request, path: str) -> Response:
         return PlainTextResponse("Malformed Connection header", status_code=400)
     if request.client is not None:
         headers.append((_INTERNAL_CLIENT_HEADER, request.client.host.encode("ascii")))
+    if not public_headers_within_budget(headers):
+        return PlainTextResponse("Request headers too large", status_code=431)
     target = request.url.path
     if request.url.query:
         target = f"{target}?{request.url.query}"
@@ -147,11 +170,8 @@ async def proxy_public_request(request: Request, path: str) -> Response:
     except httpx.HTTPError:
         return PlainTextResponse("Public backend unavailable", status_code=503)
 
-    if request.method == "HEAD":
-        response_headers.append((b"content-length", str(len(response_body)).encode("ascii")))
-    if len(response_headers) > _MAX_PUBLIC_HEADER_COUNT or sum(
-        len(name) + len(value) for name, value in response_headers
-    ) > _MAX_PUBLIC_HEADER_BYTES:
+    response_headers.append((b"content-length", str(len(response_body)).encode("ascii")))
+    if not public_response_headers_within_wire_budget(response_headers):
         return PlainTextResponse("Public backend response headers too large", status_code=502)
     response = Response(
         content=b"" if request.method == "HEAD" else bytes(response_body),

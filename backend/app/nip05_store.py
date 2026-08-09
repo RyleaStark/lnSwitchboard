@@ -331,7 +331,7 @@ class NostrIdentityStore:
                                    CASE WHEN length(CAST(relays AS BLOB)) <= 16384
                                         THEN relays ELSE '[]' END AS relays,
                                    created_at, updated_at
-                            FROM nostr_identities
+                            FROM nostr_identities INDEXED BY idx_nostr_identity_public_bounded
                             WHERE domain = ?
                               AND length(CAST(local_part AS BLOB)) <= 64
                               AND length(CAST(domain AS BLOB)) <= 253

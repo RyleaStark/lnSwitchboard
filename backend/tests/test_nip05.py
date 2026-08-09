@@ -343,6 +343,7 @@ def test_public_nip05_bounds_legacy_rows_before_python_materialization(
             str(value)
             for row in conn.execute(
                 "EXPLAIN QUERY PLAN SELECT local_part FROM nostr_identities "
+                "INDEXED BY idx_nostr_identity_public_bounded "
                 "WHERE domain = ? "
                 "AND length(CAST(local_part AS BLOB)) <= 64 "
                 "AND length(CAST(domain AS BLOB)) <= 253 "

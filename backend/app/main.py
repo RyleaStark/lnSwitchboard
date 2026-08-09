@@ -39,7 +39,10 @@ from .ln_address_store import LNAddressStore
 from .logging_utils import configure_logging
 from .macaroon_store import MacaroonNotConfiguredError
 from .nip05_store import NostrIdentityStore
-from .public_proxy import sanitize_hop_by_hop_headers
+from .public_proxy import (
+    public_response_headers_within_wire_budget,
+    sanitize_hop_by_hop_headers,
+)
 from .request_utils import get_public_domain, get_public_host
 from .routers import connections as connections_router
 from .routers import cloudflare_oauth as cloudflare_oauth_router
@@ -700,9 +703,7 @@ class StandalonePublicContractApp:
             )(scope, receive, send)
             return
         response_headers.append((b"content-length", str(len(response_body)).encode("ascii")))
-        if len(response_headers) > self.MAX_HEADER_COUNT or sum(
-            len(name) + len(value) for name, value in response_headers
-        ) > self.MAX_HEADER_BYTES:
+        if not public_response_headers_within_wire_budget(response_headers):
             await PlainTextResponse("Public response headers too large", status_code=502)(
                 scope, receive, send
             )

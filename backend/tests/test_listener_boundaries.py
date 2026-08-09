@@ -180,6 +180,25 @@ def test_standalone_public_contract_counts_generated_framing_header() -> None:
     assert response.text == "Public response headers too large"
 
 
+def test_standalone_public_contract_reserves_wire_header_bytes() -> None:
+    async def target(scope: Any, receive: Any, send: Any) -> None:
+        del scope, receive
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"x-large", b"x" * ((16 * 1024) - len(b"x-large")))],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    response = AppClient(
+        main.StandalonePublicContractApp(target), port=21212
+    ).get("/")
+    assert response.status_code == 502
+    assert response.text == "Public response headers too large"
+
+
 def test_dispatcher_uses_configured_public_port(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PUBLIC_SERVICE_PORT", "31212")
     config.get_settings.cache_clear()
