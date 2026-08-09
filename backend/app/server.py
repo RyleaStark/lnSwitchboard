@@ -137,6 +137,7 @@ def main() -> None:
             access_log=False,
             http=BoundedH11Protocol,
             h11_max_incomplete_event_size=16 * 1024,
+            limit_concurrency=8,
         )
         uvicorn.Server(config).run(sockets=listeners)
     finally:
