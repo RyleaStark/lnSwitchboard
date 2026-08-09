@@ -74,6 +74,50 @@ def _safe_delivery_headers(headers: Any) -> Dict[str, Any]:
     return {str(key): value for key, value in headers.items() if str(key) in allowed}
 
 
+def _safe_webhook_log_details(details: Any) -> Dict[str, Any]:
+    if not isinstance(details, dict):
+        return {}
+    safe: Dict[str, Any] = {}
+    for key in (
+        "delivery_id",
+        "kind",
+        "event",
+        "status",
+        "delivery_event",
+        "delivery_status",
+        "address_id",
+        "invoice_event_id",
+        "request_log_id",
+        "attempt_number",
+        "status_code",
+        "latency_ms",
+    ):
+        value = details.get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe[key] = value
+    if "target" in details:
+        safe["target"] = _delivery_target_reference(details.get("target"))
+    if "headers" in details:
+        safe["headers"] = _safe_delivery_headers(details.get("headers"))
+    if "error" in details:
+        safe["error"] = _safe_delivery_error(details.get("error"))
+    attempt = details.get("attempt")
+    if isinstance(attempt, dict):
+        safe_attempt: Dict[str, Any] = {}
+        for key in (
+            "attempt_number",
+            "success",
+            "status_code",
+            "latency_ms",
+        ):
+            value = attempt.get(key)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                safe_attempt[key] = value
+        safe_attempt["error"] = _safe_delivery_error(attempt.get("error"))
+        safe["attempt"] = safe_attempt
+    return safe
+
+
 @dataclass
 class LogEntry:
     """Structured log entry for LNURL interactions."""
@@ -263,24 +307,53 @@ class RequestLogStorage:
             """
         )
         migration_name = "webhook_history_redaction_v1"
-        applied = conn.execute(
-            "SELECT 1 FROM lnswitchboard_migrations WHERE name = ?",
-            (migration_name,),
-        ).fetchone()
-        if applied:
-            return
-        rows = conn.execute("SELECT id, target FROM webhook_deliveries").fetchall()
+        rows = conn.execute(
+            "SELECT id, target, headers FROM webhook_deliveries"
+        ).fetchall()
         for row in rows:
+            parsed_headers = self._deserialize_details(row["headers"])
+            safe_headers = _safe_delivery_headers(
+                parsed_headers if isinstance(parsed_headers, dict) else {}
+            )
             conn.execute(
-                "UPDATE webhook_deliveries SET target = ?, headers = '{}' WHERE id = ?",
-                (_delivery_target_reference(row["target"]), int(row["id"])),
+                "UPDATE webhook_deliveries SET target = ?, headers = ? WHERE id = ?",
+                (
+                    _delivery_target_reference(row["target"]),
+                    self._serialize_details(safe_headers),
+                    int(row["id"]),
+                ),
+            )
+        attempts = conn.execute("SELECT id, error FROM webhook_attempts").fetchall()
+        for attempt in attempts:
+            conn.execute(
+                "UPDATE webhook_attempts SET error = ?, response_body = NULL WHERE id = ?",
+                (_safe_delivery_error(attempt["error"]), int(attempt["id"])),
+            )
+        # RC15/RC16 request-log details mixed operational fields with full
+        # destinations and remote error text. Rebuild this duplicate projection
+        # from an allowlist on every startup so rollback/re-upgrade is safe.
+        request_logs = conn.execute(
+            "SELECT id, status, details FROM request_logs WHERE event = 'webhook_delivery'"
+        ).fetchall()
+        for request_log in request_logs:
+            parsed_details = self._deserialize_details(request_log["details"])
+            safe_details = _safe_webhook_log_details(parsed_details)
+            status = str(
+                request_log["status"]
+                or safe_details.get("delivery_status")
+                or safe_details.get("status")
+                or "unknown"
+            )
+            conn.execute(
+                "UPDATE request_logs SET message = ?, details = ? WHERE id = ?",
+                (
+                    f"Webhook delivery {status}",
+                    self._serialize_details(safe_details),
+                    int(request_log["id"]),
+                ),
             )
         conn.execute(
-            "UPDATE webhook_attempts SET error = CASE WHEN error IS NULL THEN NULL ELSE 'DeliveryError' END, response_body = NULL"
-        )
-        conn.execute("DELETE FROM request_logs WHERE event = 'webhook_delivery'")
-        conn.execute(
-            "INSERT INTO lnswitchboard_migrations (name, applied_at) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO lnswitchboard_migrations (name, applied_at) VALUES (?, ?)",
             (migration_name, datetime.now(tz=timezone.utc).isoformat()),
         )
 
@@ -552,33 +625,30 @@ class RequestLogStorage:
         attempt: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
         payload = delivery.get("payload")
-        username, domain, amount_msat, recipient_details = self._delivery_payload_context(payload)
+        username, domain, amount_msat, _recipient_details = self._delivery_payload_context(payload)
         kind = str(delivery.get("kind") or "webhook")
         target = _delivery_target_reference(delivery.get("target"))
         success = bool(attempt.get("success")) if isinstance(attempt, dict) else None
         attempt_number = attempt.get("attempt_number") if isinstance(attempt, dict) else None
         error = _safe_delivery_error(attempt.get("error")) if isinstance(attempt, dict) else None
-        details: Dict[str, Any] = {
-            **recipient_details,
-            "delivery_id": delivery.get("id"),
-            "kind": kind,
-            "target": target,
-            "delivery_event": delivery.get("event"),
-            "delivery_status": delivery_status,
-            "address_id": delivery.get("address_id"),
-            "invoice_event_id": delivery.get("invoice_event_id"),
-            "request_log_id": delivery.get("request_log_id"),
-            "delivery_key": delivery.get("delivery_key"),
-            "payload": payload,
-            "headers": _safe_delivery_headers(delivery.get("headers")),
-        }
-        if attempt is not None:
-            details["attempt"] = attempt
-            details["attempt_number"] = attempt_number
-            details["status_code"] = attempt.get("status_code")
-            details["latency_ms"] = attempt.get("latency_ms")
-            details["error"] = error
-            details["response_body"] = None
+        details = _safe_webhook_log_details(
+            {
+                "delivery_id": delivery.get("id"),
+                "kind": kind,
+                "target": target,
+                "delivery_event": delivery.get("event"),
+                "delivery_status": delivery_status,
+                "address_id": delivery.get("address_id"),
+                "invoice_event_id": delivery.get("invoice_event_id"),
+                "request_log_id": delivery.get("request_log_id"),
+                "headers": delivery.get("headers"),
+                "attempt": attempt,
+                "attempt_number": attempt_number,
+                "status_code": attempt.get("status_code") if attempt else None,
+                "latency_ms": attempt.get("latency_ms") if attempt else None,
+                "error": error,
+            }
+        )
         return self._insert_request_log_locked(
             conn,
             timestamp=timestamp,
