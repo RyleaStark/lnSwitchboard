@@ -99,7 +99,7 @@ class WebhookDispatcher:
                         invoice_event_id=event.id,
                         request_log_id=event.request_log_id,
                         status="skipped",
-                        delivery_key=f"http:{event.id}:{endpoint.get('id')}:skipped",
+                        delivery_key=f"http:{event.id}:{self._endpoint_identifier(endpoint)}:skipped",
                     )
                 continue
             delivery_id = await self._create_delivery(
@@ -185,13 +185,22 @@ class WebhookDispatcher:
         payload = delivery.get("payload")
         if not isinstance(payload, dict):
             raise ValueError("Delivery payload is unavailable")
-        headers = delivery.get("headers") if isinstance(delivery.get("headers"), dict) else {}
-        return await self._attempt_delivery(
-            url=str(delivery["target"]),
+        endpoint = await self._resolve_delivery_endpoint(delivery)
+        if endpoint is None:
+            raise ValueError("Configured webhook endpoint is unavailable")
+        delivery_id = int(delivery["id"])
+        headers = self._build_headers(
+            address_id=str(delivery.get("address_id") or "") or None,
+            delivery_id=delivery_id,
+            endpoint=endpoint,
             payload=payload,
-            headers={str(key): str(value) for key, value in headers.items()},
+        )
+        return await self._attempt_delivery(
+            url=str(endpoint["url"]),
+            payload=payload,
+            headers=headers,
             attempt=1,
-            delivery_id=int(delivery["id"]),
+            delivery_id=delivery_id,
         )
 
     async def resume_pending_retries(self, *, limit: int = 100) -> int:
@@ -201,10 +210,14 @@ class WebhookDispatcher:
         resumed = 0
         for delivery in deliveries:
             payload = delivery.get("payload")
-            headers = delivery.get("headers") if isinstance(delivery.get("headers"), dict) else {}
-            target = str(delivery.get("target") or "")
             delivery_id = int(delivery.get("id") or 0)
-            if not target or not isinstance(payload, dict) or delivery_id <= 0:
+            endpoint = await self._resolve_delivery_endpoint(delivery)
+            if endpoint is None or not isinstance(payload, dict) or delivery_id <= 0:
+                if delivery_id > 0:
+                    await self._delivery_storage.update_delivery_status(
+                        delivery_id=delivery_id,
+                        status="failed",
+                    )
                 continue
             attempts = delivery.get("attempts") if isinstance(delivery.get("attempts"), list) else []
             last_attempt = 0
@@ -215,10 +228,16 @@ class WebhookDispatcher:
             if next_attempt > self._max_attempts:
                 await self._delivery_storage.update_delivery_status(delivery_id=delivery_id, status="failed")
                 continue
-            self._schedule_retry(
-                url=target,
+            headers = self._build_headers(
+                address_id=str(delivery.get("address_id") or "") or None,
+                delivery_id=delivery_id,
+                endpoint=endpoint,
                 payload=payload,
-                headers={str(key): str(value) for key, value in headers.items()},
+            )
+            self._schedule_retry(
+                url=str(endpoint["url"]),
+                payload=payload,
+                headers=headers,
                 next_attempt=next_attempt,
                 delivery_id=delivery_id,
                 delay_seconds=0.01,
@@ -243,6 +262,28 @@ class WebhookDispatcher:
             for url in record.get("webhook_urls") or []
         ]
 
+    @staticmethod
+    def _endpoint_identifier(endpoint: Dict[str, Any]) -> str:
+        identifier = str(endpoint.get("id") or "").strip()
+        if identifier:
+            return identifier
+        return hashlib.sha256(str(endpoint.get("url") or "").encode("utf-8")).hexdigest()[:16]
+
+    async def _resolve_delivery_endpoint(self, delivery: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        address_id = str(delivery.get("address_id") or "").strip()
+        delivery_key = str(delivery.get("delivery_key") or "")
+        endpoint_id = delivery_key.rpartition(":")[2].strip()
+        if not address_id or not endpoint_id:
+            return None
+        try:
+            record = await self._address_store.get_address(address_id)
+        except AddressNotFoundError:
+            return None
+        for endpoint in self._endpoints_for_record(record):
+            if self._endpoint_identifier(endpoint) == endpoint_id:
+                return endpoint
+        return None
+
     async def _create_delivery(
         self,
         *,
@@ -262,7 +303,7 @@ class WebhookDispatcher:
             address_id=address_id,
             invoice_event_id=event.id,
             request_log_id=event.request_log_id,
-            delivery_key=f"http:{event.id}:{endpoint.get('id') or endpoint['url']}",
+            delivery_key=f"http:{event.id}:{self._endpoint_identifier(endpoint)}",
         )
 
     def _matches_filters(self, filters: Any, payload: Dict[str, Any]) -> bool:
