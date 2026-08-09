@@ -20,6 +20,7 @@ from .outbound_security import OutboundHTTPStatusError, ensure_public_endpoint, 
 from .version import get_version
 
 Sender = Callable[[str, Dict[str, Any], Dict[str, str]], Awaitable[None]]
+WEBHOOK_PAYLOAD_SCHEMA_VERSION = "1"
 
 
 def _split_username_tag(username: str) -> Tuple[str, Optional[str]]:
@@ -130,7 +131,11 @@ class WebhookDispatcher:
                     settled_at_ts=int((settled_at or datetime.now(tz=timezone.utc)).timestamp()),
                 ) or delivered
             except Exception as exc:  # pragma: no cover - runtime relay path
-                self._logger.warning("Zap receipt publish failed for invoice event %s: %s", event.id, exc)
+                self._logger.warning(
+                    "Zap receipt publish failed for invoice event %s (error_type=%s)",
+                    event.id,
+                    type(exc).__name__,
+                )
         return delivered
 
     async def dispatch_test(
@@ -149,7 +154,7 @@ class WebhookDispatcher:
         test_payload = payload or {
             "event": "payment.settled",
             "source": "lnswitchboard",
-            "version": self._version,
+            "version": WEBHOOK_PAYLOAD_SCHEMA_VERSION,
             "ln_address": "test@example.com",
             "local_part": "test",
             "username": "test",
@@ -163,15 +168,10 @@ class WebhookDispatcher:
             "invoice_event_id": None,
             "request_log_id": None,
         }
+        # Test payloads have no authoritative invoice/address record from which
+        # they can be safely reconstructed after restart. Keep them transient
+        # rather than creating an unreplayable payload-less history row.
         delivery_id = 0
-        if self._delivery_storage is not None:
-            delivery_id = await self._delivery_storage.create_delivery(
-                kind="http.webhook",
-                target=url,
-                event="payment.settled",
-                payload=test_payload,
-                status="pending",
-            )
         headers = self._build_headers(address_id=None, delivery_id=delivery_id, endpoint=endpoint, payload=test_payload)
         return await self._attempt_delivery(
             url=url,
@@ -182,8 +182,8 @@ class WebhookDispatcher:
         )
 
     async def replay_delivery(self, delivery: Dict[str, Any]) -> bool:
-        payload = delivery.get("payload")
-        if not isinstance(payload, dict):
+        payload = await self._rebuild_delivery_payload(delivery)
+        if payload is None:
             raise ValueError("Delivery payload is unavailable")
         endpoint = await self._resolve_delivery_endpoint(delivery)
         if endpoint is None:
@@ -209,10 +209,10 @@ class WebhookDispatcher:
         deliveries = await self._delivery_storage.list_retryable_http_deliveries(limit=limit)
         resumed = 0
         for delivery in deliveries:
-            payload = delivery.get("payload")
+            payload = await self._rebuild_delivery_payload(delivery)
             delivery_id = int(delivery.get("id") or 0)
             endpoint = await self._resolve_delivery_endpoint(delivery)
-            if endpoint is None or not isinstance(payload, dict) or delivery_id <= 0:
+            if endpoint is None or payload is None or delivery_id <= 0:
                 if delivery_id > 0:
                     await self._delivery_storage.update_delivery_status(
                         delivery_id=delivery_id,
@@ -228,16 +228,7 @@ class WebhookDispatcher:
             if next_attempt > self._max_attempts:
                 await self._delivery_storage.update_delivery_status(delivery_id=delivery_id, status="failed")
                 continue
-            headers = self._build_headers(
-                address_id=str(delivery.get("address_id") or "") or None,
-                delivery_id=delivery_id,
-                endpoint=endpoint,
-                payload=payload,
-            )
             self._schedule_retry(
-                url=str(endpoint["url"]),
-                payload=payload,
-                headers=headers,
                 next_attempt=next_attempt,
                 delivery_id=delivery_id,
                 delay_seconds=0.01,
@@ -283,6 +274,38 @@ class WebhookDispatcher:
             if self._endpoint_identifier(endpoint) == endpoint_id:
                 return endpoint
         return None
+
+    async def _rebuild_delivery_payload(
+        self, delivery: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        if self._delivery_storage is None:
+            return None
+        invoice_event_id = int(delivery.get("invoice_event_id") or 0)
+        address_id = str(delivery.get("address_id") or "").strip()
+        if invoice_event_id <= 0 or not address_id:
+            return None
+        event = await self._delivery_storage.get_invoice_event_by_id(invoice_event_id)
+        if event is None or not isinstance(event.details, dict):
+            return None
+        try:
+            address = await self._address_store.get_address(address_id)
+        except AddressNotFoundError:
+            return None
+        settled_at = None
+        if event.settled_at:
+            candidate = event.settled_at
+            if candidate.endswith("Z"):
+                candidate = f"{candidate[:-1]}+00:00"
+            try:
+                settled_at = datetime.fromisoformat(candidate)
+            except ValueError:
+                return None
+        return self._build_payload(
+            event=event,
+            details=event.details,
+            address=address,
+            settled_at=settled_at,
+        )
 
     async def _create_delivery(
         self,
@@ -375,7 +398,7 @@ class WebhookDispatcher:
         payload: Dict[str, Any] = {
             "event": "payment.settled",
             "source": "lnswitchboard",
-            "version": self._version,
+            "version": WEBHOOK_PAYLOAD_SCHEMA_VERSION,
             "address_id": address.get("id"),
             "ln_address": ln_address,
             "local_part": base_local,
@@ -513,27 +536,58 @@ class WebhookDispatcher:
                 status_code,
                 self._retry_interval,
             )
-            self._schedule_retry(url=url, payload=payload, headers=headers, next_attempt=attempt + 1, delivery_id=delivery_id)
+            self._schedule_retry(
+                next_attempt=attempt + 1,
+                delivery_id=delivery_id,
+                fallback_url=url,
+                fallback_payload=payload,
+                fallback_headers=headers,
+            )
             return False
 
     def _schedule_retry(
         self,
         *,
-        url: str,
-        payload: Dict[str, Any],
-        headers: Dict[str, str],
         next_attempt: int,
         delivery_id: int,
         delay_seconds: Optional[float] = None,
+        fallback_url: Optional[str] = None,
+        fallback_payload: Optional[Dict[str, Any]] = None,
+        fallback_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         async def _retry() -> None:
             try:
                 delay = self._retry_interval if delay_seconds is None else max(0.0, float(delay_seconds))
                 await asyncio.sleep(delay)
+                retry_url = fallback_url
+                retry_payload = fallback_payload
+                retry_headers = fallback_headers
+                if self._delivery_storage is not None and delivery_id > 0:
+                    delivery = await self._delivery_storage.get_delivery(delivery_id)
+                    if delivery is None:
+                        return
+                    endpoint = await self._resolve_delivery_endpoint(delivery)
+                    retry_payload = await self._rebuild_delivery_payload(delivery)
+                    if endpoint is None or retry_payload is None:
+                        await self._delivery_storage.update_delivery_status(
+                            delivery_id=delivery_id,
+                            status="failed",
+                            headers={},
+                        )
+                        return
+                    retry_url = str(endpoint["url"])
+                    retry_headers = self._build_headers(
+                        address_id=str(delivery.get("address_id") or "") or None,
+                        delivery_id=delivery_id,
+                        endpoint=endpoint,
+                        payload=retry_payload,
+                    )
+                if retry_url is None or retry_payload is None or retry_headers is None:
+                    return
                 await self._attempt_delivery(
-                    url=url,
-                    payload=payload,
-                    headers=headers,
+                    url=retry_url,
+                    payload=retry_payload,
+                    headers=retry_headers,
                     attempt=next_attempt,
                     delivery_id=delivery_id,
                 )

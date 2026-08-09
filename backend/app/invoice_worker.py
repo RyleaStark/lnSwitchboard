@@ -100,7 +100,11 @@ async def _dispatch_webhook_if_needed(
     try:
         await dispatcher.dispatch_payment_settled(event=event, details=details, settled_at=settled_at)
     except Exception as exc:  # pragma: no cover - defensive logging
-        LOGGER.warning("Webhook dispatcher raised for invoice event %s: %s", event.id, exc)
+        LOGGER.warning(
+            "Webhook dispatcher raised for invoice event %s (error_type=%s)",
+            event.id,
+            type(exc).__name__,
+        )
 
 
 def _is_remote_verify_event(event: InvoiceEvent) -> bool:
@@ -158,7 +162,11 @@ async def _refresh_remote_verify_status(
     try:
         snapshot = await fetch_forwarding_verify(verify_url)
     except Exception as exc:  # pragma: no cover - network/runtime
-        logger.warning("Forwarded invoice verify failed for event %s: %s", event.id, exc)
+        logger.warning(
+            "Forwarded invoice verify failed for event %s (error_type=%s)",
+            event.id,
+            type(exc).__name__,
+        )
         await storage.apply_invoice_event_update(
             event=event,
             details=details,
@@ -321,7 +329,11 @@ async def refresh_invoice_statuses(
             )
             continue
         except Exception as exc:  # pragma: no cover - network/runtime
-            logger.warning("Invoice lookup failed for %s: %s", payment_hash_hex, exc)
+            logger.warning(
+                "Invoice lookup failed for %s (error_type=%s)",
+                payment_hash_hex,
+                type(exc).__name__,
+            )
             next_check = now + quick_interval
             await storage.apply_invoice_event_update(
                 event=event,
@@ -477,7 +489,10 @@ class InvoiceSubscriptionWorker:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # pragma: no cover - runtime errors
-                    LOGGER.warning("Invoice subscription stream failed: %s", exc)
+                    LOGGER.warning(
+                        "Invoice subscription stream failed (error_type=%s)",
+                        type(exc).__name__,
+                    )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, self._backoff_max)
         except asyncio.CancelledError:
@@ -492,7 +507,10 @@ class InvoiceSubscriptionWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - runtime errors
-                LOGGER.warning("Failed to apply invoice subscription update: %s", exc)
+                LOGGER.warning(
+                    "Failed to apply invoice subscription update (error_type=%s)",
+                    type(exc).__name__,
+                )
 
     async def _apply_snapshot(self, snapshot: Dict[str, Any]) -> None:
         payment_hash_value = snapshot.get("r_hash") or snapshot.get("payment_hash")
@@ -574,7 +592,10 @@ class InvoiceFullRefreshWorker:
         try:
             await self.run_once()
         except Exception as exc:  # pragma: no cover - runtime errors
-            LOGGER.warning("Startup full invoice refresh failed: %s", exc)
+            LOGGER.warning(
+                "Startup full invoice refresh failed (error_type=%s)",
+                type(exc).__name__,
+            )
         self._task = asyncio.create_task(self._run(), name="invoice-full-refresh-worker")
 
     async def stop(self) -> None:
@@ -606,7 +627,10 @@ class InvoiceFullRefreshWorker:
                     try:
                         await self.run_once()
                     except Exception as exc:  # pragma: no cover - runtime errors
-                        LOGGER.warning("Full invoice refresh failed: %s", exc)
+                        LOGGER.warning(
+                            "Full invoice refresh failed (error_type=%s)",
+                            type(exc).__name__,
+                        )
                     continue
         except asyncio.CancelledError:
             pass

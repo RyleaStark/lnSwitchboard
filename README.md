@@ -8,7 +8,7 @@ Published on the [Umbrel App Store](https://umbrel.com/), shipped on [Docker Hub
 
 ## What is lnSwitchboard? (ELI5)
 
-Think of your Lightning node as a call center. Every time someone zaps `yourname@yourdomain`, a little switchboard operator (lnSwitchboard) picks up, checks who’s calling, makes sure the line isn’t being spammed, and then patches the call through with a freshly minted invoice. The operator keeps notes about every call, so you can later scroll through a log and see who reached out, what they asked for, and whether they paid.
+Think of your Lightning node as a call center. Every time someone zaps `yourname@yourdomain`, a little switchboard operator (lnSwitchboard) picks up, makes sure the line isn’t being spammed, and then patches the call through with a freshly minted invoice. Operator-visible status notes are privacy-preserving: payer comments, webhook bodies, provider responses, and secret-bearing URLs are excluded, while narrowly scoped internal invoice state supports settlement and retry after restart.
 
 - 🧑‍💼 **For node runners:** keep your Lightning Address front door open while the sensitive admin UI stays on your LAN / VPN.
 - 🧑‍🎓 **For newcomers:** no need to memorize LNURL specs - lnSwitchboard bakes in the right metadata, comment limits, payer identity rules, and verification endpoints automatically.
@@ -19,7 +19,7 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 
 - **One app, many handles.** Map unlimited usernames, vanity tags, and promo aliases to the same Lightning backend. Per-handle overrides let you tune min/max sats, metadata, and success messages without touching global config.
 - **Wallet compatibility out of the box.** Implements the core LNURL LUDs (06/09/12/16/17/18/20/21), NIP-05, and NIP-57 zap receipts for linked local identities, so everything from Alby to Wallet of Satoshi, or Bitcoin Well... “just works.”
-- **Actionable visibility.** The built-in dashboard shows 24h/7d request volume, invoices generated vs. paid, sats routed, inbound liquidity, and a searchable activity log with proxy/IP context.
+- **Actionable visibility.** The built-in dashboard shows 24h/7d request volume, invoices generated vs. paid, sats routed, inbound liquidity, and a searchable redacted activity log.
 - **Security-first defaults.** Rate limiting (per-IP), macaroon validation, TLS handling, and proxy-aware callback URLs keep the public face minimal while admin routes stay private.
 - **Umbrel & Docker native.** Install with one click on Umbrel or run anywhere with Docker/Compose/k8s, mounting LND's data directory read-only for TLS and macaroons.
 
@@ -32,10 +32,10 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 | **LNURL Router** | LNURL-pay discovery + invoice endpoints that understand tags, long descriptions, payer data, comments, and lightning-fast verification links. |
 | **Dashboard** | Live metrics, trend charts, and a status chip that pings `/api/health` every 10 seconds so you know your node is reachable. |
 | **Invoices hub** | Dedicated `/invoices/` page backed by a SQLite `invoice_events` table. Real-time updates come from a gRPC subscription worker plus a periodic full refresh loop. |
-| **Request log** | Searchable log of discovery, invoice, verify, webhook delivery, and rate-limit events with metadata previews, payers' comments, and proxy headers for forensic-level visibility. |
+| **Request log** | Searchable privacy-preserving summaries of discovery, invoice, verify, webhook delivery, and rate-limit events. Payer data, comments, provider bodies, proxy headers, preimages, payment requests, and secret-bearing URLs are excluded. |
 | **LN address customization** | Pin custom min/max sats, template text, per-handle payer data, signed webhook automation, and delivery filters to any `local_part@domain`. Tags automatically inherit from the base handle. |
 | **NIP-05 + zaps** | Manage Nostr mappings (npub/hex + relay list), serve `/.well-known/nostr.json`, advertise NIP-57 zap support when a local identity has a signer, and publish kind `9735` receipts after settlement. |
-| **Webhook observability** | Persist HTTP webhook and Nostr relay delivery attempts, record each attempt in Request Logs, and send signed test payloads from the Webhooks reference. |
+| **Webhook observability** | Persist redacted HTTP webhook and Nostr relay attempt summaries without destinations, payloads, response bodies, or signature headers, and send signed test payloads from the Webhooks reference. |
 | **Env + macaroon management** | Update `.env` safely via the UI, use LND's mounted `invoice.macaroon`, or manually paste/upload a macaroon when no file path is configured. |
 
 ---
@@ -102,7 +102,7 @@ The project OAuth application is a public client (`token_endpoint_auth_method: n
 
 Configure the same space-separated list in `CLOUDFLARE_OAUTH_SCOPE`. The setup API keeps onboarding disabled until a non-placeholder client ID and callback page are configured.
 
-Register both exact redirect URIs: `http://127.0.0.1:22121/api/cloudflare/oauth/callback` for direct loopback completion and the HTTPS URL where `oauth-callback/index.html` is hosted for paste-back completion. The query-bearing callback is deliberately restricted to an exact IP loopback URL and must never be pointed at Umbrel App Proxy, Caddy, NGINX, or another reverse proxy. Remote administration on every operating system uses the HTTPS page mode: the static callback receives the code in the URL fragment, uses a hash-restricted CSP with no analytics, external resources, or network requests, and lets the operator paste the code into lnSwitchboard over the ordinary authenticated administration channel. Configure `CLOUDFLARE_OAUTH_CLIENT_ID` and `CLOUDFLARE_OAUTH_REDIRECT_PAGE`. Never configure or ship a client secret.
+Register both exact redirect URIs: `http://127.0.0.1:22121/api/cloudflare/oauth/callback` for direct loopback completion and the HTTPS URL where `oauth-callback/index.html` is hosted for paste-back completion. The query-bearing callback is deliberately restricted to one canonical IP-loopback URL and must never be pointed at Umbrel App Proxy, Caddy, NGINX, or another reverse proxy. Remote administration on every operating system uses the HTTPS page mode: the static callback receives the code in the URL fragment, uses a hash-restricted CSP with no analytics, external resources, or network requests, and lets the operator paste the code into lnSwitchboard over the ordinary administration channel. The application enforces its documented loopback/LAN/WAN network boundary; identity authentication and TLS for a remotely exposed administration listener remain deployment responsibilities (Umbrel supplies them through its authenticated App Proxy). Configure `CLOUDFLARE_OAUTH_CLIENT_ID` and `CLOUDFLARE_OAUTH_REDIRECT_PAGE`. Never configure or ship a client secret.
 
 After consent, choose an OAuth-authorized account and zone rather than pasting resource IDs. lnSwitchboard idempotently verifies or configures the Cloudflare One prerequisites needed by Mesh: device enrollment, the default Split Tunnels profile, Gateway TCP/UDP proxying, unique device IPs, and Mesh connectivity. Customized settings that cannot be changed safely are reported for operator action instead of being overwritten.
 
@@ -144,7 +144,7 @@ docker exec <lnswitchboard-container> lnswitchboard-diagnose-lnd
 1. **FastAPI core** mounts the static frontend and exposes LNURL, UI, identity, and LN-address routers. The UI and admin API stay same-origin; only the explicitly documented public endpoints should be internet-facing.
 2. **LN client** (`grpc.aio`) talks to LND using your TLS cert + invoice macaroon, generating invoices with properly hashed metadata and watching channel capacity to set `maxSendable`.
 3. **LN address store** lives in SQLite, so per-handle overrides survive restarts and apply to every `user+tag`.
-4. **Request log storage** mirrors all discovery/invoice/verify events in SQLite plus an in-memory deque for fast UI reads. Older entries age out via `LOG_RETENTION_DAYS`.
+4. **Request log storage** keeps redacted discovery/invoice/verify summaries in SQLite plus an in-memory deque for fast UI reads. Secret-bearing and payer-supplied fields are removed on every startup, including after rollback; older entries age out via `LOG_RETENTION_DAYS`.
 5. **Invoice workers**:
    - `InvoiceSubscriptionWorker` listens to `SubscribeInvoices` and updates settlement state instantly.
    - `InvoiceFullRefreshWorker` sweeps pending invoices on a fixed interval so nothing slips through.
@@ -157,11 +157,11 @@ docker exec <lnswitchboard-container> lnswitchboard-diagnose-lnd
 - **Dashboard:** Lightning snapshot, 24h/7d request counts, invoices minted/paid, sats routed, and a 14-day chart of settled activity.
 - **Invoices:** Paginated table with per-invoice modals showing hashes, sats, expiry, and settle timestamps.
 - **Liquidity:** Channel table (peer alias, Amboss links, local/remote balances) plus the largest receivable metric powered by `list_channels`.
-- **Logs:** Filterable event log with modal JSON viewer - perfect for debugging wallet interactions.
+- **Logs:** Filterable event summaries with a redacted JSON viewer for debugging without retaining payloads or provider responses.
 - **LN Addresses:** Create/edit/delete overrides with validation, variable hints, Nostr identity badges, payer-data schemas, signed webhook filters, and webhook badges when automations are attached to a handle.
 - **Identities:** CRUD for `local_part@domain` → `npub` mappings plus relay lists.
 - **Settings:** Mounted macaroon status, manual macaroon paste/upload fallback, Nostr zap signer generation/import, `.env` editor with grouped hints, and a reverse-proxy snippet you can copy into Nginx/Caddy.
-- **Webhooks:** Request-log delivery events, test sends, signed receiver headers, forwarded-invoice caveats, and payload reference material.
+- **Webhooks:** Redacted delivery-attempt summaries, test sends, signed receiver headers, forwarded-invoice caveats, and payload reference material.
 
 Screenshots coming soon - until then, install on Umbrel or fire up the Docker image to explore the dashboard, request logs, signer controls, and address automation tools in minutes.
 

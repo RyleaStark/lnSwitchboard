@@ -1,14 +1,54 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
 from ..app import deps
 from ..app.config import Settings, get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from ..app.outbound_security import UnsafeOutboundTarget, ensure_public_endpoint, post_to_pinned_endpoint
+
+
+def _is_exception_type_name(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "__name__"
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "type"
+        and len(node.value.args) == 1
+        and isinstance(node.value.args[0], ast.Name)
+        and node.value.args[0].id == "exc"
+    )
+
+
+def _contains_raw_caught_exception(node: ast.AST) -> bool:
+    if _is_exception_type_name(node):
+        return False
+    if isinstance(node, ast.Name) and node.id == "exc":
+        return True
+    return any(_contains_raw_caught_exception(child) for child in ast.iter_child_nodes(node))
+
+
+def test_runtime_logging_never_interpolates_raw_caught_exceptions() -> None:
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    violations: list[str] = []
+    for path in sorted(app_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in {"debug", "info", "warning", "error", "exception", "critical"}:
+                continue
+            if node.func.attr == "exception" or any(
+                _contains_raw_caught_exception(argument) for argument in (*node.args, *[kw.value for kw in node.keywords])
+            ):
+                violations.append(f"{path.relative_to(app_root)}:{node.lineno}")
+    assert violations == []
 
 
 def test_admin_api_does_not_allow_cross_origin_reads(test_client) -> None:
@@ -163,6 +203,13 @@ def test_invalid_trusted_proxy_setting_is_rejected(monkeypatch) -> None:
         "http://127.0.0.1:22121/api/cloudflare/oauth/callback?forward=1",
         "http://user@127.0.0.1:22121/api/cloudflare/oauth/callback",
         "http://127.0.0.1:22121/not-the-oauth-callback",
+        " http://127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "http://127.0.0.1:22121/api/cloudflare/oauth/callback\n",
+        "\thttp://127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "\x01http://127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "\x7fhttp://127.0.0.1:22121/api/cloudflare/oauth/callback",
+        "http://127.0.0.1:0/api/cloudflare/oauth/callback",
+        "http://[0:0:0:0:0:0:0:1]:22121/api/cloudflare/oauth/callback",
     ],
 )
 def test_cloudflare_query_callback_is_restricted_to_the_exact_loopback_endpoint(
@@ -197,6 +244,54 @@ def test_cloudflare_query_callback_accepts_ipv4_and_ipv6_loopback(
         "https://oauth.example/callback/?next=admin",
         "https://oauth.example/callback/#fragment",
         "https:///callback/",
+        " https://oauth.example/callback/",
+        "https://oauth.example/callback/\t",
+        "\x01https://oauth.example/callback/",
+        "\x7fhttps://oauth.example/callback/",
+        "https://oauth.example\\@evil.example/callback/",
+        "https://foo..example/callback/",
+        "https://-foo.example/callback/",
+        "https://foo-.example/callback/",
+        "https://%65xample.com/callback/",
+        "https://oauth.example:0/callback/",
+        "https://[fe80::1%25lo]/callback/",
+        "https://oauth.example/callbäck/",
+        "https://127.000.000.001/callback/",
+        "https://127.1/callback/",
+        "https://2130706433/callback/",
+        "https://0x7f000001/callback/",
+        "https://09.0.0.1/callback/",
+        "https://oauth.1/callback/",
+        "https://oauth.0x1/callback/",
+        "https://oauth.example:/callback/",
+        "https://oauth.example/callback/?",
+        "https://oauth.example/callback/#",
+        "https://127.0.0.1/callback/",
+        "https://oauth.example:00443/callback/",
+        "https://oauth.example:443/callback/",
+        "https://OAUTH.EXAMPLE/callback/",
+        "https://XN--BCHER-KVA.example/callback/",
+        "https://xn--a.example/callback/",
+        "https://0x/callback/",
+        "https://0X/callback/",
+        "https://oauth.0x/callback/",
+        "https://oauth.0X/callback/",
+        "https://[2001:DB8::1]/callback/",
+        "https://oauth.example/a/../callback/",
+        "https://oauth.example/a/%2e%2e/callback/",
+        "https://oauth.example/a/./callback/",
+        "https://oauth.example",
+        "https://oauth.example:00444/callback/",
+        "https://oauth.example:00001/callback/",
+        "https://192.0.2.1:443/callback/",
+        "https://[2001:db8::1]:443/callback/",
+        "https://oauth.example/a/%2e/callback/",
+        "https://oauth.example/a/%2E./callback/",
+        "https://oauth.example/a/%2E%2E/callback/",
+        "https://xn--0.example/callback/",
+        "https://xn--abc.example/callback/",
+        "https://oauth.example/%/",
+        "https://oauth.example/%zz/",
     ],
 )
 def test_cloudflare_remote_callback_requires_a_clean_https_page(
@@ -208,10 +303,21 @@ def test_cloudflare_remote_callback_requires_a_clean_https_page(
         Settings()
 
 
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "https://oauth.lnswitchboard.app/callback/",
+        "https://oauth.example/",
+        "https://oauth.example:444/callback/",
+        "https://xn--bcher-kva.example/callback/",
+        "https://oauth.0xg/callback/",
+        "https://192.0.2.1/callback/",
+        "https://[2001:db8::1]/callback/",
+    ],
+)
 def test_cloudflare_remote_callback_accepts_a_clean_https_page(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, redirect_uri: str
 ) -> None:
-    redirect_uri = "https://oauth.lnswitchboard.app/callback/"
     monkeypatch.setenv("CLOUDFLARE_OAUTH_REDIRECT_PAGE", redirect_uri)
 
     assert Settings().cloudflare_oauth_redirect_page == redirect_uri

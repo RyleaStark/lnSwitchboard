@@ -234,7 +234,10 @@ async def get_env_settings(
         try:
             channels = await ln_client.list_channels(public_only=False)
         except Exception as exc:  # pragma: no cover - network errors
-            logger.warning("Failed to refresh max sendable from channels: %s", exc)
+            logger.warning(
+                "Failed to refresh max sendable from channels (error_type=%s)",
+                type(exc).__name__,
+            )
         else:
             max_receiving = 0
             for channel in channels:

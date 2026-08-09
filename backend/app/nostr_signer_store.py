@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -46,6 +48,9 @@ class NostrSignerStore:
 
     async def get_private_key(self) -> str:
         async with self._lock:
+            if self._path.is_symlink():
+                raise OSError("Nostr signer path must not be a symbolic link")
+            os.chmod(self._path, 0o600)
             content = self._path.read_text(encoding="utf-8")
         return normalize_private_key_hex(content.strip())
 
@@ -57,11 +62,29 @@ class NostrSignerStore:
         normalized = normalize_private_key_hex(private_key_hex)
         async with self._lock:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(f"{normalized}\n", encoding="utf-8")
+            if self._path.is_symlink():
+                raise OSError("Nostr signer path must not be a symbolic link")
+            temporary = self._path.parent / (
+                f".{self._path.name}.{secrets.token_hex(8)}.tmp"
+            )
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(temporary, flags, 0o600)
             try:
-                self._path.chmod(0o600)
-            except OSError:
-                pass
+                if hasattr(os, "fchmod"):
+                    os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    descriptor = -1
+                    handle.write(f"{normalized}\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, self._path)
+                os.chmod(self._path, 0o600)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                temporary.unlink(missing_ok=True)
         return await self.status()
 
     async def generate(self) -> NostrSignerStatus:

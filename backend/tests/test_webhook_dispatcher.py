@@ -9,9 +9,11 @@ import sqlite3
 from datetime import datetime, timezone
 
 import pytest
+from fastapi import HTTPException
 
 from backend.app.ln_address_store import LNAddressStore
 from backend.app.log_storage import InvoiceEvent, RequestLogStorage
+from backend.app.routers.webhooks import replay_delivery as replay_delivery_route
 from ..app.outbound_security import OutboundHTTPStatusError, UnsafeOutboundTarget
 from backend.app.webhook_dispatcher import WebhookDispatcher
 
@@ -67,6 +69,57 @@ def _make_event(address, payment_hash: str = "ab" * 32) -> tuple[InvoiceEvent, d
 
 def test_webhook_retry_eventually_succeeds(tmp_path):
     asyncio.run(_exercise_retry_eventually_succeeds(tmp_path))
+
+
+def test_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
+    asyncio.run(_exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path))
+
+
+def test_unreconstructable_delivery_replay_returns_conflict() -> None:
+    class Storage:
+        async def get_delivery(self, delivery_id):
+            return {"id": delivery_id, "kind": "http.webhook"}
+
+    class Dispatcher:
+        async def replay_delivery(self, delivery):
+            raise ValueError("Delivery payload is unavailable")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            replay_delivery_route(
+                1,
+                storage=Storage(),
+                dispatcher=Dispatcher(),
+            )
+        )
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Delivery can no longer be replayed from authoritative state"
+
+
+def test_webhook_test_payload_is_transient(tmp_path) -> None:
+    async def exercise() -> None:
+        address_store, _address = await _create_address(tmp_path)
+        storage = RequestLogStorage(tmp_path / "test-delivery.db")
+        sent = []
+
+        async def sender(url, payload, headers):
+            sent.append((url, payload, headers))
+
+        dispatcher = WebhookDispatcher(
+            address_store=address_store,
+            delivery_storage=storage,
+            sender=sender,
+        )
+        assert await dispatcher.dispatch_test(
+            url="https://hooks.example.invalid/test",
+            payload={"body": "TRANSIENT_TEST_PAYLOAD_SECRET"},
+            secret="TRANSIENT_TEST_HMAC_SECRET",
+        )
+        assert sent[0][1] == {"body": "TRANSIENT_TEST_PAYLOAD_SECRET"}
+        deliveries = await storage.list_deliveries(page=1, page_size=10)
+        assert deliveries["items"] == []
+
+    asyncio.run(exercise())
 
 
 def test_private_webhook_targets_are_blocked_by_default(tmp_path) -> None:
@@ -169,6 +222,8 @@ def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> 
             webhook_urls=[secret_url],
         )
         event, details = _make_event(address)
+        details["comment"] = "PERSISTED_PAYLOAD_SECRET"
+        details["username_raw"] = "PERSISTED_USERNAME_SECRET"
 
         class SecretStatusError(OutboundHTTPStatusError):
             def __str__(self) -> str:
@@ -202,7 +257,7 @@ def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> 
             persisted = json.dumps(
                 {
                     "deliveries": conn.execute(
-                        "SELECT target, headers FROM webhook_deliveries"
+                        "SELECT target, payload, headers FROM webhook_deliveries"
                     ).fetchall(),
                     "attempts": conn.execute(
                         "SELECT error, response_body FROM webhook_attempts"
@@ -219,6 +274,8 @@ def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> 
             "PERSISTED_QUERY_SECRET",
             "ClassShapedSecretError",
             "PERSISTED_RESPONSE_SECRET",
+            "PERSISTED_PAYLOAD_SECRET",
+            "PERSISTED_USERNAME_SECRET",
         ):
             assert secret not in exposed
             assert secret not in persisted
@@ -244,12 +301,13 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
             INSERT INTO webhook_deliveries (
                 created_at, updated_at, kind, event, target, status, payload,
                 headers, address_id, invoice_event_id, request_log_id, delivery_key
-            ) VALUES (?, ?, 'http.webhook', 'payment.settled', ?, 'failed', '{}', ?, NULL, NULL, NULL, 'legacy')
+            ) VALUES (?, ?, 'http.webhook', 'payment.settled', ?, 'failed', ?, ?, NULL, NULL, NULL, 'legacy')
             """,
             (
                 now,
                 now,
                 "https://hooks.invalid/LEGACY_PATH_SECRET?token=LEGACY_QUERY_SECRET",
+                json.dumps({"oauth_code": "LEGACY_PAYLOAD_SECRET"}),
                 json.dumps({"X-LnSwitchboard-Signature": "LEGACY_SIGNATURE_SECRET"}),
             ),
         )
@@ -258,33 +316,80 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
             """
             INSERT INTO webhook_attempts (
                 delivery_id, attempted_at, attempt_number, success, error, response_body
-            ) VALUES (?, ?, 1, 0, 'LEGACY_EXCEPTION_SECRET', 'LEGACY_RESPONSE_SECRET')
+            ) VALUES (?, ?, 1, 0, 'type:RollbackClassShapedSecretError', 'LEGACY_RESPONSE_SECRET')
             """,
             (delivery_id, now),
         )
         conn.execute(
             """
             INSERT INTO request_logs (
-                timestamp, username, ip, event, status, message, details
-            ) VALUES (?, 'webhook', 'internal', 'webhook_delivery', 'failed',
+                timestamp, username, domain, ip, amount_msat, event, status, message, details
+            ) VALUES (?, 'LEGACY_PAYLOAD_DERIVED_USERNAME_SECRET',
+                      'LEGACY_PAYLOAD_DERIVED_DOMAIN_SECRET.invalid',
+                      'LEGACY_PROXY_HEADER_AS_IP_SECRET', 112233445566,
+                      'webhook_delivery', 'failed',
                       'LEGACY_LOG_SECRET', '{"target":"LEGACY_DETAIL_SECRET"}')
             """,
             (now,),
         )
+        conn.execute(
+            """
+            INSERT INTO request_logs (
+                timestamp, username, ip, event, domain, amount_msat, status, message, details
+            ) VALUES (?, 'payer', 'internal', 'invoice', 'example.invalid', 1000, 'error', ?, ?)
+            """,
+            (
+                now,
+                "LEGACY_INVOICE_EXCEPTION_SECRET",
+                json.dumps(
+                    {
+                        "response": {"body": "LEGACY_REMOTE_BODY_SECRET"},
+                        "payerdata_raw": "LEGACY_PAYER_SECRET",
+                        "preimage": "LEGACY_PREIMAGE_SECRET",
+                        "verify_url": "https://example.invalid/LEGACY_VERIFY_SECRET",
+                        "error": {
+                            "type": "LEGACY_ERROR_TYPE_SECRET",
+                            "message": "LEGACY_ERROR_MESSAGE_SECRET",
+                        },
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO invoice_events (
+                created_at, username, domain, ip, amount_msat, payment_hash,
+                payment_request, details, settled, expired, check_interval_seconds
+            ) VALUES (?, 'payer', 'example.invalid', 'internal', 1000, ?, 'lnbc1safe', ?, 0, 0, 60)
+            """,
+            (
+                now,
+                "ab" * 32,
+                json.dumps(
+                    {
+                        "response": {"body": "LEGACY_EVENT_RESPONSE_SECRET"},
+                        "ln_client_response": {"token": "LEGACY_CLIENT_RESPONSE_SECRET"},
+                        "metadata_for_hash": "LEGACY_METADATA_PAYLOAD_SECRET",
+                        "proxy": {"header": "LEGACY_PROXY_HEADER_SECRET"},
+                    }
+                ),
+            ),
+        )
 
-    RequestLogStorage(db_path)
+    sanitized_storage = RequestLogStorage(db_path)
     with sqlite3.connect(db_path) as conn:
         persisted = json.dumps(
             {
                 "deliveries": conn.execute(
-                    "SELECT target, headers FROM webhook_deliveries"
+                    "SELECT target, payload, headers FROM webhook_deliveries"
                 ).fetchall(),
                 "attempts": conn.execute(
                     "SELECT error, response_body FROM webhook_attempts"
                 ).fetchall(),
                 "request_logs": conn.execute(
-                    "SELECT message, details FROM request_logs WHERE event = 'webhook_delivery'"
+                    "SELECT username, domain, ip, amount_msat, message, details FROM request_logs"
                 ).fetchall(),
+                "invoice_events": conn.execute("SELECT details FROM invoice_events").fetchall(),
             },
             sort_keys=True,
         )
@@ -294,17 +399,98 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         assert conn.execute(
             "SELECT COUNT(*) FROM request_logs WHERE event = 'webhook_delivery'"
         ).fetchone()[0] == 1
+        assert conn.execute(
+            """
+            SELECT username, domain, ip, amount_msat
+            FROM request_logs
+            WHERE event = 'webhook_delivery'
+            """
+        ).fetchone() == ("webhook", None, "redacted", None)
+    exposed = json.dumps(
+        asyncio.run(sanitized_storage.list_invoice_events(page=1, page_size=10)),
+        sort_keys=True,
+    )
 
     for secret in (
         "LEGACY_PATH_SECRET",
         "LEGACY_QUERY_SECRET",
         "LEGACY_SIGNATURE_SECRET",
-        "LEGACY_EXCEPTION_SECRET",
+        "LEGACY_PAYLOAD_SECRET",
+        "RollbackClassShapedSecretError",
         "LEGACY_RESPONSE_SECRET",
         "LEGACY_LOG_SECRET",
         "LEGACY_DETAIL_SECRET",
+        "LEGACY_INVOICE_EXCEPTION_SECRET",
+        "LEGACY_REMOTE_BODY_SECRET",
+        "LEGACY_PAYER_SECRET",
+        "LEGACY_PREIMAGE_SECRET",
+        "LEGACY_VERIFY_SECRET",
+        "LEGACY_ERROR_TYPE_SECRET",
+        "LEGACY_ERROR_MESSAGE_SECRET",
+        "LEGACY_EVENT_RESPONSE_SECRET",
+        "LEGACY_CLIENT_RESPONSE_SECRET",
+        "LEGACY_METADATA_PAYLOAD_SECRET",
+        "LEGACY_PROXY_HEADER_SECRET",
+        "LEGACY_PAYLOAD_DERIVED_USERNAME_SECRET",
+        "LEGACY_PAYLOAD_DERIVED_DOMAIN_SECRET",
+        "LEGACY_PROXY_HEADER_AS_IP_SECRET",
     ):
         assert secret not in persisted
+        assert secret not in exposed
+
+
+def test_cleanup_expires_terminal_history_but_preserves_retry_authority(tmp_path) -> None:
+    db_path = tmp_path / "retention.db"
+    storage = RequestLogStorage(db_path, retention_days=1)
+    old = "2000-01-01T00:00:00+00:00"
+    with sqlite3.connect(db_path) as conn:
+        invoice_ids = []
+        for payment_hash in ("11" * 32, "22" * 32):
+            conn.execute(
+                """
+                INSERT INTO invoice_events (
+                    created_at, username, domain, ip, amount_msat, payment_hash,
+                    details, settled, expired, check_interval_seconds
+                ) VALUES (?, 'pay', 'testserver', 'redacted', 1000, ?, '{}', 1, 0, 60)
+                """,
+                (old, payment_hash),
+            )
+            invoice_ids.append(int(conn.execute("SELECT last_insert_rowid()").fetchone()[0]))
+        delivery_ids = []
+        for status_value, invoice_id in zip(("delivered", "retrying"), invoice_ids):
+            conn.execute(
+                """
+                INSERT INTO webhook_deliveries (
+                    created_at, updated_at, kind, event, target, status, payload,
+                    headers, invoice_event_id, delivery_key
+                ) VALUES (?, ?, 'http.webhook', 'payment.settled', 'webhook:safe', ?,
+                          NULL, '{}', ?, ?)
+                """,
+                (old, old, status_value, invoice_id, f"retention-{invoice_id}"),
+            )
+            delivery_ids.append(int(conn.execute("SELECT last_insert_rowid()").fetchone()[0]))
+        for delivery_id in delivery_ids:
+            conn.execute(
+                """
+                INSERT INTO webhook_attempts (
+                    delivery_id, attempted_at, attempt_number, success, error
+                ) VALUES (?, ?, 1, 0, 'type:DeliveryError')
+                """,
+                (delivery_id, old),
+            )
+
+    asyncio.run(storage.cleanup())
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT id FROM webhook_deliveries ORDER BY id"
+        ).fetchall() == [(delivery_ids[1],)]
+        assert conn.execute(
+            "SELECT delivery_id FROM webhook_attempts ORDER BY delivery_id"
+        ).fetchall() == [(delivery_ids[1],)]
+        assert conn.execute(
+            "SELECT id FROM invoice_events ORDER BY id"
+        ).fetchall() == [(invoice_ids[1],)]
 
 
 async def _exercise_retry_eventually_succeeds(tmp_path):
@@ -333,6 +519,109 @@ async def _exercise_retry_eventually_succeeds(tmp_path):
     assert delivered is False
     await asyncio.wait_for(success_event.wait(), timeout=1.0)
     assert attempts == [1, 2, 3]
+
+
+async def _exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
+    db_path = tmp_path / "retry-rotation.db"
+    address_store = LNAddressStore(db_path)
+    address = await address_store.add_address(
+        local_part="pay",
+        domain="testserver",
+        min_sendable_sat=None,
+        max_sendable_sat=None,
+        metadata_description=None,
+        success_message=None,
+        webhook_urls=[],
+        webhook_endpoints=[
+            {
+                "id": "stable",
+                "url": "https://old.example.invalid/endpoint",
+                "secret": "old-secret",
+                "filters": {},
+            }
+        ],
+    )
+    storage = RequestLogStorage(db_path)
+    event, details = _make_event(address)
+    settled_at = datetime.now(tz=timezone.utc)
+    await storage.log_invoice_event(
+        username=event.username,
+        domain=event.domain,
+        amount_msat=event.amount_msat,
+        ip=event.ip,
+        payment_hash=event.payment_hash,
+        payment_request=event.payment_request,
+        details=details,
+        request_log_id=event.request_log_id,
+    )
+    await storage.apply_invoice_event_update(
+        event=event,
+        details=details,
+        settled=True,
+        expired=False,
+        next_check=None,
+        expires_at=None,
+        interval_seconds=60,
+        settled_at=settled_at,
+    )
+
+    calls: list[tuple[str, dict, dict]] = []
+    retried = asyncio.Event()
+
+    async def sender(url, payload, headers):
+        calls.append((url, payload, headers))
+        if len(calls) == 1:
+            await address_store.update_address(
+                address["id"],
+                local_part=address["local_part"],
+                domain=address["domain"],
+                min_sendable_sat=address.get("min_sendable_sat"),
+                max_sendable_sat=address.get("max_sendable_sat"),
+                metadata_description=address.get("metadata_description"),
+                success_message=address.get("success_message"),
+                webhook_urls=[],
+                webhook_endpoints=[
+                    {
+                        "id": "stable",
+                        "url": "https://current.example.invalid/endpoint",
+                        "secret": "current-secret",
+                        "filters": {},
+                    }
+                ],
+                payer_data=address.get("payer_data") or {},
+                routing_mode=address.get("routing_mode") or "local",
+                forward_to=address.get("forward_to"),
+            )
+            raise RuntimeError("retry")
+        retried.set()
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+        max_retries=1,
+        retry_window_seconds=0.1,
+    )
+    assert not await dispatcher.dispatch_payment_settled(
+        event=event,
+        details=details,
+        settled_at=settled_at,
+    )
+    await asyncio.wait_for(retried.wait(), timeout=1.0)
+    assert [call[0] for call in calls] == [
+        "https://old.example.invalid/endpoint",
+        "https://current.example.invalid/endpoint",
+    ]
+    assert calls[0][1] == calls[1][1]
+    assert calls[1][1]["version"] == "1"
+    headers = calls[1][2]
+    signed = (
+        f'{headers["X-LnSwitchboard-Signature-Timestamp"]}.'
+        f'{headers["X-LnSwitchboard-Delivery-Id"]}.'
+        f'{WebhookDispatcher._payload_body(calls[1][1])}'
+    ).encode()
+    expected = hmac.new(b"current-secret", signed, hashlib.sha256).hexdigest()
+    assert headers["X-LnSwitchboard-Signature"] == f"sha256={expected}"
 
 
 def test_webhook_retry_stops_after_max_attempts(tmp_path):
@@ -424,6 +713,7 @@ async def _exercise_delivery_history_and_hmac_headers(tmp_path):
     assert deliveries["total_items"] == 1
     delivery = deliveries["items"][0]
     assert delivery["status"] == "delivered"
+    assert delivery["payload"] is None
     target_reference = f"webhook:{hashlib.sha256(b'https://hooks.example.com/payments').hexdigest()[:16]}"
     assert delivery["target"] == target_reference
     assert delivery["last_attempt"]["success"] is True
@@ -431,9 +721,9 @@ async def _exercise_delivery_history_and_hmac_headers(tmp_path):
     assert len(delivery_logs) == 1
     delivery_log = delivery_logs[0]
     assert delivery_log["status"] == "ok"
-    assert delivery_log["username"] == "pay+vip"
-    assert delivery_log["domain"] == "testserver"
-    assert delivery_log["amount_msat"] == 2000
+    assert delivery_log["username"] == "webhook"
+    assert delivery_log["domain"] is None
+    assert delivery_log["amount_msat"] is None
     assert delivery_log["details"]["delivery_id"] == delivery["id"]
     assert delivery_log["details"]["delivery_status"] == "delivered"
     assert delivery_log["details"]["attempt_number"] == 1
@@ -502,6 +792,27 @@ async def _exercise_webhook_retry_resumes_after_restart(tmp_path):
     storage = RequestLogStorage(db_path)
     address_store, address = await _create_address(tmp_path)
     event, details = _make_event(address)
+    settled_at = datetime.now(tz=timezone.utc)
+    await storage.log_invoice_event(
+        username=event.username,
+        domain=event.domain,
+        amount_msat=event.amount_msat,
+        ip=event.ip,
+        payment_hash=event.payment_hash,
+        payment_request=event.payment_request,
+        details=details,
+        request_log_id=event.request_log_id,
+    )
+    await storage.apply_invoice_event_update(
+        event=event,
+        details=details,
+        settled=True,
+        expired=False,
+        next_check=None,
+        expires_at=None,
+        interval_seconds=event.check_interval_seconds,
+        settled_at=settled_at,
+    )
 
     async def failing_sender(url, payload, headers):
         raise RuntimeError("receiver offline")
@@ -523,6 +834,7 @@ async def _exercise_webhook_retry_resumes_after_restart(tmp_path):
     deliveries = await storage.list_deliveries(page=1, page_size=5)
     delivery = deliveries["items"][0]
     assert delivery["status"] == "retrying"
+    assert delivery["payload"] is None
     assert delivery["last_attempt"]["success"] is False
     delivery_logs = [entry for entry in await storage.get_recent() if entry["event"] == "webhook_delivery"]
     assert len(delivery_logs) == 1
@@ -548,6 +860,8 @@ async def _exercise_webhook_retry_resumes_after_restart(tmp_path):
     assert resumed == 1
     await asyncio.wait_for(resumed_event.wait(), timeout=1.0)
     assert len(captured) == 1
+    assert captured[0]["payload"]["event"] == "payment.settled"
+    assert captured[0]["payload"]["payment_request"] == event.payment_request
 
     attempts = await storage.list_delivery_attempts(int(delivery["id"]))
     assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]

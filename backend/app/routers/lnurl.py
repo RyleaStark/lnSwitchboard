@@ -177,7 +177,10 @@ async def _channel_max_sendable_sat(ln_client: LNClient) -> int:
     try:
         channels = await ln_client.list_channels(public_only=False)
     except Exception as exc:  # pragma: no cover - network errors
-        logger.warning("Failed to fetch channel data for LNURL max sendable: %s", exc)
+        logger.warning(
+            "Failed to fetch channel data for LNURL max sendable (error_type=%s)",
+            type(exc).__name__,
+        )
         return 0
     max_receiving = 0
     for channel in channels:
@@ -340,7 +343,7 @@ async def _forward_lnurl_pay(
                 domain=domain,
                 amount_msat=amount,
                 status="error",
-                message=str(exc),
+                message="Forwarding target unavailable",
                 details={
                     "forwarded": True,
                     "forward_to": forward_to,
@@ -353,7 +356,7 @@ async def _forward_lnurl_pay(
                     "proxy": proxy_info,
                     "address_override": address_override,
                     "forward_phase": forward_phase,
-                    "error": str(exc),
+                    "error": "ForwardingTargetError",
                 },
             )
         )
@@ -416,7 +419,7 @@ async def _forward_lnurl_pay(
         )
     except ForwardingTargetError as exc:
         details = dict(base_details)
-        details["error"] = str(exc)
+        details["error"] = "ForwardingTargetError"
         await storage.append(
             LogEntry.create(
                 username=username,
@@ -425,7 +428,7 @@ async def _forward_lnurl_pay(
                 domain=domain,
                 amount_msat=amount,
                 status="error",
-                message=str(exc),
+                message="Forwarding target unavailable",
                 details=details,
             )
         )
@@ -803,12 +806,11 @@ async def lnurl_pay(
                 domain=domain,
                 amount_msat=amount_msat,
                 status="error",
-                message=str(exc),
+                message="Invoice operation failed",
                 details=_details_with_invoice(
                     extra={
                         "error": {
                             "type": exc.__class__.__name__,
-                            "message": str(exc),
                         }
                     }
                 ),
@@ -968,7 +970,7 @@ async def lnurl_verify(
         )
         return {"status": "ERROR", "reason": "Not found"}
     except Exception as exc:  # pragma: no cover - runtime errors
-        details["error"] = {"type": exc.__class__.__name__, "message": str(exc)}
+        details["error"] = {"type": exc.__class__.__name__}
         await storage.append(
             LogEntry.create(
                 username=username_clean,
@@ -976,12 +978,10 @@ async def lnurl_verify(
                 event="verify",
                 domain=domain,
                 status="error",
-                message=str(exc),
+                message="Invoice lookup failed",
                 details=details,
             )
         )
-        # Anonymous callers get a generic reason; the exception detail stays
-        # in the operator's request log instead of leaking node internals.
         return {"status": "ERROR", "reason": "Lookup failed"}
 
     settled = bool(invoice_info.get("settled"))

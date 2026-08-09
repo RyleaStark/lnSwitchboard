@@ -280,13 +280,18 @@ async def lifespan(app: FastAPI):
         details = (exc.details() or "").lower()
         if exc.code() == grpc.StatusCode.PERMISSION_DENIED or "permission denied" in details:
             LOGGER.info(
-                "Skipping LND connection check (macaroon lacks GetInfo permission): %s",
-                exc.details() or exc,
+                "Skipping LND connection check (macaroon lacks GetInfo permission)"
             )
         else:
-            LOGGER.warning("Unable to verify LND connection: %s", exc)
+            LOGGER.warning(
+                "Unable to verify LND connection (error_type=%s)",
+                type(exc).__name__,
+            )
     except Exception as exc:  # pragma: no cover - network runtime
-        LOGGER.warning("Unable to verify LND connection: %s", exc)
+        LOGGER.warning(
+            "Unable to verify LND connection (error_type=%s)",
+            type(exc).__name__,
+        )
     yield
     if cloudflare_authorization_cleanup_task is not None:
         cloudflare_authorization_cleanup_task.cancel()

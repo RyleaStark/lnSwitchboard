@@ -51,26 +51,19 @@ def _delivery_target_reference(target: Any) -> str:
     return f"webhook:{digest}"
 
 
-def _error_type_name(value: str) -> str | None:
-    if not value.startswith("type:"):
-        return None
-    name = value[5:]
-    if not name or len(name) > 128 or not name.isidentifier():
-        return None
-    return name
-
-
 def _encoded_delivery_error(error: Any) -> str | None:
     if error in (None, ""):
         return None
-    name = _error_type_name(str(error))
-    return f"type:{name or 'DeliveryError'}"
+    # Exception text is untrusted. Rollback writers can also persist strings that
+    # resemble an internal type marker, so no string value is accepted as
+    # provenance for a more specific persisted error class.
+    return "type:DeliveryError"
 
 
 def _safe_delivery_error(error: Any) -> str | None:
     if error in (None, ""):
         return None
-    return _error_type_name(str(error)) or "DeliveryError"
+    return "DeliveryError"
 
 
 def _safe_delivery_headers(headers: Any) -> Dict[str, Any]:
@@ -128,6 +121,163 @@ def _safe_webhook_log_details(details: Any) -> Dict[str, Any]:
         safe_attempt["error"] = _safe_delivery_error(attempt.get("error"))
         safe["attempt"] = safe_attempt
     return safe
+
+
+_REQUEST_HISTORY_SECRET_KEYS = {
+    "address_override",
+    "callback",
+    "callback_http",
+    "callback_lnurl",
+    "comment",
+    "forward_to",
+    "forwarding_target",
+    "ln_client_response",
+    "metadata_for_hash",
+    "message",
+    "memo",
+    "payment_request_preview",
+    "payer_data",
+    "payerdata",
+    "payerdata_raw",
+    "payment_request",
+    "preimage",
+    "r_preimage",
+    "proxy",
+    "query",
+    "remote_callback",
+    "response",
+    "verify_url",
+    "verify_url_http",
+    "zap_request",
+    "oauth_code",
+    "state",
+    "pr",
+}
+
+_REQUEST_HISTORY_SECRET_FRAGMENTS = (
+    "body",
+    "callback",
+    "comment",
+    "credential",
+    "exception",
+    "header",
+    "password",
+    "payer",
+    "preimage",
+    "response",
+    "secret",
+    "token",
+    "verify_url",
+    "webhook_url",
+)
+
+
+def _safe_request_history_details(event: str, details: Any) -> Dict[str, Any] | None:
+    normalized = _normalize_details(details)
+    if normalized is None or event not in {"discovery", "forward", "invoice", "verify"}:
+        return normalized
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            cleaned: Dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key)
+                if normalized_key == "error":
+                    if item:
+                        cleaned[normalized_key] = {"type": "OperationError"}
+                    continue
+                lowered_key = normalized_key.lower()
+                if lowered_key == "comment_length":
+                    cleaned[normalized_key] = scrub(item)
+                    continue
+                if lowered_key == "state" and str(item).upper() in {
+                    "ACCEPTED",
+                    "CANCELED",
+                    "OPEN",
+                    "SETTLED",
+                }:
+                    cleaned[normalized_key] = scrub(item)
+                    continue
+                if lowered_key in _REQUEST_HISTORY_SECRET_KEYS or any(
+                    fragment in lowered_key for fragment in _REQUEST_HISTORY_SECRET_FRAGMENTS
+                ):
+                    continue
+                cleaned[normalized_key] = scrub(item)
+            return cleaned
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    return scrub(normalized)
+
+
+_INVOICE_OPERATIONAL_DROP_KEYS = {
+    "callback",
+    "callback_http",
+    "callback_lnurl",
+    "forwarding_target",
+    "ln_client_response",
+    "metadata_for_hash",
+    "message",
+    "memo",
+    "payment_request_preview",
+    "preimage",
+    "r_preimage",
+    "proxy",
+    "query",
+    "remote_callback",
+    "response",
+    "oauth_code",
+    "state",
+    "pr",
+}
+
+_INVOICE_OPERATIONAL_DROP_FRAGMENTS = (
+    "body",
+    "credential",
+    "exception",
+    "header",
+    "password",
+    "response",
+    "secret",
+    "token",
+)
+
+
+def _safe_invoice_event_details(details: Any) -> Dict[str, Any] | None:
+    normalized = _normalize_details(details)
+    if normalized is None:
+        return None
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            cleaned: Dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key)
+                if normalized_key == "error":
+                    if item:
+                        cleaned[normalized_key] = {"type": "OperationError"}
+                    continue
+                lowered_key = normalized_key.lower()
+                if lowered_key == "state" and str(item).upper() in {
+                    "ACCEPTED",
+                    "CANCELED",
+                    "OPEN",
+                    "SETTLED",
+                }:
+                    cleaned[normalized_key] = scrub(item)
+                    continue
+                if lowered_key in _INVOICE_OPERATIONAL_DROP_KEYS or any(
+                    fragment in lowered_key for fragment in _INVOICE_OPERATIONAL_DROP_FRAGMENTS
+                ):
+                    continue
+                cleaned[normalized_key] = scrub(item)
+            return cleaned
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    return scrub(normalized)
 
 
 @dataclass
@@ -328,7 +478,7 @@ class RequestLogStorage:
                 parsed_headers if isinstance(parsed_headers, dict) else {}
             )
             conn.execute(
-                "UPDATE webhook_deliveries SET target = ?, headers = ? WHERE id = ?",
+                "UPDATE webhook_deliveries SET target = ?, payload = NULL, headers = ? WHERE id = ?",
                 (
                     _delivery_target_reference(row["target"]),
                     self._serialize_details(safe_headers),
@@ -357,11 +507,62 @@ class RequestLogStorage:
                 or "unknown"
             )
             conn.execute(
-                "UPDATE request_logs SET message = ?, details = ? WHERE id = ?",
+                """
+                UPDATE request_logs
+                SET username = 'webhook',
+                    domain = NULL,
+                    ip = 'redacted',
+                    amount_msat = NULL,
+                    message = ?,
+                    details = ?
+                WHERE id = ?
+                """,
                 (
                     f"Webhook delivery {status}",
                     self._serialize_details(safe_details),
                     int(request_log["id"]),
+                ),
+            )
+        sensitive_history = conn.execute(
+            """
+            SELECT id, event, status, message, details
+            FROM request_logs
+            WHERE event IN ('discovery', 'forward', 'invoice', 'verify')
+            """
+        ).fetchall()
+        failure_messages = {
+            "forward": "Forwarding target unavailable",
+            "invoice": "Invoice operation failed",
+            "verify": "Invoice lookup failed",
+        }
+        for request_log in sensitive_history:
+            event = str(request_log["event"])
+            safe_details = _safe_request_history_details(
+                event, self._deserialize_details(request_log["details"])
+            )
+            message = request_log["message"]
+            if str(request_log["status"] or "") == "error" and message:
+                message = failure_messages.get(event, "Request failed")
+            conn.execute(
+                "UPDATE request_logs SET message = ?, details = ?, ip = 'redacted' WHERE id = ?",
+                (
+                    message,
+                    self._serialize_details(safe_details),
+                    int(request_log["id"]),
+                ),
+            )
+        invoice_history = conn.execute(
+            "SELECT id, details FROM invoice_events"
+        ).fetchall()
+        for invoice_event in invoice_history:
+            safe_details = _safe_invoice_event_details(
+                self._deserialize_details(invoice_event["details"])
+            )
+            conn.execute(
+                "UPDATE invoice_events SET details = ?, ip = 'redacted' WHERE id = ?",
+                (
+                    self._serialize_details(safe_details),
+                    int(invoice_event["id"]),
                 ),
             )
         conn.execute(
@@ -474,7 +675,7 @@ class RequestLogStorage:
             "event": row["event"],
             "target": _delivery_target_reference(row["target"]),
             "status": row["status"],
-            "payload": self._deserialize_details(row["payload"]),
+            "payload": None,
             "headers": _safe_delivery_headers(self._deserialize_details(row["headers"])),
             "address_id": row["address_id"],
             "invoice_event_id": row["invoice_event_id"],
@@ -518,33 +719,6 @@ class RequestLogStorage:
             "response_body": None,
         }
 
-    def _delivery_payload_context(self, payload: Any) -> tuple[str, str | None, int | None, Dict[str, Any]]:
-        if not isinstance(payload, dict):
-            return "webhook", None, None, {}
-        domain = payload.get("domain") if isinstance(payload.get("domain"), str) else None
-        ln_address = payload.get("ln_address") if isinstance(payload.get("ln_address"), str) else None
-        username = payload.get("username") if isinstance(payload.get("username"), str) else None
-        local_part = payload.get("local_part") if isinstance(payload.get("local_part"), str) else None
-        if not username and ln_address:
-            local, _, address_domain = ln_address.rpartition("@")
-            if local and address_domain:
-                username = local
-                domain = domain or address_domain
-            else:
-                username = ln_address
-        username = (username or local_part or "webhook").strip() or "webhook"
-        amount_msat: int | None = None
-        raw_amount = payload.get("amount_msat")
-        if raw_amount not in (None, ""):
-            try:
-                amount_msat = int(raw_amount)
-            except (TypeError, ValueError):
-                amount_msat = None
-        details: Dict[str, Any] = {}
-        for key in ("ln_address", "username_raw", "tag", "forwarded", "forward_to", "settlement_source"):
-            if key in payload:
-                details[key] = payload[key]
-        return username, domain, amount_msat, details
 
     def _delivery_log_status(self, delivery_status: str, success: bool | None = None) -> str:
         if delivery_status == "delivered":
@@ -590,7 +764,7 @@ class RequestLogStorage:
         message: str | None,
         details: Dict[str, Any] | None,
     ) -> Optional[int]:
-        normalized_details = _normalize_details(details)
+        normalized_details = _safe_request_history_details(event, details)
         cursor = conn.execute(
             """
             INSERT INTO request_logs (
@@ -636,8 +810,10 @@ class RequestLogStorage:
         delivery_status: str,
         attempt: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
-        payload = delivery.get("payload")
-        username, domain, amount_msat, _recipient_details = self._delivery_payload_context(payload)
+        # Webhook bodies are transient transport data, not request-history
+        # metadata. Test overrides and provider fields can place secrets in any
+        # field, so no display value may be derived from the body.
+        username, domain, amount_msat = "webhook", None, None
         kind = str(delivery.get("kind") or "webhook")
         target = _delivery_target_reference(delivery.get("target"))
         success = bool(attempt.get("success")) if isinstance(attempt, dict) else None
@@ -695,6 +871,16 @@ class RequestLogStorage:
 
     async def append(self, entry: LogEntry) -> Optional[int]:
         payload = asdict(entry)
+        event = str(payload.get("event") or "")
+        if event in {"discovery", "forward", "invoice", "verify"}:
+            payload["ip"] = "redacted"
+        payload["details"] = _safe_request_history_details(event, payload.get("details"))
+        if str(payload.get("status") or "") == "error" and payload.get("message"):
+            payload["message"] = {
+                "forward": "Forwarding target unavailable",
+                "invoice": "Invoice operation failed",
+                "verify": "Invoice lookup failed",
+            }.get(event, payload["message"])
         row_id: Optional[int] = None
         async with self._lock:
             try:
@@ -795,7 +981,7 @@ class RequestLogStorage:
                             event,
                             target_reference,
                             status,
-                            self._serialize_details(payload),
+                            None,
                             self._serialize_details(safe_headers),
                             address_id,
                             invoice_event_id,
@@ -998,9 +1184,8 @@ class RequestLogStorage:
                    OR LOWER(event) LIKE ?
                    OR LOWER(target) LIKE ?
                    OR LOWER(status) LIKE ?
-                   OR LOWER(COALESCE(payload, '')) LIKE ?
             """
-            params.extend([like, like, like, like, like])
+            params.extend([like, like, like, like])
 
         async with self._lock:
             try:
@@ -1082,9 +1267,43 @@ class RequestLogStorage:
         async with self._lock:
             try:
                 with self._connect() as conn:
+                    cutoff_iso = cutoff.isoformat()
                     conn.execute(
                         "DELETE FROM request_logs WHERE timestamp < ?",
-                        (cutoff.isoformat(),),
+                        (cutoff_iso,),
+                    )
+                    conn.execute(
+                        """
+                        DELETE FROM webhook_attempts
+                        WHERE delivery_id IN (
+                            SELECT id
+                            FROM webhook_deliveries
+                            WHERE updated_at < ?
+                              AND status IN ('delivered', 'failed')
+                        )
+                        """,
+                        (cutoff_iso,),
+                    )
+                    conn.execute(
+                        """
+                        DELETE FROM webhook_deliveries
+                        WHERE updated_at < ?
+                          AND status IN ('delivered', 'failed')
+                        """,
+                        (cutoff_iso,),
+                    )
+                    conn.execute(
+                        """
+                        DELETE FROM invoice_events
+                        WHERE created_at < ?
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM webhook_deliveries
+                              WHERE webhook_deliveries.invoice_event_id = invoice_events.id
+                                AND webhook_deliveries.status NOT IN ('delivered', 'failed')
+                          )
+                        """,
+                        (cutoff_iso,),
                     )
             except sqlite3.Error:
                 return
@@ -1106,7 +1325,9 @@ class RequestLogStorage:
         for entry in self._recent:
             if entry.get("id") == log_id:
                 if details is not None:
-                    entry["details"] = _normalize_details(details)
+                    entry["details"] = _safe_request_history_details(
+                        str(entry.get("event") or ""), details
+                    )
                 break
 
     async def log_invoice_event(
@@ -1153,11 +1374,11 @@ class RequestLogStorage:
                             created_at,
                             username,
                             domain,
-                            ip,
+                            "redacted",
                             amount_msat,
                             payment_hash,
                             payment_request,
-                            self._serialize_details(details),
+                            self._serialize_details(_safe_invoice_event_details(details)),
                             request_log_id,
                             next_check_at,
                             expires_at,
@@ -1202,6 +1423,41 @@ class RequestLogStorage:
             except sqlite3.Error:
                 return []
         return [self._row_to_invoice_event(row) for row in rows]
+
+    async def get_invoice_event_by_id(self, event_id: int) -> Optional[InvoiceEvent]:
+        if event_id <= 0:
+            return None
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT
+                            id,
+                            username,
+                            domain,
+                            ip,
+                            amount_msat,
+                            payment_hash,
+                            payment_request,
+                            details,
+                            request_log_id,
+                            created_at,
+                            next_check_at,
+                            check_interval_seconds,
+                            expires_at,
+                            settled,
+                            expired,
+                            settled_at
+                        FROM invoice_events
+                        WHERE id = ?
+                        LIMIT 1
+                        """,
+                        (event_id,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return None
+        return self._row_to_invoice_event(row) if row else None
 
     async def get_invoice_event_by_hash(self, payment_hash: str) -> Optional[InvoiceEvent]:
         normalized = (payment_hash or "").strip().lower()
@@ -1299,7 +1555,10 @@ class RequestLogStorage:
         interval_seconds: int,
         settled_at: Optional[datetime],
     ) -> None:
-        serialized_details = self._serialize_details(details)
+        serialized_details = self._serialize_details(_safe_invoice_event_details(details))
+        serialized_request_details = self._serialize_details(
+            _safe_request_history_details("invoice", details)
+        )
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         next_check_iso = next_check.isoformat() if next_check else None
         expires_at_iso = (
@@ -1339,14 +1598,14 @@ class RequestLogStorage:
                             event.id,
                         ),
                     )
-                    if event.request_log_id is not None and serialized_details is not None:
+                    if event.request_log_id is not None and serialized_request_details is not None:
                         conn.execute(
                             """
                             UPDATE request_logs
                             SET details = ?
                             WHERE id = ?
                             """,
-                            (serialized_details, event.request_log_id),
+                            (serialized_request_details, event.request_log_id),
                         )
             except sqlite3.Error:
                 return
@@ -1372,10 +1631,8 @@ class RequestLogStorage:
                 WHERE LOWER(username) LIKE ?
                    OR LOWER(domain) LIKE ?
                    OR LOWER(COALESCE(payment_hash, '')) LIKE ?
-                   OR LOWER(COALESCE(payment_request, '')) LIKE ?
-                   OR LOWER(COALESCE(details, '')) LIKE ?
             """
-            params.extend([like, like, like, like, like])
+            params.extend([like, like, like])
 
         async with self._lock:
             try:
@@ -1423,6 +1680,7 @@ class RequestLogStorage:
             if not isinstance(amount_msat, int):
                 amount_msat = None
             details = self._deserialize_details(row["details"])
+            public_details = _safe_request_history_details("invoice", details)
             settled = bool(row["settled"])
             expired = bool(row["expired"])
             forwarded = isinstance(details, dict) and bool(details.get("forwarded"))
@@ -1436,14 +1694,14 @@ class RequestLogStorage:
                     "amount_msat": amount_msat,
                     "amount_sat": amount_msat // 1000 if isinstance(amount_msat, int) else None,
                     "payment_hash": row["payment_hash"],
-                    "payment_request": row["payment_request"],
+                    "payment_request": None,
                     "settled": settled,
                     "expired": expired,
                     "status": "forwarded" if forwarded else ("settled" if settled else ("expired" if expired else "pending")),
                     "next_check_at": row["next_check_at"],
                     "last_checked_at": row["last_checked_at"],
                     "expires_at": row["expires_at"],
-                    "details": details,
+                    "details": public_details,
                     "request_log_id": row["request_log_id"],
                     "settled_at": row["settled_at"],
                 }

@@ -17,7 +17,7 @@ import { api, type EnvSetting } from "@/lib/api"
 const fieldRows = [
   ["event", "Always payment.settled so receivers can filter future webhook types."],
   ["source", "Always lnswitchboard; useful when one receiver aggregates events from multiple apps."],
-  ["version", "lnSwitchboard version that fired the webhook."],
+  ["version", "Stable webhook schema version. It does not change when an app upgrade retries a delivery."],
   ["address_id", "Internal UUID of the LN address override. Useful if the receiver later calls the API."],
   ["ln_address", "Full handle that got paid, including any +tag."],
   ["local_part", "Base handle before the domain and before any +tag."],
@@ -43,7 +43,7 @@ const fieldRows = [
 const headerRows = [
   ["User-Agent", "lnSwitchboard/<version>; lets receivers identify this app without parsing JSON."],
   ["X-LnSwitchboard-Event", "Mirrors the event field for routing traffic at a gateway."],
-  ["X-LnSwitchboard-Version", "Mirrors version for edge filtering and audit logs."],
+  ["X-LnSwitchboard-Version", "App version that performed this delivery attempt; it may differ from the payload schema version."],
   ["X-LnSwitchboard-Address-Id", "Repeats the address UUID so receivers can route before reading the body."],
   ["X-LnSwitchboard-Delivery-Id", "Stable delivery row ID for Request Logs and support correlation."],
   ["X-LnSwitchboard-Signature", "Optional HMAC-SHA256 signature when an endpoint secret is configured."],
