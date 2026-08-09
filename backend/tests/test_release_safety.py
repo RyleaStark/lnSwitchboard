@@ -58,6 +58,7 @@ def test_rc_registry_vacancy_probe_authenticates_with_the_fetched_token() -> Non
 def test_primary_application_container_is_least_privilege() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     app = compose["services"]["lnswitchboard"]
+    public = compose["services"]["lnswitchboard-public"]
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     assert re.search(r"(?m)^USER 1000:1000$", dockerfile)
@@ -70,6 +71,19 @@ def test_primary_application_container_is_least_privilege() -> None:
         "service_completed_successfully"
     )
     assert app.get("privileged") is not True
+    assert app["environment"]["LISTENER_MODE"] == "admin"
+    assert app["ports"] == [
+        "${LNSWITCHBOARD_BIND_ADDRESS:-127.0.0.1}:22121:22121"
+    ]
+
+    assert public["user"] == "1000:1000"
+    assert public["read_only"] is True
+    assert public["cap_drop"] == ["ALL"]
+    assert public["security_opt"] == ["no-new-privileges:true"]
+    assert public["environment"]["LISTENER_MODE"] == "public"
+    assert public["environment"]["CLOUDFLARED_CONNECTOR_ENABLED"] == "false"
+    assert public["environment"]["TAILSCALE_CONNECTOR_ENABLED"] == "false"
+    assert set(public["networks"]) == {"cloudflare-egress"}
 
     initializer = compose["services"]["permissions-init"]
     assert initializer["network_mode"] == "none"
@@ -77,16 +91,16 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert initializer["cap_drop"] == ["ALL"]
     assert set(initializer["cap_add"]) == {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
     assert initializer["security_opt"] == ["no-new-privileges:true"]
-    init_command = initializer["command"][-1]
-    assert "! -type d ! -type f" in init_command
-    assert "stat -c %h" in init_command
-    assert "chown -R -h 1000:1000" in init_command
+    assert initializer["image"] == app["image"]
+    assert initializer["entrypoint"] == [
+        "/usr/local/bin/lnswitchboard-prepare-state"
+    ]
 
 
 def test_compose_application_image_matches_version_file() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
-    assert compose["services"]["lnswitchboard"]["image"] == (
-        f"ghcr.io/ryleastark/lnswitchboard:${{LNSWITCHBOARD_VERSION:-{version}}}"
-    )
+    expected = f"ghcr.io/ryleastark/lnswitchboard:${{LNSWITCHBOARD_VERSION:-{version}}}"
+    for service in ("permissions-init", "lnswitchboard", "lnswitchboard-public"):
+        assert compose["services"][service]["image"] == expected

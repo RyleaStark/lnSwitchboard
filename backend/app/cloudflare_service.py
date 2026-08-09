@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-
-import os
 import re
 import secrets as random_secrets
 import time
@@ -28,6 +26,7 @@ from .cloudflare_worker_source import (
 )
 from .connection_secret_store import ConnectionSecretStore
 from .connection_store import ConnectedDomain, ConnectionStore, ProviderConnection
+from .secure_files import atomic_write_private, unlink_private
 
 _AUTHORIZATION_PREFIX = "cloudflare-authorization:"
 _AUTHORIZATION_ID = re.compile(r"^[A-Za-z0-9_-]{32}$")
@@ -2255,31 +2254,17 @@ class CloudflareService:
         if not identity or "\n" in identity or "\r" in identity:
             raise CloudflareServiceError("Cloudflare did not return a mesh node identity")
         content = f"MESH_NODE_ID={identity}\nMESH_NODE_TOKEN={value}\n"
-        parent = self.token_path.parent
-        parent.mkdir(parents=True, exist_ok=True, mode=0o750)
-        os.chown(parent, -1, self.token_gid)
-        os.chmod(parent, 0o750)
-        temporary = (
-            parent / f".{self.token_path.name}.{random_secrets.token_hex(8)}.tmp"
+        atomic_write_private(
+            self.token_path,
+            content.encode("utf-8"),
+            mode=0o640,
+            gid=self.token_gid,
+            parent_mode=0o750,
+            parent_gid=self.token_gid,
         )
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
-        try:
-            os.fchown(descriptor, -1, self.token_gid)
-            os.fchmod(descriptor, 0o640)
-            with os.fdopen(descriptor, "wb") as handle:
-                descriptor = -1
-                handle.write(content.encode("utf-8"))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.token_path)
-        except BaseException:
-            if descriptor >= 0:
-                os.close(descriptor)
-            temporary.unlink(missing_ok=True)
-            raise
 
     def _remove_node_token(self) -> None:
         try:
-            self.token_path.unlink()
+            unlink_private(self.token_path)
         except FileNotFoundError:
             pass

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from .secure_files import atomic_write_private, read_private_file
 
 
 class MacaroonNotConfiguredError(RuntimeError):
@@ -48,18 +48,13 @@ class MacaroonStore:
         return self._lock
 
     def _load_from_disk(self) -> None:
-        if not self._path.exists():
-            return
         try:
-            if self._path.is_symlink():
-                raise ValueError("Manual macaroon path must not be a symbolic link")
-            os.chmod(self._path, 0o600)
-            content = self._path.read_text(encoding="utf-8").strip()
+            content = read_private_file(self._path, chmod=True).decode("utf-8").strip()
             if content:
                 # Validate hex data on load.
                 bytes.fromhex(content)
                 self._macaroon = content
-        except (OSError, ValueError):
+        except (OSError, UnicodeDecodeError, ValueError):
             # Ignore invalid or unreadable persisted data.
             self._macaroon = None
 
@@ -94,7 +89,7 @@ class MacaroonStore:
         if self._source_path is None:
             raise MacaroonNotConfiguredError("No mounted macaroon path is configured")
         try:
-            return self._coerce_file_bytes(self._source_path.read_bytes())
+            return self._coerce_file_bytes(read_private_file(self._source_path))
         except FileNotFoundError as exc:
             raise MacaroonNotConfiguredError("Mounted macaroon file was not found") from exc
         except PermissionError as exc:
@@ -109,30 +104,7 @@ class MacaroonStore:
             raise PermissionError("Manual macaroon updates are disabled when LND_MACAROON_PATH is configured")
         sanitized = self._sanitize(macaroon_hex)
         async with self._get_lock():
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            if self._path.is_symlink():
-                raise OSError("Manual macaroon path must not be a symbolic link")
-            temporary = self._path.parent / (
-                f".{self._path.name}.{secrets.token_hex(8)}.tmp"
-            )
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            flags |= getattr(os, "O_CLOEXEC", 0)
-            flags |= getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(temporary, flags, 0o600)
-            try:
-                if hasattr(os, "fchmod"):
-                    os.fchmod(descriptor, 0o600)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    descriptor = -1
-                    handle.write(sanitized)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, self._path)
-                os.chmod(self._path, 0o600)
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
-                temporary.unlink(missing_ok=True)
+            atomic_write_private(self._path, sanitized.encode("utf-8"))
             self._macaroon = sanitized
 
     async def get(self) -> str:

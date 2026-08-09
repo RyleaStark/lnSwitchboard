@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 from urllib.parse import urlsplit
 
 import idna
@@ -117,6 +117,9 @@ class Settings(BaseSettings):
         env_ignore_empty=True,
     )
 
+    listener_mode: Literal["both", "admin", "public"] = _env_field(
+        env="LISTENER_MODE", default="both"
+    )
     service_host: str = _env_field(
         env=("SERVICE_HOST", "LNSWITCHBOARD_BIND_ADDRESS"),
         default="127.0.0.1",

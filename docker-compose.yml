@@ -1,6 +1,6 @@
 services:
   permissions-init:
-    image: alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc22}
     container_name: lnswitchboard-permissions-init
     user: "0:0"
     network_mode: none
@@ -13,26 +13,7 @@ services:
       - FOWNER
     security_opt:
       - no-new-privileges:true
-    command:
-      - sh
-      - -c
-      - |
-        set -eu
-        test -z "$$(find /app-secrets /tailscale-control /tailscale-state -xdev ! -type d ! -type f -print)"
-        find /app-secrets /tailscale-control /tailscale-state -xdev -type f \
-          -exec sh -ec 'for path do [ "$$(stat -c %h "$$path")" = 1 ] || exit 65; done' sh '{}' +
-        install -d -m 0700 -o 1000 -g 1000 /app-secrets
-        install -d -m 0700 -o 1000 -g 1000 /app-secrets/cloudflare-mesh
-        install -d -m 0700 -o 1000 -g 1000 /tailscale-control
-        install -d -m 0700 -o 1000 -g 1000 /tailscale-control/control
-        install -d -m 0700 -o 1000 -g 1000 /tailscale-control/status
-        install -d -m 0700 -o 1000 -g 1000 /tailscale-state
-        chown -R -h 1000:1000 /app-secrets /tailscale-control /tailscale-state
-        find /app-secrets -xdev -type d -exec chmod 0700 '{}' +
-        find /app-secrets -xdev -type f -exec chmod 0600 '{}' +
-        if [ -f /app-secrets/cloudflare-mesh/node.env ]; then
-          chmod 0640 /app-secrets/cloudflare-mesh/node.env
-        fi
+    entrypoint: ["/usr/local/bin/lnswitchboard-prepare-state"]
     volumes:
       - ./secrets:/app-secrets
       - tailscale-control:/tailscale-control
@@ -55,6 +36,7 @@ services:
     tmpfs:
       - /tmp:size=64m,mode=1777
     environment:
+      LISTENER_MODE: admin
       SERVICE_PORT: 22121
       PUBLIC_SERVICE_PORT: 21212
       LND_HOST: LND_HOST_IP
@@ -66,7 +48,7 @@ services:
       TRUSTED_HOSTS: "${TRUSTED_HOSTS:-localhost,127.0.0.1,[::1]}"
       CLOUDFLARED_CONNECTOR_ENABLED: "true"
       CLOUDFLARED_TOKEN_PATH: /app/secrets/cloudflare-mesh/node.env
-      CLOUDFLARED_ORIGIN_URL: http://lnswitchboard:21212
+      CLOUDFLARED_ORIGIN_URL: http://lnswitchboard-public:21212
       CLOUDFLARED_TOKEN_GID: "${CLOUDFLARED_TOKEN_GID:-1000}"
       CLOUDFLARE_OAUTH_CLIENT_ID: "${CLOUDFLARE_OAUTH_CLIENT_ID:-placeholder-client-id}"
       CLOUDFLARE_OAUTH_SCOPE: "${CLOUDFLARE_OAUTH_SCOPE:-offline_access account-settings.read zone.read dns.read dns.write workers-scripts.read workers-scripts.write workers-scripts.bind connectivity-directory.bind workers-routes.read workers-routes.write teams-connector-warp.read teams-connector-warp.write teams.read teams.write access.read access.write}"
@@ -81,11 +63,54 @@ services:
       - ${APP_LIGHTNING_NODE_DATA_DIR:-/app-data/lightning/data/lnd}:/lnd:ro
     ports:
       - "${LNSWITCHBOARD_BIND_ADDRESS:-127.0.0.1}:22121:22121"
-      - "${PUBLIC_SERVICE_PORT:-21212}:21212"
     networks:
       default:
         aliases:
           - lns.internal
+
+  lnswitchboard-public:
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc22}
+    container_name: lnswitchboard-public
+    restart: unless-stopped
+    depends_on:
+      permissions-init:
+        condition: service_completed_successfully
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      LISTENER_MODE: public
+      SERVICE_PORT: 22121
+      PUBLIC_SERVICE_PORT: 21212
+      LND_HOST: LND_HOST_IP
+      LND_GRPC_PORT: 10009
+      LND_TLS_PATH: /lnd/tls.cert
+      LND_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/invoice.macaroon
+      LND_READONLY_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/readonly.macaroon
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      TRUSTED_HOSTS: "${TRUSTED_HOSTS:-localhost,127.0.0.1,[::1]}"
+      CLOUDFLARED_CONNECTOR_ENABLED: "false"
+      TAILSCALE_CONNECTOR_ENABLED: "false"
+    volumes:
+      - ./secrets:/app/secrets:rw
+      - ${APP_LIGHTNING_NODE_DATA_DIR:-/app-data/lightning/data/lnd}:/lnd:ro
+    ports:
+      - "${PUBLIC_SERVICE_PORT:-21212}:21212"
+    networks:
+      cloudflare-egress:
+        aliases:
+          - lnswitchboard-public
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 21212), 2).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   cloudflare-mesh:
     image: cloudflare/mesh:2026.7.0@sha256:18fad6d500e8ca48b7e4d5ae1905d65e8a50c1f5f5e21eba020d54d5cbf82571
@@ -99,6 +124,8 @@ services:
       permissions-init:
         condition: service_completed_successfully
       lnswitchboard:
+        condition: service_healthy
+      lnswitchboard-public:
         condition: service_healthy
     cap_drop:
       - ALL
@@ -117,6 +144,8 @@ services:
       - ./scripts/mesh-entrypoint.sh:/opt/lnswitchboard/mesh-entrypoint.sh:ro
       - ./secrets/cloudflare-mesh:/run/lnswitchboard:ro
       - cloudflare-mesh-state:/var/lib/cloudflare-warp
+    networks:
+      - cloudflare-egress
 
   tailscale:
     image: tailscale/tailscale:v1.102.2@sha256:321ce041508c19079b57a28b6666c8d81ab0b08accc0a2585b3ab663d557ac24
@@ -161,3 +190,7 @@ volumes:
   tailscale-state:
   tailscale-control:
   cloudflare-mesh-state:
+
+networks:
+  cloudflare-egress:
+    driver: bridge

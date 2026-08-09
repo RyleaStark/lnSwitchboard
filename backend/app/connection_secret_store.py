@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
-import stat
 from pathlib import Path
 from typing import Any, Mapping
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from .secure_files import create_private_file, read_private_file
 from .sqlite_utils import sqlite_connection
 
 
@@ -19,63 +18,16 @@ class ConnectionSecretStore:
     def __init__(self, database_path: Path, key_path: Path) -> None:
         self.database_path = Path(database_path)
         self.key_path = Path(key_path)
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self.key_path.parent.mkdir(parents=True, exist_ok=True)
         self._fernet = Fernet(self._load_or_create_key())
         self._init_schema()
 
     def _load_or_create_key(self) -> bytes:
-        creation_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        creation_flags |= getattr(os, "O_CLOEXEC", 0)
-        creation_flags |= getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(self.key_path, creation_flags, 0o600)
-        except FileExistsError:
-            pass
-        else:
-            try:
-                generated = memoryview(Fernet.generate_key())
-                while generated:
-                    generated = generated[os.write(descriptor, generated) :]
-                if hasattr(os, "fchmod"):
-                    os.fchmod(descriptor, 0o600)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-
-        read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
-        before: os.stat_result | None = None
-        if nofollow:
-            read_flags |= nofollow
-        else:
-            before = os.lstat(self.key_path)
-            if stat.S_ISLNK(before.st_mode):
-                raise OSError("Connection secret key path must not be a symbolic link")
-        try:
-            descriptor = os.open(self.key_path, read_flags)
-        except OSError as exc:
-            if self.key_path.is_symlink():
-                raise OSError(
-                    "Connection secret key path must not be a symbolic link"
-                ) from exc
-            raise
-        try:
-            opened = os.fstat(descriptor)
-            if not stat.S_ISREG(opened.st_mode):
-                raise OSError("Connection secret key path must be a regular file")
-            if opened.st_nlink != 1:
-                raise OSError("Connection secret key path must not have hard links")
-            if before is not None and (
-                opened.st_dev != before.st_dev or opened.st_ino != before.st_ino
-            ):
-                raise OSError("Connection secret key path changed while opening")
-            if hasattr(os, "fchmod"):
-                os.fchmod(descriptor, 0o600)
-            with os.fdopen(os.dup(descriptor), "rb") as key_file:
-                key = key_file.read().strip()
-        finally:
-            os.close(descriptor)
+        generated = Fernet.generate_key()
+        key = (
+            generated
+            if create_private_file(self.key_path, generated, mode=0o600)
+            else read_private_file(self.key_path, chmod=True).strip()
+        )
         Fernet(key)  # Validate before accepting it for credential encryption.
         return key
 

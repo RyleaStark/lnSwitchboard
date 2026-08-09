@@ -1,4 +1,4 @@
-"""Launch both lnSwitchboard HTTP listeners in one Uvicorn process."""
+"""Launch the configured lnSwitchboard HTTP listener set."""
 
 from __future__ import annotations
 
@@ -23,18 +23,22 @@ def _listener(host: str, port: int) -> socket.socket:
 
 def main() -> None:
     settings = get_settings()
-    if settings.service_port == settings.public_service_port:
+    if settings.listener_mode == "both" and settings.service_port == settings.public_service_port:
         raise ValueError("SERVICE_PORT and PUBLIC_SERVICE_PORT must be different")
-
-    listeners = [
-        _listener(settings.service_host, settings.service_port),
-        _listener(settings.public_service_host, settings.public_service_port),
-    ]
+    endpoints = {
+        "admin": [(settings.service_host, settings.service_port)],
+        "public": [(settings.public_service_host, settings.public_service_port)],
+        "both": [
+            (settings.service_host, settings.service_port),
+            (settings.public_service_host, settings.public_service_port),
+        ],
+    }[settings.listener_mode]
+    listeners = [_listener(host, port) for host, port in endpoints]
     try:
         config = uvicorn.Config(
             app=app,
-            host=settings.service_host,
-            port=settings.service_port,
+            host=endpoints[0][0],
+            port=endpoints[0][1],
             proxy_headers=False,
             access_log=False,
         )

@@ -216,6 +216,11 @@ def _get_admin_proxy_client(request: Request, cidrs: str) -> str | None:
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.data_store_path.parent)
+    if settings.listener_mode == "public":
+        # The public-only container serves LNURL/NIP-05 requests. The admin
+        # container owns settlement workers, retries, and provider recovery.
+        yield
+        return
     ln_client = await get_ln_client_dep()
     storage = await get_log_storage_dep()
     webhook_dispatcher = await get_webhook_dispatcher_dep()
