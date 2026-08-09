@@ -320,6 +320,7 @@ def test_cloudflare_query_callback_accepts_ipv4_and_ipv6_loopback(
         "https://xn--0.example/callback/",
         "https://xn--abc.example/callback/",
         "https://xn--bbd.example/callback/",
+        "https://xn--ls8h.example/callback/",
         "https://oauth.example/%/",
         "https://oauth.example/%zz/",
     ],

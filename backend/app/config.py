@@ -411,6 +411,10 @@ class Settings(BaseSettings):
                     )
                     if lowered.startswith("xn--"):
                         try:
+                            # Deliberately use strict IDNA2008 rather than browser-permissive
+                            # emoji-domain handling. Remote callback DNS names are a security
+                            # boundary, so disallowed Unicode A-labels fail closed even when a
+                            # browser would navigate to them.
                             unicode_label = idna.decode(
                                 lowered.encode("ascii"), uts46=False, strict=True
                             )
