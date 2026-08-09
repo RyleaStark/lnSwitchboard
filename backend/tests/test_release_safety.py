@@ -35,9 +35,12 @@ def test_initializer_removes_only_its_owned_stale_public_socket(tmp_path) -> Non
     namespace = runpy.run_path(
         str(ROOT / "scripts" / "lnswitchboard-prepare-state")
     )
-    namespace["prepare_public_socket_root"].__globals__["open_directory"] = (
-        lambda _path: os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    globals_dict = namespace["prepare_public_socket_root"].__globals__
+    globals_dict["open_directory"] = lambda _path: os.open(
+        root, os.O_RDONLY | os.O_DIRECTORY
     )
+    globals_dict["UID"] = os.getuid()
+    globals_dict["GID"] = os.getgid()
 
     namespace["prepare_public_socket_root"]()
 
