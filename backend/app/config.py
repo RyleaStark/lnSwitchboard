@@ -321,6 +321,27 @@ class Settings(BaseSettings):
             ) from exc
         return value
 
+    @field_validator("cloudflare_oauth_redirect_page")
+    @classmethod
+    def _validate_cloudflare_oauth_redirect_page(cls, value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+            _ = parsed.port
+            if not (
+                parsed.scheme == "https"
+                and parsed.hostname is not None
+                and parsed.username is None
+                and parsed.password is None
+                and not parsed.query
+                and not parsed.fragment
+            ):
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError(
+                "CLOUDFLARE_OAUTH_REDIRECT_PAGE must be a clean HTTPS callback URL"
+            ) from exc
+        return value
+
     @field_validator("max_sendable_sat")
     @classmethod
     def _validate_max_sendable(cls, value: int, info: ValidationInfo) -> int:

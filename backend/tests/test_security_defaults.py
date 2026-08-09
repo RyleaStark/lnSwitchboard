@@ -187,6 +187,34 @@ def test_cloudflare_query_callback_accepts_ipv4_and_ipv6_loopback(
     assert Settings().cloudflare_oauth_redirect_loopback == redirect_uri
 
 
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://oauth.example/callback/",
+        "https://user@oauth.example/callback/",
+        "https://oauth.example/callback/?next=admin",
+        "https://oauth.example/callback/#fragment",
+        "https:///callback/",
+    ],
+)
+def test_cloudflare_remote_callback_requires_a_clean_https_page(
+    monkeypatch: pytest.MonkeyPatch, redirect_uri: str
+) -> None:
+    monkeypatch.setenv("CLOUDFLARE_OAUTH_REDIRECT_PAGE", redirect_uri)
+
+    with pytest.raises(ValueError, match="HTTPS"):
+        Settings()
+
+
+def test_cloudflare_remote_callback_accepts_a_clean_https_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redirect_uri = "https://oauth.lnswitchboard.app/callback/"
+    monkeypatch.setenv("CLOUDFLARE_OAUTH_REDIRECT_PAGE", redirect_uri)
+
+    assert Settings().cloudflare_oauth_redirect_page == redirect_uri
+
+
 def test_default_cloudflare_oauth_scope_matches_registered_capabilities(
     monkeypatch,
 ) -> None:
