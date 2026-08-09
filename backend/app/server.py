@@ -58,17 +58,23 @@ class BoundedH11Protocol(H11Protocol):
         self._raw_request_head_complete = False
         self._holds_request_slot = False
         self._request_head_timeout: asyncio.TimerHandle | None = None
-        self._close_after_response = os.environ.get("LISTENER_MODE", "both").strip().lower() in {
-            "both",
-            "public",
-        }
+        self._public_transport = False
+        self._close_after_response = False
 
     def connection_made(self, transport: asyncio.Transport) -> None:
         super().connection_made(transport)
+        listener_mode = os.environ.get("LISTENER_MODE", "both").strip().lower()
+        self._public_transport = listener_mode == "public" or (
+            listener_mode == "both"
+            and self.server is not None
+            and self.server[1] == get_settings().public_service_port
+        )
+        self._close_after_response = self._public_transport
         if len(self.connections) > _MAX_RAW_CONNECTIONS:
             self._reject(503, b"Service Unavailable", b"Connection limit reached")
             return
-        self._arm_request_head_timeout()
+        if self._public_transport:
+            self._arm_request_head_timeout()
 
     def connection_lost(self, exc: Exception | None) -> None:
         self._cancel_request_head_timeout()
@@ -109,39 +115,47 @@ class BoundedH11Protocol(H11Protocol):
         self.transport.close()
 
     def data_received(self, data: bytes) -> None:
-        if not self._raw_request_head_complete:
-            remaining = _MAX_REQUEST_HEAD_BUFFER + 1 - len(self._raw_request_head)
-            if remaining > 0:
-                self._raw_request_head.extend(data[:remaining])
-            rejection = _request_head_rejection(bytes(self._raw_request_head))
-            if rejection is not None:
-                reason = b"URI Too Long" if rejection == 414 else b"Request Header Fields Too Large"
-                body = b"Request target too large" if rejection == 414 else b"Request headers too large"
-                self._reject(rejection, reason, body)
-                return
-            self._raw_request_head_complete = b"\r\n\r\n" in self._raw_request_head
-            if self._raw_request_head_complete:
-                self._cancel_request_head_timeout()
-                active_requests = sum(
-                    bool(getattr(connection, "_holds_request_slot", False))
-                    for connection in self.connections
-                )
-                if active_requests >= _MAX_ACTIVE_REQUESTS:
-                    self._reject(503, b"Service Unavailable", b"Request limit reached")
-                    return
-                self._holds_request_slot = True
-        super().data_received(data)
+        if not self._public_transport:
+            super().data_received(data)
+            return
+        if self._raw_request_head_complete:
+            # Public requests are bodyless and connections close after one response.
+            # Never give h11 a body or pipelined second head to buffer behind the first.
+            return
+        remaining = _MAX_REQUEST_HEAD_BUFFER + 1 - len(self._raw_request_head)
+        if remaining > 0:
+            self._raw_request_head.extend(data[:remaining])
+        rejection = _request_head_rejection(bytes(self._raw_request_head))
+        if rejection is not None:
+            reason = b"URI Too Long" if rejection == 414 else b"Request Header Fields Too Large"
+            body = b"Request target too large" if rejection == 414 else b"Request headers too large"
+            self._reject(rejection, reason, body)
+            return
+        head_end = self._raw_request_head.find(b"\r\n\r\n")
+        if head_end < 0:
+            return
+        self._raw_request_head_complete = True
+        self._cancel_request_head_timeout()
+        active_requests = sum(
+            bool(getattr(connection, "_holds_request_slot", False))
+            for connection in self.connections
+        )
+        if active_requests >= _MAX_ACTIVE_REQUESTS:
+            self._reject(503, b"Service Unavailable", b"Request limit reached")
+            return
+        self._holds_request_slot = True
+        super().data_received(bytes(self._raw_request_head[: head_end + 4]))
 
     def on_response_complete(self) -> None:
         self._raw_request_head.clear()
         self._raw_request_head_complete = False
         self._holds_request_slot = False
-        if self._close_after_response:
-            # Prevent a pipelined second request from bypassing raw-head checks
-            # after h11 has buffered it behind the first request.
-            self.transport.close()
         super().on_response_complete()
-        if not self._close_after_response and not self.transport.is_closing():
+        if self._close_after_response:
+            # Public h11 never receives bytes after the first complete head, so
+            # normal response completion is safe before closing the transport.
+            self.transport.close()
+        elif self._public_transport and not self.transport.is_closing():
             self._arm_request_head_timeout()
 
 

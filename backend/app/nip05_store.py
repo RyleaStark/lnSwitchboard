@@ -313,7 +313,15 @@ class NostrIdentityStore:
                     if normalized_local is None:
                         rows = conn.execute(
                             """
-                            SELECT id, local_part, domain, npub, pubkey_hex,
+                            SELECT id,
+                                   CASE WHEN length(CAST(local_part AS BLOB)) <= 64
+                                        THEN local_part ELSE '' END AS local_part,
+                                   CASE WHEN length(CAST(domain AS BLOB)) <= 253
+                                        THEN domain ELSE '' END AS domain,
+                                   CASE WHEN length(CAST(npub AS BLOB)) <= 128
+                                        THEN npub ELSE '' END AS npub,
+                                   CASE WHEN length(CAST(pubkey_hex AS BLOB)) = 64
+                                        THEN pubkey_hex ELSE '' END AS pubkey_hex,
                                    CASE WHEN length(CAST(relays AS BLOB)) <= 16384
                                         THEN relays ELSE '[]' END AS relays,
                                    created_at, updated_at
@@ -327,7 +335,15 @@ class NostrIdentityStore:
                     else:
                         rows = conn.execute(
                             """
-                            SELECT id, local_part, domain, npub, pubkey_hex,
+                            SELECT id,
+                                   CASE WHEN length(CAST(local_part AS BLOB)) <= 64
+                                        THEN local_part ELSE '' END AS local_part,
+                                   CASE WHEN length(CAST(domain AS BLOB)) <= 253
+                                        THEN domain ELSE '' END AS domain,
+                                   CASE WHEN length(CAST(npub AS BLOB)) <= 128
+                                        THEN npub ELSE '' END AS npub,
+                                   CASE WHEN length(CAST(pubkey_hex AS BLOB)) = 64
+                                        THEN pubkey_hex ELSE '' END AS pubkey_hex,
                                    CASE WHEN length(CAST(relays AS BLOB)) <= 16384
                                         THEN relays ELSE '[]' END AS relays,
                                    created_at, updated_at

@@ -28,6 +28,7 @@ public_router = APIRouter(include_in_schema=False)
 
 LOCAL_PART_PATTERN = re.compile(r"^[a-z0-9._-]+$")
 DOMAIN_PATTERN = re.compile(r"^[a-z0-9.-]+$")
+PUBKEY_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 ALLOWED_RELAY_SCHEMES = {"ws", "wss"}
 MAX_RELAYS = 16
 MAX_RELAY_URL_LENGTH = 512
@@ -133,6 +134,18 @@ def _public_relays(relays: Any) -> List[str]:
     return normalized
 
 
+def _valid_public_identity(entry: Dict[str, Any]) -> bool:
+    local_part = entry.get("local_part")
+    pubkey_hex = entry.get("pubkey_hex")
+    return (
+        isinstance(local_part, str)
+        and len(local_part) <= MAX_LOCAL_PART_LENGTH
+        and LOCAL_PART_PATTERN.fullmatch(local_part) is not None
+        and isinstance(pubkey_hex, str)
+        and PUBKEY_HEX_PATTERN.fullmatch(pubkey_hex) is not None
+    )
+
+
 def _serialize_identity(record: Dict[str, Any]) -> Dict[str, Any]:
     identifier = f"{record['local_part']}@{record['domain']}"
     return {
@@ -231,9 +244,16 @@ async def nostr_well_known(
 ) -> JSONResponse:
     domain = _resolve_domain(request)
     target = name.strip().lower() if name else None
-    entries = (
-        await store.get_public_by_domain(domain, local_part=target) if domain else []
+    target_is_valid = target is None or (
+        len(target) <= MAX_LOCAL_PART_LENGTH
+        and LOCAL_PART_PATTERN.fullmatch(target) is not None
     )
+    entries = (
+        await store.get_public_by_domain(domain, local_part=target)
+        if domain and target_is_valid
+        else []
+    )
+    entries = [entry for entry in entries if _valid_public_identity(entry)]
     if name:
         entries = [entry for entry in entries if entry["local_part"] == target]
     names = {entry["local_part"]: entry["pubkey_hex"] for entry in entries}
@@ -261,11 +281,11 @@ async def public_profile(
 ) -> JSONResponse:
     domain = _resolve_domain(request)
     local = local_part.strip().lower()
-    if not LOCAL_PART_PATTERN.fullmatch(local):
+    if len(local) > MAX_LOCAL_PART_LENGTH or not LOCAL_PART_PATTERN.fullmatch(local):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
     identity = None
     for entry in await identity_store.get_public_by_domain(domain, local_part=local):
-        if entry.get("local_part") == local:
+        if _valid_public_identity(entry) and entry.get("local_part") == local:
             identity = entry
             break
     address = await address_store.get_by_identifier(local_part=local, domain=domain)

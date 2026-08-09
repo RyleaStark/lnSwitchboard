@@ -19,7 +19,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from .deps import (
@@ -602,6 +602,100 @@ if STATIC_DIR.exists():
     admin_app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 
+class StandalonePublicContractApp:
+    """Apply the split gateway's bounded HTTP contract in standalone both mode."""
+
+    MAX_HEADER_COUNT = 100
+    MAX_HEADER_BYTES = 16 * 1024
+    MAX_RESPONSE_BYTES = 1024 * 1024
+
+    def __init__(self, target: ASGIApp) -> None:
+        self.target = target
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.target(scope, receive, send)
+            return
+        headers = list(scope.get("headers", []))
+        if len(headers) > self.MAX_HEADER_COUNT or sum(
+            len(name) + len(value) for name, value in headers
+        ) > self.MAX_HEADER_BYTES:
+            await PlainTextResponse("Request headers too large", status_code=431)(
+                scope, receive, send
+            )
+            return
+        method = str(scope.get("method", ""))
+        if method not in {"GET", "HEAD"}:
+            await PlainTextResponse("Method not allowed", status_code=405)(scope, receive, send)
+            return
+        if any(
+            name.lower() == b"transfer-encoding"
+            or (name.lower() == b"content-length" and value.strip() not in {b"", b"0"})
+            for name, value in headers
+        ):
+            await PlainTextResponse("Request body not permitted", status_code=413)(
+                scope, receive, send
+            )
+            return
+
+        target_scope = dict(scope)
+        if method == "HEAD":
+            target_scope["method"] = "GET"
+        response_start: Message | None = None
+        response_body = bytearray()
+        response_too_large = False
+
+        async def capture(message: Message) -> None:
+            nonlocal response_start, response_too_large
+            if message["type"] == "http.response.start":
+                response_start = message
+                return
+            if message["type"] == "http.response.body":
+                chunk = message.get("body", b"")
+                if len(response_body) + len(chunk) > self.MAX_RESPONSE_BYTES:
+                    response_too_large = True
+                    return
+                response_body.extend(chunk)
+
+        await self.target(target_scope, receive, capture)
+        if response_too_large:
+            await PlainTextResponse("Public response too large", status_code=502)(
+                scope, receive, send
+            )
+            return
+        if response_start is None:  # pragma: no cover - defensive ASGI guard
+            await PlainTextResponse("Public response unavailable", status_code=502)(
+                scope, receive, send
+            )
+            return
+        response_headers = [
+            (name, value)
+            for name, value in response_start.get("headers", [])
+            if name.lower() not in {b"content-length", b"transfer-encoding"}
+        ]
+        if len(response_headers) > self.MAX_HEADER_COUNT or sum(
+            len(name) + len(value) for name, value in response_headers
+        ) > self.MAX_HEADER_BYTES:
+            await PlainTextResponse("Public response headers too large", status_code=502)(
+                scope, receive, send
+            )
+            return
+        response_headers.append((b"content-length", str(len(response_body)).encode("ascii")))
+        await send(
+            {
+                "type": "http.response.start",
+                "status": response_start["status"],
+                "headers": response_headers,
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"" if method == "HEAD" else bytes(response_body),
+            }
+        )
+
+
 class ListenerDispatchApp:
     """Dispatch requests to route-isolated ASGI apps by local listener port."""
 
@@ -622,5 +716,5 @@ class ListenerDispatchApp:
 
 app = ListenerDispatchApp(
     admin=admin_app,
-    public=public_app,
+    public=StandalonePublicContractApp(public_app),
 )

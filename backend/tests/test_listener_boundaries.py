@@ -28,6 +28,9 @@ class AppClient:
     def get(self, path: str, **kwargs: Any) -> httpx.Response:
         return self.request("GET", path, **kwargs)
 
+    def head(self, path: str, **kwargs: Any) -> httpx.Response:
+        return self.request("HEAD", path, **kwargs)
+
     def post(self, path: str, **kwargs: Any) -> httpx.Response:
         return self.request("POST", path, **kwargs)
 
@@ -59,6 +62,21 @@ def test_listener_route_tables_are_separate(listener_clients: tuple[AppClient, A
     assert public.get("/api/health").status_code == 404
     assert public.get("/").status_code == 404
     assert public.get("/docs").status_code == 404
+
+
+def test_standalone_public_listener_enforces_bodyless_get_and_head_contract(
+    listener_clients: tuple[AppClient, AppClient],
+) -> None:
+    _admin, public = listener_clients
+    get_response = public.get("/missing-public")
+    head_response = public.head("/missing-public")
+
+    assert get_response.status_code == 404
+    assert head_response.status_code == 404
+    assert head_response.content == b""
+    assert head_response.headers["content-length"] == str(len(get_response.content))
+    assert public.get("/.well-known/nostr.json", content=b"x").status_code == 413
+    assert public.post("/.well-known/nostr.json").status_code == 405
 
 
 def test_dispatcher_uses_configured_public_port(monkeypatch: pytest.MonkeyPatch) -> None:

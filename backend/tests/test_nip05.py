@@ -316,6 +316,18 @@ def test_public_nip05_bounds_legacy_rows_before_python_materialization(
         )
         for index in range(40)
     ]
+    rows.append(
+        (
+            "legacy-oversized-local",
+            "a" * (1024 * 1024),
+            "testserver",
+            SAMPLE_NPUB,
+            SAMPLE_HEX,
+            "[]",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+        )
+    )
     with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.executemany(
             """
@@ -338,7 +350,9 @@ def test_public_nip05_bounds_legacy_rows_before_python_materialization(
 
     aggregate = test_client.get("/.well-known/nostr.json")
     assert aggregate.status_code == 200
-    assert len(aggregate.json()["names"]) == 16
+    assert len(aggregate.content) < 1024 * 1024
+    assert len(aggregate.json()["names"]) <= 16
+    assert all(len(name) <= 64 for name in aggregate.json()["names"])
     assert "relays" not in aggregate.json()
 
     exact = test_client.get(
