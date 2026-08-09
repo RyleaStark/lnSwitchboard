@@ -56,7 +56,9 @@ def test_production_server_disables_query_bearing_access_logs(monkeypatch) -> No
     assert captured["access_log"] is False
     assert captured["http"] is server.BoundedH11Protocol
     assert captured["h11_max_incomplete_event_size"] == 16 * 1024
-    assert captured["limit_concurrency"] == 8
+    assert server._MAX_RAW_CONNECTIONS == 64
+    assert server._MAX_ACTIVE_REQUESTS == 8
+    assert server._REQUEST_HEAD_TIMEOUT_SECONDS == 5.0
 
 
 @pytest.mark.parametrize(

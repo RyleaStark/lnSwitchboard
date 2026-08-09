@@ -17,7 +17,6 @@ from ..nip05_store import (
     IdentityConflictError,
     IdentityDomainLimitError,
     IdentityNotFoundError,
-    MAX_IDENTITIES_PER_DOMAIN,
     NostrIdentityStore,
 )
 from ..nip05_utils import NpubFormatError, hex_to_npub, npub_to_hex
@@ -231,12 +230,12 @@ async def nostr_well_known(
     store: NostrIdentityStore = Depends(get_nip05_store_dep),
 ) -> JSONResponse:
     domain = _resolve_domain(request)
-    entries = await store.get_by_domain(domain) if domain else []
+    target = name.strip().lower() if name else None
+    entries = (
+        await store.get_public_by_domain(domain, local_part=target) if domain else []
+    )
     if name:
-        target = name.strip().lower()
         entries = [entry for entry in entries if entry["local_part"] == target]
-    else:
-        entries = entries[:MAX_IDENTITIES_PER_DOMAIN]
     names = {entry["local_part"]: entry["pubkey_hex"] for entry in entries}
     relays_map: Dict[str, List[str]] = {}
     for entry in entries:
@@ -265,7 +264,7 @@ async def public_profile(
     if not LOCAL_PART_PATTERN.fullmatch(local):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
     identity = None
-    for entry in await identity_store.get_by_domain(domain):
+    for entry in await identity_store.get_public_by_domain(domain, local_part=local):
         if entry.get("local_part") == local:
             identity = entry
             break

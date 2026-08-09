@@ -110,6 +110,9 @@ class NostrIdentityStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_nostr_identity_domain ON nostr_identities(domain)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nostr_identity_public ON nostr_identities(domain, local_part)"
+            )
 
     def _norm(self, value: str) -> str:
         return value.strip().lower()
@@ -296,6 +299,47 @@ class NostrIdentityStore:
                 return []
         records = [self._row_to_dict(row) for row in rows]
         return deepcopy(records)
+
+    async def get_public_by_domain(
+        self, domain: str, *, local_part: str | None = None
+    ) -> List[Dict[str, Any]]:
+        """Read a bounded public projection, including legacy oversized rows safely."""
+
+        normalized_domain = self._norm(domain)
+        normalized_local = self._norm(local_part) if local_part is not None else None
+        async with self._lock:
+            try:
+                with self._connect() as conn:
+                    if normalized_local is None:
+                        rows = conn.execute(
+                            """
+                            SELECT id, local_part, domain, npub, pubkey_hex,
+                                   CASE WHEN length(CAST(relays AS BLOB)) <= 16384
+                                        THEN relays ELSE '[]' END AS relays,
+                                   created_at, updated_at
+                            FROM nostr_identities
+                            WHERE domain = ?
+                            ORDER BY local_part
+                            LIMIT ?
+                            """,
+                            (normalized_domain, MAX_IDENTITIES_PER_DOMAIN),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            """
+                            SELECT id, local_part, domain, npub, pubkey_hex,
+                                   CASE WHEN length(CAST(relays AS BLOB)) <= 16384
+                                        THEN relays ELSE '[]' END AS relays,
+                                   created_at, updated_at
+                            FROM nostr_identities
+                            WHERE domain = ? AND local_part = ?
+                            LIMIT 1
+                            """,
+                            (normalized_domain, normalized_local),
+                        ).fetchall()
+            except sqlite3.Error:
+                return []
+        return deepcopy([self._row_to_dict(row) for row in rows])
 
     async def has_domain(self, domain: str) -> bool:
         normalized_domain = self._norm(domain)

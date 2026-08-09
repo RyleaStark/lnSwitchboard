@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import socket
+import asyncio
 import os
+import socket
 
 import uvicorn
 from uvicorn.protocols.http.h11_impl import H11Protocol
@@ -17,6 +18,9 @@ _MAX_REQUEST_HEADER_LINE_BYTES = 8 * 1024
 _MAX_REQUEST_HEADER_BYTES = 16 * 1024
 _MAX_REQUEST_HEADER_COUNT = 100
 _MAX_REQUEST_HEAD_BUFFER = _MAX_REQUEST_TARGET_BYTES + _MAX_REQUEST_HEADER_BYTES + 16
+_MAX_RAW_CONNECTIONS = 64
+_MAX_ACTIVE_REQUESTS = 8
+_REQUEST_HEAD_TIMEOUT_SECONDS = 5.0
 
 
 def _request_head_rejection(data: bytes) -> int | None:
@@ -52,10 +56,57 @@ class BoundedH11Protocol(H11Protocol):
         super().__init__(*args, **kwargs)
         self._raw_request_head = bytearray()
         self._raw_request_head_complete = False
+        self._holds_request_slot = False
+        self._request_head_timeout: asyncio.TimerHandle | None = None
         self._close_after_response = os.environ.get("LISTENER_MODE", "both").strip().lower() in {
             "both",
             "public",
         }
+
+    def connection_made(self, transport: asyncio.Transport) -> None:
+        super().connection_made(transport)
+        if len(self.connections) > _MAX_RAW_CONNECTIONS:
+            self._reject(503, b"Service Unavailable", b"Connection limit reached")
+            return
+        self._arm_request_head_timeout()
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._cancel_request_head_timeout()
+        self._holds_request_slot = False
+        super().connection_lost(exc)
+
+    def _arm_request_head_timeout(self) -> None:
+        self._cancel_request_head_timeout()
+        self._request_head_timeout = self.loop.call_later(
+            _REQUEST_HEAD_TIMEOUT_SECONDS,
+            self._request_head_timed_out,
+        )
+
+    def _cancel_request_head_timeout(self) -> None:
+        if self._request_head_timeout is not None:
+            self._request_head_timeout.cancel()
+            self._request_head_timeout = None
+
+    def _request_head_timed_out(self) -> None:
+        self._request_head_timeout = None
+        if not self._raw_request_head_complete and not self.transport.is_closing():
+            self._reject(408, b"Request Timeout", b"Request headers timed out")
+
+    def _reject(self, status: int, reason: bytes, body: bytes) -> None:
+        self._cancel_request_head_timeout()
+        if self.transport.is_closing():
+            return
+        self.transport.write(
+            b"HTTP/1.1 "
+            + str(status).encode("ascii")
+            + b" "
+            + reason
+            + b"\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: "
+            + str(len(body)).encode("ascii")
+            + b"\r\n\r\n"
+            + body
+        )
+        self.transport.close()
 
     def data_received(self, data: bytes) -> None:
         if not self._raw_request_head_complete:
@@ -66,29 +117,32 @@ class BoundedH11Protocol(H11Protocol):
             if rejection is not None:
                 reason = b"URI Too Long" if rejection == 414 else b"Request Header Fields Too Large"
                 body = b"Request target too large" if rejection == 414 else b"Request headers too large"
-                self.transport.write(
-                    b"HTTP/1.1 "
-                    + str(rejection).encode("ascii")
-                    + b" "
-                    + reason
-                    + b"\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: "
-                    + str(len(body)).encode("ascii")
-                    + b"\r\n\r\n"
-                    + body
-                )
-                self.transport.close()
+                self._reject(rejection, reason, body)
                 return
             self._raw_request_head_complete = b"\r\n\r\n" in self._raw_request_head
+            if self._raw_request_head_complete:
+                self._cancel_request_head_timeout()
+                active_requests = sum(
+                    bool(getattr(connection, "_holds_request_slot", False))
+                    for connection in self.connections
+                )
+                if active_requests >= _MAX_ACTIVE_REQUESTS:
+                    self._reject(503, b"Service Unavailable", b"Request limit reached")
+                    return
+                self._holds_request_slot = True
         super().data_received(data)
 
     def on_response_complete(self) -> None:
         self._raw_request_head.clear()
         self._raw_request_head_complete = False
+        self._holds_request_slot = False
         if self._close_after_response:
             # Prevent a pipelined second request from bypassing raw-head checks
             # after h11 has buffered it behind the first request.
             self.transport.close()
         super().on_response_complete()
+        if not self._close_after_response and not self.transport.is_closing():
+            self._arm_request_head_timeout()
 
 
 def _listener(host: str, port: int) -> socket.socket:
@@ -137,7 +191,6 @@ def main() -> None:
             access_log=False,
             http=BoundedH11Protocol,
             h11_max_incomplete_event_size=16 * 1024,
-            limit_concurrency=8,
         )
         uvicorn.Server(config).run(sockets=listeners)
     finally:

@@ -7,6 +7,7 @@ from contextlib import closing
 from fastapi.testclient import TestClient
 
 from ..app import config
+from ..app.nip05_store import NostrIdentityStore
 from backend.app.nip05_utils import hex_to_npub
 
 SAMPLE_HEX = "b0635d6a9851d3aed0cd6c495b282167acf761729078d975fc341b22650b07b9"
@@ -270,6 +271,82 @@ def test_well_known_filters_invalid_stored_relay_hints(test_client: TestClient):
     data = resp.json()
     assert data["names"] == {"legacy": SAMPLE_HEX}
     assert data["relays"][SAMPLE_HEX] == ["wss://relay.example.com"]
+
+
+def test_public_nip05_reads_use_the_bounded_legacy_query(
+    test_client: TestClient, monkeypatch
+):
+    create_identity(
+        test_client,
+        {
+            "local_part": "bounded-read",
+            "domain": "testserver",
+            "npub": SAMPLE_NPUB,
+            "relays": ["wss://relay.example.com"],
+        },
+    )
+
+    async def forbidden_unbounded_read(*_args, **_kwargs):
+        raise AssertionError("public route used unbounded get_by_domain")
+
+    monkeypatch.setattr(NostrIdentityStore, "get_by_domain", forbidden_unbounded_read)
+    response = test_client.get(
+        "/.well-known/nostr.json", params={"name": "bounded-read"}
+    )
+    assert response.status_code == 200
+    assert response.json()["names"] == {"bounded-read": SAMPLE_HEX}
+
+
+def test_public_nip05_bounds_legacy_rows_before_python_materialization(
+    test_client: TestClient,
+):
+    assert test_client.get("/.well-known/nostr.json").status_code == 200
+    db_path = config.get_settings().data_store_path
+    oversized_relays = json.dumps([f"wss://legacy.example/{'x' * (32 * 1024)}"])
+    rows = [
+        (
+            f"legacy-{index}",
+            f"legacy{index:03d}",
+            "testserver",
+            SAMPLE_NPUB,
+            SAMPLE_HEX,
+            oversized_relays,
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+        )
+        for index in range(40)
+    ]
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.executemany(
+            """
+            INSERT INTO nostr_identities
+                (id, local_part, domain, npub, pubkey_hex, relays, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        plan = " ".join(
+            str(value)
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT local_part FROM nostr_identities "
+                "WHERE domain = ? ORDER BY local_part LIMIT 16",
+                ("testserver",),
+            )
+            for value in row
+        )
+    assert "idx_nostr_identity_public" in plan
+
+    aggregate = test_client.get("/.well-known/nostr.json")
+    assert aggregate.status_code == 200
+    assert len(aggregate.json()["names"]) == 16
+    assert "relays" not in aggregate.json()
+
+    exact = test_client.get(
+        "/.well-known/nostr.json", params={"name": "legacy039"}
+    )
+    assert exact.status_code == 200
+    assert exact.json()["names"] == {"legacy039": SAMPLE_HEX}
+    assert "relays" not in exact.json()
 
 
 def test_public_profile_reports_ln_address_and_zap_readiness(test_client: TestClient):

@@ -108,8 +108,9 @@ async def proxy_public_request(request: Request, path: str) -> Response:
     if request.url.query:
         target = f"{target}?{request.url.query}"
     try:
+        backend_method = "GET" if request.method == "HEAD" else request.method
         async with request.app.state.backend_client.stream(
-            request.method, target, content=b"", headers=headers
+            backend_method, target, content=b"", headers=headers
         ) as backend:
             raw_response_headers = backend.headers.raw
             if len(raw_response_headers) > _MAX_PUBLIC_HEADER_COUNT or sum(
@@ -132,13 +133,16 @@ async def proxy_public_request(request: Request, path: str) -> Response:
                 if name.lower() not in _HOP_BY_HOP
                 and name.lower() not in response_nominated
                 and name.lower() != b"content-length"
+                and name.lower() != b"content-encoding"
             ]
             response_status = backend.status_code
     except httpx.HTTPError:
         return PlainTextResponse("Public backend unavailable", status_code=503)
 
+    if request.method == "HEAD":
+        response_headers.append((b"content-length", str(len(response_body)).encode("ascii")))
     response = Response(
-        content=bytes(response_body),
+        content=b"" if request.method == "HEAD" else bytes(response_body),
         status_code=response_status,
     )
     response.raw_headers = response_headers
