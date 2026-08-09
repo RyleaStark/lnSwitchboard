@@ -83,6 +83,10 @@ async def lifespan(app: FastAPI):
         follow_redirects=False,
         timeout=30.0,
     ) as client:
+        # The request admission budget includes every field forwarded over
+        # UDS; httpx's Accept/Encoding/Connection/User-Agent defaults would
+        # otherwise be appended after that check.
+        client.headers.clear()
         for _ in range(500):
             try:
                 await client.get("/", headers={"host": "localhost"})

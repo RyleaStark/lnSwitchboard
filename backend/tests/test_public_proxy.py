@@ -24,6 +24,20 @@ class BackendClient:
         )
 
 
+def test_cleared_httpx_client_preserves_the_admitted_header_set() -> None:
+    async def exercise() -> list[tuple[bytes, bytes]]:
+        async with httpx.AsyncClient(base_url="http://backend.internal") as client:
+            client.headers.clear()
+            admitted = [(b"host", b"backend.internal"), (b"x-admitted", b"value")]
+            request = client.build_request("GET", "/", content=b"", headers=admitted)
+            return request.headers.raw
+
+    assert asyncio.run(exercise()) == [
+        (b"host", b"backend.internal"),
+        (b"x-admitted", b"value"),
+    ]
+
+
 def test_public_gateway_forwards_only_gets_to_the_private_backend() -> None:
     async def exercise():
         backend = BackendClient()

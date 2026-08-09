@@ -336,7 +336,7 @@ class NostrIdentityStore:
                               AND length(CAST(local_part AS BLOB)) <= 64
                               AND length(CAST(domain AS BLOB)) <= 253
                               AND length(CAST(pubkey_hex AS BLOB)) = 64
-                            ORDER BY local_part
+                            ORDER BY nostr_identities.local_part
                             LIMIT ?
                             """,
                             (normalized_domain, MAX_IDENTITIES_PER_DOMAIN),

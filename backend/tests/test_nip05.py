@@ -348,12 +348,13 @@ def test_public_nip05_bounds_legacy_rows_before_python_materialization(
                 "AND length(CAST(local_part AS BLOB)) <= 64 "
                 "AND length(CAST(domain AS BLOB)) <= 253 "
                 "AND length(CAST(pubkey_hex AS BLOB)) = 64 "
-                "ORDER BY local_part LIMIT 16",
+                "ORDER BY nostr_identities.local_part LIMIT 16",
                 ("testserver",),
             )
             for value in row
         )
     assert "idx_nostr_identity_public_bounded" in plan
+    assert "TEMP B-TREE" not in plan.upper()
 
     aggregate = test_client.get("/.well-known/nostr.json")
     assert aggregate.status_code == 200
