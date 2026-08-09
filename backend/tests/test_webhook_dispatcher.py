@@ -172,7 +172,7 @@ def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> 
 
         class SecretStatusError(OutboundHTTPStatusError):
             def __str__(self) -> str:
-                return "PERSISTED_EXCEPTION_SECRET"
+                return "ClassShapedSecretError"
 
         async def sender(url, payload, headers):
             raise SecretStatusError(503, "PERSISTED_RESPONSE_SECRET")
@@ -217,7 +217,7 @@ def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> 
         for secret in (
             "PERSISTED_PATH_SECRET",
             "PERSISTED_QUERY_SECRET",
-            "PERSISTED_EXCEPTION_SECRET",
+            "ClassShapedSecretError",
             "PERSISTED_RESPONSE_SECRET",
         ):
             assert secret not in exposed
