@@ -610,6 +610,7 @@ def test_static_callback_page_has_no_external_resources():
         assert f"sha256-{digest}" in html
     assert "form-action 'none'" in html
     assert "base-uri 'none'" in html
-    # Fragment-first reading with query fallback.
+    # The remote page is fragment-only: query delivery would expose the code
+    # to the static host's request logs before JavaScript could scrub it.
     assert "location.hash" in html
-    assert "location.search" in html
+    assert "location.search" not in html
