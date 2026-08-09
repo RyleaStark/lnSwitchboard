@@ -681,22 +681,23 @@ class StandalonePublicContractApp:
                 scope, receive, send
             )
             return
+        raw_response_headers = list(response_start.get("headers", []))
+        if len(raw_response_headers) > self.MAX_HEADER_COUNT or sum(
+            len(name) + len(value) for name, value in raw_response_headers
+        ) > self.MAX_HEADER_BYTES:
+            await PlainTextResponse("Public response headers too large", status_code=502)(
+                scope, receive, send
+            )
+            return
         try:
             response_headers = sanitize_hop_by_hop_headers(
-                list(response_start.get("headers", [])),
+                raw_response_headers,
                 excluded={b"content-length", b"content-encoding"},
             )
         except ValueError:
             await PlainTextResponse(
                 "Malformed public response headers", status_code=502
             )(scope, receive, send)
-            return
-        if len(response_headers) > self.MAX_HEADER_COUNT or sum(
-            len(name) + len(value) for name, value in response_headers
-        ) > self.MAX_HEADER_BYTES:
-            await PlainTextResponse("Public response headers too large", status_code=502)(
-                scope, receive, send
-            )
             return
         response_headers.append((b"content-length", str(len(response_body)).encode("ascii")))
         await send(
