@@ -1,14 +1,56 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import runpy
 from pathlib import Path
 
+import pytest
 import yaml
 
 from backend.app.main import _periodic_log_cleanup
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _state_initializer_namespace() -> dict:
+    return runpy.run_path(str(ROOT / "scripts" / "lnswitchboard-prepare-state"))
+
+
+def test_initializer_moves_legacy_sqlite_bundle_into_public_state(tmp_path) -> None:
+    state = tmp_path / "public-state"
+    state.mkdir()
+    for suffix, payload in (("", b"main"), ("-wal", b"wal"), ("-shm", b"shm")):
+        (tmp_path / f"lnswitchboard.db{suffix}").write_bytes(payload)
+    namespace = _state_initializer_namespace()
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        namespace["migrate_public_state"](descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert not any(tmp_path.glob("lnswitchboard.db*"))
+    assert (state / "lnswitchboard.db").read_bytes() == b"main"
+    assert (state / "lnswitchboard.db-wal").read_bytes() == b"wal"
+    assert (state / "lnswitchboard.db-shm").read_bytes() == b"shm"
+
+
+def test_initializer_rejects_ambiguous_public_state_generation(tmp_path) -> None:
+    state = tmp_path / "public-state"
+    state.mkdir()
+    (tmp_path / "lnswitchboard.db").write_bytes(b"legacy")
+    (state / "lnswitchboard.db").write_bytes(b"current")
+    namespace = _state_initializer_namespace()
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(SystemExit, match="refused unsafe"):
+            namespace["migrate_public_state"](descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert (tmp_path / "lnswitchboard.db").read_bytes() == b"legacy"
+    assert (state / "lnswitchboard.db").read_bytes() == b"current"
 
 
 def test_idle_service_runs_periodic_retention_cleanup() -> None:
@@ -96,6 +138,7 @@ def test_primary_application_container_is_least_privilege() -> None:
     )
     assert app.get("privileged") is not True
     assert app["environment"]["LISTENER_MODE"] == "admin"
+    assert app["environment"]["DATA_STORE_PATH"] == "/app/state/lnswitchboard.db"
     assert app["ports"] == [
         "${LNSWITCHBOARD_BIND_ADDRESS:-127.0.0.1}:22121:22121"
     ]
@@ -111,12 +154,17 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert public["cap_drop"] == ["ALL"]
     assert public["security_opt"] == ["no-new-privileges:true"]
     assert public["environment"]["LISTENER_MODE"] == "public"
+    assert public["environment"]["DATA_STORE_PATH"] == "/app/state/lnswitchboard.db"
     assert public["depends_on"]["permissions-init"]["condition"] == (
         "service_completed_successfully"
     )
     assert public["depends_on"]["lnswitchboard"]["condition"] == "service_healthy"
     assert public["environment"]["CLOUDFLARED_CONNECTOR_ENABLED"] == "false"
     assert public["environment"]["TAILSCALE_CONNECTOR_ENABLED"] == "false"
+    assert "./secrets:/app/secrets:rw" in app["volumes"]
+    assert "./secrets/public-state:/app/state:rw" in app["volumes"]
+    assert "./secrets/public-state:/app/state:rw" in public["volumes"]
+    assert all("/app/secrets" not in volume for volume in public["volumes"])
     assert set(public["networks"]) == {"cloudflare-egress"}
     assert public["healthcheck"]["test"] == [
         "CMD",

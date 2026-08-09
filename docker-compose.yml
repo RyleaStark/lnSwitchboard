@@ -37,6 +37,7 @@ services:
       - /tmp:size=64m,mode=1777
     environment:
       LISTENER_MODE: admin
+      DATA_STORE_PATH: /app/state/lnswitchboard.db
       SERVICE_PORT: 22121
       PUBLIC_SERVICE_PORT: 21212
       LND_HOST: LND_HOST_IP
@@ -59,6 +60,7 @@ services:
       TAILSCALE_STATUS_DIR: /app/secrets/tailscale/status
     volumes:
       - ./secrets:/app/secrets:rw
+      - ./secrets/public-state:/app/state:rw
       - tailscale-control:/app/secrets/tailscale
       - ${APP_LIGHTNING_NODE_DATA_DIR:-/app-data/lightning/data/lnd}:/lnd:ro
     ports:
@@ -91,6 +93,7 @@ services:
       - /tmp:size=64m,mode=1777
     environment:
       LISTENER_MODE: public
+      DATA_STORE_PATH: /app/state/lnswitchboard.db
       SERVICE_PORT: 22121
       PUBLIC_SERVICE_PORT: 21212
       LND_HOST: LND_HOST_IP
@@ -103,7 +106,7 @@ services:
       CLOUDFLARED_CONNECTOR_ENABLED: "false"
       TAILSCALE_CONNECTOR_ENABLED: "false"
     volumes:
-      - ./secrets:/app/secrets:rw
+      - ./secrets/public-state:/app/state:rw
       - ${APP_LIGHTNING_NODE_DATA_DIR:-/app-data/lightning/data/lnd}:/lnd:ro
     ports:
       - "${PUBLIC_SERVICE_PORT:-21212}:21212"

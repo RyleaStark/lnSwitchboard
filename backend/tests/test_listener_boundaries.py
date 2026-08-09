@@ -398,6 +398,7 @@ def _seed_cloudflare_mesh_domain(hostname: str, ingress_key: str) -> None:
         connection.id,
         [{"hostname": hostname, "status": "active", "zone_id": "b" * 32}],
     )
+    store.set_public_ingress_key(connection.id, ingress_key)
     deps._get_connection_secret_store().set(
         connection.id,
         {"grant_id": "test-grant", "mesh_ingress_key": ingress_key},

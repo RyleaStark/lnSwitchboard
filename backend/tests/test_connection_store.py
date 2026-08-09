@@ -53,6 +53,36 @@ def test_connection_store_tracks_provider_domains_without_credentials(tmp_path: 
     assert b"credentials" not in raw_db
 
 
+def test_public_ingress_authority_is_scoped_to_active_cloudflare_domain(
+    tmp_path: Path,
+) -> None:
+    store = ConnectionStore(tmp_path / "connections.db")
+    connection = store.upsert_connection(
+        provider="cloudflare",
+        external_id="mesh-123",
+        label="Cloudflare Mesh",
+        status="connected",
+    )
+    store.replace_domains(
+        connection.id,
+        [{"hostname": "pay.example.com", "status": "active"}],
+    )
+    store.set_public_ingress_key(connection.id, "narrow-public-ingress-key")
+
+    assert (
+        store.get_public_ingress_key("pay.example.com")
+        == "narrow-public-ingress-key"
+    )
+    assert store.get_public_ingress_key("other.example.com") is None
+    store.replace_domains(
+        connection.id,
+        [{"hostname": "pay.example.com", "status": "error"}],
+    )
+    assert store.get_public_ingress_key("pay.example.com") is None
+    assert store.delete_connection(connection.id)
+    assert store.get_public_ingress_key("pay.example.com") is None
+
+
 def test_connection_store_rejects_invalid_provider_and_status(tmp_path: Path) -> None:
     store = ConnectionStore(tmp_path / "connections.db")
 

@@ -75,12 +75,12 @@ def test_persisted_retry_uses_current_endpoint_and_secret(tmp_path):
     asyncio.run(_exercise_persisted_retry_uses_current_endpoint_and_secret(tmp_path))
 
 
-def test_successful_manual_replay_prevents_stale_scheduled_retry(tmp_path):
-    asyncio.run(_exercise_manual_replay_prevents_stale_retry(tmp_path))
+def test_manual_replay_conflicts_with_pending_successful_retry(tmp_path):
+    asyncio.run(_exercise_manual_replay_conflicts_with_pending_success(tmp_path))
 
 
-def test_failed_manual_replay_consumes_pending_retry_without_exceeding_budget(tmp_path):
-    asyncio.run(_exercise_failed_manual_replay_consumes_pending_retry(tmp_path))
+def test_manual_replay_conflicts_with_pending_failed_retry(tmp_path):
+    asyncio.run(_exercise_manual_replay_conflicts_with_pending_failure(tmp_path))
 
 
 def test_two_dispatchers_share_one_persistent_retry_claim(tmp_path):
@@ -89,6 +89,10 @@ def test_two_dispatchers_share_one_persistent_retry_claim(tmp_path):
 
 def test_manual_replay_cannot_overlap_initial_delivery_claim(tmp_path):
     asyncio.run(_exercise_manual_replay_cannot_overlap_initial_claim(tmp_path))
+
+
+def test_manual_replay_rejects_inflight_claim_without_cancelling_owner(tmp_path):
+    asyncio.run(_exercise_manual_replay_rejects_inflight_claim(tmp_path))
 
 
 def test_unreconstructable_delivery_replay_returns_conflict(tmp_path):
@@ -732,7 +736,7 @@ async def _seed_retry_authority(tmp_path, filename: str):
     return db_path, address_store, storage, event, details, settled_at
 
 
-async def _exercise_manual_replay_prevents_stale_retry(tmp_path) -> None:
+async def _exercise_manual_replay_conflicts_with_pending_success(tmp_path) -> None:
     _, address_store, storage, event, details, settled_at = (
         await _seed_retry_authority(tmp_path, "manual-replay-race.db")
     )
@@ -757,7 +761,8 @@ async def _exercise_manual_replay_prevents_stale_retry(tmp_path) -> None:
         settled_at=settled_at,
     )
     delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
-    assert await dispatcher.replay_delivery(delivery)
+    with pytest.raises(ValueError, match="in progress"):
+        await dispatcher.replay_delivery(delivery)
 
     await asyncio.sleep(0.3)
 
@@ -779,7 +784,7 @@ async def _cancel_retry_tasks(dispatcher: WebhookDispatcher) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def _exercise_failed_manual_replay_consumes_pending_retry(tmp_path) -> None:
+async def _exercise_manual_replay_conflicts_with_pending_failure(tmp_path) -> None:
     _, address_store, storage, event, details, settled_at = (
         await _seed_retry_authority(tmp_path, "failed-manual-replay.db")
     )
@@ -801,7 +806,8 @@ async def _exercise_failed_manual_replay_consumes_pending_retry(tmp_path) -> Non
         event=event, details=details, settled_at=settled_at
     )
     delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
-    assert not await dispatcher.replay_delivery(delivery)
+    with pytest.raises(ValueError, match="in progress"):
+        await dispatcher.replay_delivery(delivery)
     await asyncio.sleep(0.3)
     await _cancel_retry_tasks(dispatcher)
 
@@ -938,13 +944,54 @@ async def _exercise_manual_replay_cannot_overlap_initial_claim(tmp_path) -> None
     )
     await asyncio.wait_for(entered.wait(), timeout=1)
     delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
-    assert not await dispatcher.replay_delivery(delivery)
+    with pytest.raises(ValueError, match="in progress"):
+        await dispatcher.replay_delivery(delivery)
     release.set()
     assert await initial
 
     assert calls == 1
     attempts = await storage.list_delivery_attempts(int(delivery["id"]))
     assert [item["attempt_number"] for item in attempts] == [1]
+
+
+async def _exercise_manual_replay_rejects_inflight_claim(tmp_path) -> None:
+    _, address_store, storage, event, details, settled_at = (
+        await _seed_retry_authority(tmp_path, "inflight-retry-claim.db")
+    )
+    entered_retry = asyncio.Event()
+    release_retry = asyncio.Event()
+    calls = 0
+
+    async def sender(_url, _payload, _headers):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("seed")
+        entered_retry.set()
+        await release_retry.wait()
+
+    dispatcher = WebhookDispatcher(
+        address_store=address_store,
+        delivery_storage=storage,
+        sender=sender,
+        max_retries=1,
+        retry_window_seconds=0.02,
+    )
+    assert not await dispatcher.dispatch_payment_settled(
+        event=event, details=details, settled_at=settled_at
+    )
+    await asyncio.wait_for(entered_retry.wait(), timeout=1)
+    delivery = (await storage.list_deliveries(page=1, page_size=10))["items"][0]
+    with pytest.raises(ValueError, match="in progress"):
+        await dispatcher.replay_delivery(delivery)
+    assert calls == 2
+    release_retry.set()
+    await asyncio.sleep(0.05)
+    await _cancel_retry_tasks(dispatcher)
+    refreshed = await storage.get_delivery(int(delivery["id"]))
+    assert refreshed is not None and refreshed["status"] == "delivered"
+    attempts = await storage.list_delivery_attempts(int(delivery["id"]))
+    assert [item["attempt_number"] for item in attempts] == [1, 2]
 
 
 def test_webhook_retry_stops_after_max_attempts(tmp_path):

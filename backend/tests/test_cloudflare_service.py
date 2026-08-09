@@ -481,6 +481,30 @@ def call_names(client: FakeCloudflareClient) -> list[str]:
     return [name for name, _ in client.calls]
 
 
+def test_sync_public_ingress_authority_migrates_existing_connection(
+    service_parts,
+) -> None:
+    service, store, secret_store, _client, _token_path = service_parts
+    connection = store.upsert_connection(
+        provider="cloudflare",
+        external_id="existing-mesh",
+        label="Existing Mesh",
+        status="connected",
+    )
+    store.replace_domains(
+        connection.id,
+        [{"hostname": "existing.example", "status": "active"}],
+    )
+    secret_store.set(
+        connection.id,
+        {"grant_id": "existing-grant", "mesh_ingress_key": "existing-key"},
+    )
+
+    assert store.get_public_ingress_key("existing.example") is None
+    service.sync_public_ingress_authorities()
+    assert store.get_public_ingress_key("existing.example") == "existing-key"
+
+
 @pytest.mark.anyio
 async def test_oauth_grant_account_discovery_does_not_create_authorization(
     tmp_path: Path,

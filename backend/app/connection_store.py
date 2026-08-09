@@ -116,6 +116,16 @@ class ConnectionStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS public_ingress_authorities (
+                    connection_id TEXT PRIMARY KEY,
+                    ingress_key TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(connection_id) REFERENCES provider_connections(id) ON DELETE CASCADE
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS connection_provisioning_journals (
                     id TEXT PRIMARY KEY,
                     provider TEXT NOT NULL,
@@ -335,6 +345,47 @@ class ConnectionStore:
                 (normalized,),
             ).fetchone()
         return row is not None
+
+    def set_public_ingress_key(self, connection_id: str, ingress_key: str) -> None:
+        """Publish only the key needed by the Internet-facing listener."""
+
+        if not ingress_key or ingress_key != ingress_key.strip():
+            raise ValueError("ingress_key is required")
+        with sqlite_connection(self.path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(
+                """
+                INSERT INTO public_ingress_authorities (
+                    connection_id, ingress_key, updated_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(connection_id) DO UPDATE SET
+                    ingress_key = excluded.ingress_key,
+                    updated_at = excluded.updated_at
+                """,
+                (connection_id, ingress_key, _utc_now()),
+            )
+
+    def get_public_ingress_key(self, hostname: str) -> str | None:
+        normalized = hostname.strip().lower().removesuffix(".")
+        if not normalized or normalized != hostname.lower().removesuffix("."):
+            return None
+        with sqlite_connection(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT authority.ingress_key
+                FROM public_ingress_authorities AS authority
+                JOIN provider_connections AS provider
+                  ON provider.id = authority.connection_id
+                JOIN connected_domains AS domain
+                  ON domain.connection_id = provider.id
+                WHERE provider.provider = 'cloudflare'
+                  AND domain.hostname = ?
+                  AND domain.status IN ('pending', 'active')
+                LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+        return str(row["ingress_key"]) if row is not None else None
 
     def create_provisioning_journal(
         self,

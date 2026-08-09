@@ -22,7 +22,6 @@ from .config import get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from .deps import (
     get_cloudflare_oauth_manager_dep,
     get_cloudflare_service_dep,
-    get_connection_secret_store_dep,
     get_connection_store_dep,
     get_ln_address_store_dep,
     get_ln_client_dep,
@@ -253,6 +252,7 @@ async def lifespan(app: FastAPI):
     if settings.cloudflared_connector_enabled:
         try:
             cloudflare_service = await get_cloudflare_service_dep()
+            cloudflare_service.sync_public_ingress_authorities()
             await cloudflare_service.recover_incomplete_provisioning()
         except Exception:  # pragma: no cover - network runtime
             LOGGER.error("Unable to recover incomplete Cloudflare provisioning")
@@ -352,25 +352,11 @@ def _add_request_security(target_app: FastAPI) -> None:
             candidate_hostname = _normalized_authority_hostname(mesh_candidate)
             if candidate_hostname is not None:
                 connection_store = await get_connection_store_dep()
-                secret_store = await get_connection_secret_store_dep()
-                for connection in connection_store.list_connections():
-                    if connection.provider != "cloudflare":
-                        continue
-                    if not any(
-                        domain.hostname == candidate_hostname
-                        and domain.status in {"pending", "active"}
-                        for domain in connection.domains
-                    ):
-                        continue
-                    credential = secret_store.get(connection.id) or {}
-                    expected_key = credential.get("mesh_ingress_key")
-                    if (
-                        isinstance(expected_key, str)
-                        and expected_key
-                        and secrets.compare_digest(mesh_key, expected_key)
-                    ):
-                        mesh_public_host = candidate_hostname
-                    break
+                expected_key = connection_store.get_public_ingress_key(
+                    candidate_hostname
+                )
+                if expected_key and secrets.compare_digest(mesh_key, expected_key):
+                    mesh_public_host = candidate_hostname
         if mesh_public_host is not None:
             request.state.mesh_public_host = mesh_public_host
         public_host = get_public_host(request)

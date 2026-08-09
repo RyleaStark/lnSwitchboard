@@ -9,7 +9,7 @@ import stat
 from collections.abc import Iterable
 
 ROOTS = (
-    ("/app-secrets", (("cloudflare-mesh",),)),
+    ("/app-secrets", (("cloudflare-mesh",), ("public-state",))),
     ("/tailscale-control", (("control",), ("status",))),
     ("/tailscale-state", ()),
 )
@@ -30,6 +30,12 @@ FILE_FLAGS = (
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
+)
+SQLITE_BUNDLE = (
+    "lnswitchboard.db",
+    "lnswitchboard.db-journal",
+    "lnswitchboard.db-wal",
+    "lnswitchboard.db-shm",
 )
 
 
@@ -158,6 +164,41 @@ def validate_tree(directory_fd: int, relative: tuple[str, ...] = ()) -> None:
                 fail()
 
 
+def migrate_public_state(root_fd: int) -> None:
+    """Move a legacy SQLite bundle into the public-only state subtree."""
+
+    state_fd = open_directory("public-state", parent_fd=root_fd)
+    try:
+        for name in SQLITE_BUNDLE:
+            try:
+                source = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            try:
+                os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                # A member on both sides is ambiguous, not a resumable partial
+                # migration. Never guess which generation is authoritative.
+                fail()
+            if not stat.S_ISREG(source.st_mode) or source.st_nlink != 1:
+                fail()
+            try:
+                os.rename(
+                    name,
+                    name,
+                    src_dir_fd=root_fd,
+                    dst_dir_fd=state_fd,
+                )
+            except OSError:
+                fail()
+            os.fsync(root_fd)
+            os.fsync(state_fd)
+    finally:
+        os.close(state_fd)
+
+
 def main() -> None:
     for root, required in ROOTS:
         descriptor = open_directory(root)
@@ -175,6 +216,9 @@ def main() -> None:
                     for child in reversed(opened):
                         os.close(child)
             harden_tree(descriptor)
+            if root == "/app-secrets":
+                migrate_public_state(descriptor)
+                harden_tree(descriptor)
             os.fchown(descriptor, UID, GID)
             os.fchmod(descriptor, DIR_MODE)
             os.fsync(descriptor)

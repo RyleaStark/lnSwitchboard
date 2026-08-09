@@ -185,14 +185,27 @@ class WebhookDispatcher:
 
     async def replay_delivery(self, delivery: Dict[str, Any]) -> bool:
         delivery_id = int(delivery["id"])
-        for task in tuple(self._retry_tasks_by_delivery.get(delivery_id, set())):
-            task.cancel()
+        # A scheduled task may already own a persistent claim and be blocked in
+        # network I/O. Cancelling it would strand that claim because
+        # CancelledError intentionally bypasses ordinary delivery failures.
+        # Manual replay therefore conflicts with every live local retry rather
+        # than trying to pre-empt it.
+        active_tasks = self._retry_tasks_by_delivery.get(delivery_id, set())
+        if any(not task.done() for task in active_tasks):
+            raise ValueError("Delivery attempt is already in progress")
         lock = self._delivery_locks.setdefault(delivery_id, asyncio.Lock())
         async with lock:
             if self._delivery_storage is not None:
                 current = await self._delivery_storage.get_delivery(delivery_id)
                 if current is not None:
                     delivery = current
+                if (
+                    await self._delivery_storage.get_delivery_claim_retry_delay(
+                        delivery_id
+                    )
+                    is not None
+                ):
+                    raise ValueError("Delivery attempt is already in progress")
             payload = await self._rebuild_delivery_payload(delivery)
             if payload is None:
                 raise ValueError("Delivery payload is unavailable")
@@ -205,7 +218,7 @@ class WebhookDispatcher:
                 endpoint=endpoint,
                 payload=payload,
             )
-            return await self._attempt_delivery(
+            result = await self._attempt_delivery(
                 url=str(endpoint["url"]),
                 payload=payload,
                 headers=headers,
@@ -213,6 +226,17 @@ class WebhookDispatcher:
                 delivery_id=delivery_id,
                 manual=True,
             )
+            if not result and self._delivery_storage is not None:
+                # A different dispatcher may have claimed the row between the
+                # pre-check and our transactional claim attempt.
+                if (
+                    await self._delivery_storage.get_delivery_claim_retry_delay(
+                        delivery_id
+                    )
+                    is not None
+                ):
+                    raise ValueError("Delivery attempt is already in progress")
+            return result
 
     async def resume_pending_retries(self, *, limit: int = 100) -> int:
         if self._delivery_storage is None:

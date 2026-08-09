@@ -373,6 +373,25 @@ class CloudflareService:
     def cancel_authorization(self, authorization_id: str) -> bool:
         return self.secrets.delete(f"{_AUTHORIZATION_PREFIX}{authorization_id}")
 
+    def sync_public_ingress_authorities(self) -> None:
+        """Republish narrow public keys without exposing the Fernet key store."""
+
+        for connection in self.store.list_connections():
+            if connection.provider != "cloudflare":
+                continue
+            try:
+                credential = self.secrets.get(connection.id) or {}
+            except ValueError as exc:
+                raise CloudflareConflictError(
+                    "Cloudflare connection credentials could not be verified"
+                ) from exc
+            ingress_key = credential.get("mesh_ingress_key")
+            if not isinstance(ingress_key, str) or not ingress_key:
+                raise CloudflareConflictError(
+                    "Cloudflare connection credentials could not be verified"
+                )
+            self.store.set_public_ingress_key(connection.id, ingress_key)
+
     async def revoke_grant_if_unused(
         self,
         grant_id: str,
@@ -450,6 +469,7 @@ class CloudflareService:
                 connection.id,
                 {"grant_id": grant_id, "mesh_ingress_key": mesh_ingress_key},
             )
+            self.store.set_public_ingress_key(connection.id, mesh_ingress_key)
             if not self.secrets.delete(authorization_owner):
                 self.secrets.set(connection.id, previous)
                 raise CloudflareServiceError(
@@ -868,6 +888,9 @@ class CloudflareService:
             )
             credential["mesh_ingress_key"] = random_secrets.token_urlsafe(32)
             self.secrets.set(connection.id, credential)
+            self.store.set_public_ingress_key(
+                connection.id, credential["mesh_ingress_key"]
+            )
         except Exception:
             if connection is not None:
                 self.secrets.delete(connection.id)
