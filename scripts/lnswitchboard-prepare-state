@@ -169,6 +169,8 @@ def migrate_public_state(root_fd: int) -> None:
 
     state_fd = open_directory("public-state", parent_fd=root_fd)
     try:
+        if any(name not in SQLITE_BUNDLE for name in os.listdir(state_fd)):
+            fail()
         for name in SQLITE_BUNDLE:
             try:
                 source = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
@@ -192,6 +194,12 @@ def migrate_public_state(root_fd: int) -> None:
                     dst_dir_fd=state_fd,
                 )
             except OSError:
+                fail()
+            try:
+                moved = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+            except OSError:
+                fail()
+            if not same_inode(source, moved):
                 fail()
             os.fsync(root_fd)
             os.fsync(state_fd)

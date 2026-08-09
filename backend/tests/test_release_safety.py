@@ -53,6 +53,21 @@ def test_initializer_rejects_ambiguous_public_state_generation(tmp_path) -> None
     assert (state / "lnswitchboard.db").read_bytes() == b"current"
 
 
+def test_initializer_rejects_non_database_public_state_file(tmp_path) -> None:
+    state = tmp_path / "public-state"
+    state.mkdir()
+    (state / "admin-secret").write_bytes(b"must-not-be-public")
+    namespace = _state_initializer_namespace()
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(SystemExit, match="refused unsafe"):
+            namespace["migrate_public_state"](descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert (state / "admin-secret").read_bytes() == b"must-not-be-public"
+
+
 def test_idle_service_runs_periodic_retention_cleanup() -> None:
     async def exercise() -> None:
         cleaned = asyncio.Event()
