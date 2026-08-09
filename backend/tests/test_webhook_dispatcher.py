@@ -226,14 +226,19 @@ def test_persisted_delivery_history_never_contains_webhook_secrets(tmp_path) -> 
     asyncio.run(exercise())
 
 
-def test_startup_scrubs_legacy_webhook_history_secrets(tmp_path) -> None:
-    db_path = tmp_path / "legacy-redaction.db"
+@pytest.mark.parametrize("migration_marker_exists", [False, True])
+def test_startup_scrubs_legacy_webhook_history_secrets(
+    tmp_path, migration_marker_exists: bool
+) -> None:
+    db_path = tmp_path / f"legacy-redaction-{migration_marker_exists}.db"
     RequestLogStorage(db_path)
     now = datetime.now(tz=timezone.utc).isoformat()
     with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            "DELETE FROM lnswitchboard_migrations WHERE name = 'webhook_history_redaction_v1'"
-        )
+        if not migration_marker_exists:
+            conn.execute(
+                "DELETE FROM lnswitchboard_migrations "
+                "WHERE name = 'webhook_history_redaction_v1'"
+            )
         conn.execute(
             """
             INSERT INTO webhook_deliveries (
@@ -285,6 +290,9 @@ def test_startup_scrubs_legacy_webhook_history_secrets(tmp_path) -> None:
         )
         assert conn.execute(
             "SELECT COUNT(*) FROM lnswitchboard_migrations WHERE name = 'webhook_history_redaction_v1'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM request_logs WHERE event = 'webhook_delivery'"
         ).fetchone()[0] == 1
 
     for secret in (
