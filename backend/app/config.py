@@ -372,10 +372,6 @@ class Settings(BaseSettings):
                                 for character in lowered[2:]
                             )
                         )
-                    elif len(label) > 1 and label.startswith("0"):
-                        numeric_labels.append(
-                            all(character in "01234567" for character in label)
-                        )
                     else:
                         numeric_labels.append(label.isdigit())
                 valid_hostname = all(
@@ -384,7 +380,7 @@ class Settings(BaseSettings):
                     and label[-1].isalnum()
                     and all(character.isalnum() or character == "-" for character in label)
                     for label in labels
-                ) and not all(numeric_labels)
+                ) and not numeric_labels[-1]
             else:
                 valid_hostname = (
                     getattr(address, "scope_id", None) is None
