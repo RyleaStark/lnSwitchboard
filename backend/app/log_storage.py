@@ -507,7 +507,16 @@ class RequestLogStorage:
                 or "unknown"
             )
             conn.execute(
-                "UPDATE request_logs SET message = ?, details = ?, ip = 'redacted' WHERE id = ?",
+                """
+                UPDATE request_logs
+                SET username = 'webhook',
+                    domain = NULL,
+                    ip = 'redacted',
+                    amount_msat = NULL,
+                    message = ?,
+                    details = ?
+                WHERE id = ?
+                """,
                 (
                     f"Webhook delivery {status}",
                     self._serialize_details(safe_details),

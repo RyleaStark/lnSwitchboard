@@ -274,8 +274,11 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         conn.execute(
             """
             INSERT INTO request_logs (
-                timestamp, username, ip, event, status, message, details
-            ) VALUES (?, 'webhook', 'internal', 'webhook_delivery', 'failed',
+                timestamp, username, domain, ip, amount_msat, event, status, message, details
+            ) VALUES (?, 'LEGACY_PAYLOAD_DERIVED_USERNAME_SECRET',
+                      'LEGACY_PAYLOAD_DERIVED_DOMAIN_SECRET.invalid',
+                      'LEGACY_PROXY_HEADER_AS_IP_SECRET', 112233445566,
+                      'webhook_delivery', 'failed',
                       'LEGACY_LOG_SECRET', '{"target":"LEGACY_DETAIL_SECRET"}')
             """,
             (now,),
@@ -335,7 +338,7 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
                     "SELECT error, response_body FROM webhook_attempts"
                 ).fetchall(),
                 "request_logs": conn.execute(
-                    "SELECT message, details FROM request_logs"
+                    "SELECT username, domain, ip, amount_msat, message, details FROM request_logs"
                 ).fetchall(),
                 "invoice_events": conn.execute("SELECT details FROM invoice_events").fetchall(),
             },
@@ -347,6 +350,13 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         assert conn.execute(
             "SELECT COUNT(*) FROM request_logs WHERE event = 'webhook_delivery'"
         ).fetchone()[0] == 1
+        assert conn.execute(
+            """
+            SELECT username, domain, ip, amount_msat
+            FROM request_logs
+            WHERE event = 'webhook_delivery'
+            """
+        ).fetchone() == ("webhook", None, "redacted", None)
     exposed = json.dumps(
         asyncio.run(sanitized_storage.list_invoice_events(page=1, page_size=10)),
         sort_keys=True,
@@ -372,6 +382,9 @@ def test_startup_scrubs_legacy_webhook_history_secrets(
         "LEGACY_CLIENT_RESPONSE_SECRET",
         "LEGACY_METADATA_PAYLOAD_SECRET",
         "LEGACY_PROXY_HEADER_SECRET",
+        "LEGACY_PAYLOAD_DERIVED_USERNAME_SECRET",
+        "LEGACY_PAYLOAD_DERIVED_DOMAIN_SECRET",
+        "LEGACY_PROXY_HEADER_AS_IP_SECRET",
     ):
         assert secret not in persisted
         assert secret not in exposed
