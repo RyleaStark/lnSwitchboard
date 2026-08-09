@@ -75,6 +75,12 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert app["ports"] == [
         "${LNSWITCHBOARD_BIND_ADDRESS:-127.0.0.1}:22121:22121"
     ]
+    assert app["healthcheck"]["test"] == [
+        "CMD",
+        "python",
+        "-c",
+        "import socket; socket.create_connection(('127.0.0.1', 22121), 2).close()",
+    ]
 
     assert public["user"] == "1000:1000"
     assert public["read_only"] is True
@@ -84,6 +90,12 @@ def test_primary_application_container_is_least_privilege() -> None:
     assert public["environment"]["CLOUDFLARED_CONNECTOR_ENABLED"] == "false"
     assert public["environment"]["TAILSCALE_CONNECTOR_ENABLED"] == "false"
     assert set(public["networks"]) == {"cloudflare-egress"}
+    assert public["healthcheck"]["test"] == [
+        "CMD",
+        "python",
+        "-c",
+        "import socket; socket.create_connection(('127.0.0.1', 21212), 2).close()",
+    ]
 
     initializer = compose["services"]["permissions-init"]
     assert initializer["network_mode"] == "none"
