@@ -1,14 +1,54 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
 from ..app import deps
 from ..app.config import Settings, get_settings, parse_trusted_hosts, parse_trusted_proxy_cidrs
 from ..app.outbound_security import UnsafeOutboundTarget, ensure_public_endpoint, post_to_pinned_endpoint
+
+
+def _is_exception_type_name(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "__name__"
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "type"
+        and len(node.value.args) == 1
+        and isinstance(node.value.args[0], ast.Name)
+        and node.value.args[0].id == "exc"
+    )
+
+
+def _contains_raw_caught_exception(node: ast.AST) -> bool:
+    if _is_exception_type_name(node):
+        return False
+    if isinstance(node, ast.Name) and node.id == "exc":
+        return True
+    return any(_contains_raw_caught_exception(child) for child in ast.iter_child_nodes(node))
+
+
+def test_runtime_logging_never_interpolates_raw_caught_exceptions() -> None:
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    violations: list[str] = []
+    for path in sorted(app_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in {"debug", "info", "warning", "error", "exception", "critical"}:
+                continue
+            if node.func.attr == "exception" or any(
+                _contains_raw_caught_exception(argument) for argument in (*node.args, *[kw.value for kw in node.keywords])
+            ):
+                violations.append(f"{path.relative_to(app_root)}:{node.lineno}")
+    assert violations == []
 
 
 def test_admin_api_does_not_allow_cross_origin_reads(test_client) -> None:

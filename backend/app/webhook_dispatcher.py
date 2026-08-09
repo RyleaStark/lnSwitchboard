@@ -130,7 +130,11 @@ class WebhookDispatcher:
                     settled_at_ts=int((settled_at or datetime.now(tz=timezone.utc)).timestamp()),
                 ) or delivered
             except Exception as exc:  # pragma: no cover - runtime relay path
-                self._logger.warning("Zap receipt publish failed for invoice event %s: %s", event.id, exc)
+                self._logger.warning(
+                    "Zap receipt publish failed for invoice event %s (error_type=%s)",
+                    event.id,
+                    type(exc).__name__,
+                )
         return delivered
 
     async def dispatch_test(
