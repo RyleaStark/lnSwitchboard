@@ -45,3 +45,4 @@ def test_zrok_supervisor_has_fixed_target_and_never_logs_subordinate_access() ->
     assert 'operation_id' in supervisor
     assert 'share_token:' not in supervisor
     assert 'rm -f "$cfg"' in supervisor
+    assert '"https://" + ascii_downcase' in supervisor

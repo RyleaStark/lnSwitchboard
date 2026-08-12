@@ -53,7 +53,7 @@ case "${1:-}" in
     if [ -f "$HOME/name" ]; then printf '[{"namespaceToken":"public","name":"pay"}]\\n'; else printf '[]\\n'; fi ;;
   delete) [ -f "$ZROK_TEST_FAIL_DELETE" ] && exit 1; rm -f "$HOME/name" ;;
   share)
-    printf '{"msg":"boot","token":"do-not-persist","frontend_endpoints":["https://pay.example"]}\\n'
+    printf '{"msg":"boot","token":"do-not-persist","frontend_endpoints":["Pay.Example"]}\\n'
     if [ -f "$ZROK_TEST_SHARE_DIES" ]; then sleep 2; exit 7; fi
     trap 'exit 0' TERM INT
     while true; do sleep 1; done ;;
@@ -111,6 +111,7 @@ def test_supervisor_consumes_token_publishes_sanitized_status_and_exits_on_term(
         assert '"state":"connected"' in payload
         assert "sensitive-enrollment-token" not in payload
         assert "do-not-persist" not in payload
+        assert '"https://pay.example"' in payload
         assert not (control / "configure.json").exists()
         assert (control / "active.json").exists()
         process.send_signal(signal.SIGTERM)
