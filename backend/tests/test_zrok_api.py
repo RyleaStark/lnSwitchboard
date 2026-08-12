@@ -177,6 +177,10 @@ def test_zrok_request_forbids_generic_target_and_extra_provider_authority(test_c
         admin_app.dependency_overrides.pop(deps.get_zrok_service_dep, None)
 
     assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid zrok request"}
+    assert response.headers["cache-control"] == "no-store, private"
+    assert response.headers["pragma"] == "no-cache"
+    assert "secret-account-token" not in response.text
     assert service.provisioned == []
 
 
