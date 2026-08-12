@@ -12,6 +12,8 @@ ROOTS = (
     ("/app-secrets", (("cloudflare-mesh",),)),
     ("/tailscale-control", (("control",), ("status",))),
     ("/tailscale-state", ()),
+    ("/zrok-control", (("control",), ("status",))),
+    ("/zrok-state", ()),
 )
 UID = 1000
 GID = 1000

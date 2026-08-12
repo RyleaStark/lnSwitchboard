@@ -6,7 +6,7 @@ from dataclasses import asdict
 from typing import Awaitable, Callable, TypeVar
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..cloudflare_client import CloudflareAPIError
 from ..cloudflare_oauth import (
@@ -28,6 +28,7 @@ from ..deps import (
     get_connection_store_dep,
     get_settings_dep,
     get_tailscale_service_dep,
+    get_zrok_service_dep,
 )
 from ..tailscale_connector import TailscaleProtocolError
 from ..tailscale_service import (
@@ -36,6 +37,15 @@ from ..tailscale_service import (
     TailscaleService,
     TailscaleUnavailableError,
     TailscaleValidationError,
+)
+from ..zrok_connector import ZrokProtocolError
+from ..zrok_service import (
+    CLOUD_API_ENDPOINT,
+    ZrokNotFoundError,
+    ZrokOperationError,
+    ZrokService,
+    ZrokUnavailableError,
+    ZrokValidationError,
 )
 
 router = APIRouter(prefix="/api/connections", tags=["connections"])
@@ -62,8 +72,8 @@ def _set_private_no_store(response: Response) -> None:
     response.headers["Pragma"] = "no-cache"
 
 
-def _serialize_connection(connection: ProviderConnection) -> dict[str, object]:
-    payload = asdict(connection)
+def _serialize_connection(connection: ProviderConnection | dict[str, object]) -> dict[str, object]:
+    payload = dict(connection) if isinstance(connection, dict) else asdict(connection)
     metadata = payload.get("public_metadata")
     if isinstance(metadata, dict):
         payload["public_metadata"] = {
@@ -98,6 +108,36 @@ class TailscaleLoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     device_name: str = Field(default="lns", min_length=1, max_length=63)
+
+
+class ZrokProvisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str
+    account_token: str = Field(min_length=1, max_length=4096)
+    api_endpoint: AnyHttpUrl | None = None
+    namespace: str = Field(default="public", min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=63)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"cloud", "self_hosted"}:
+            raise ValueError("mode must be cloud or self_hosted")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_endpoint(self) -> "ZrokProvisionRequest":
+        if self.mode == "self_hosted" and self.api_endpoint is None:
+            raise ValueError("Self-hosted zrok requires an HTTPS API endpoint")
+        if self.api_endpoint is not None and self.api_endpoint.scheme != "https":
+            raise ValueError("zrok API endpoint must use HTTPS")
+        if self.api_endpoint is not None:
+            host = (self.api_endpoint.host or "").lower()
+            if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+                raise ValueError("zrok API endpoint must be a public HTTPS origin")
+        return self
 
 
 async def _tailscale_call(operation: Callable[[], Awaitable[_Result]]) -> _Result:
@@ -168,6 +208,19 @@ async def _cloudflare_call(operation: Callable[[], Awaitable[_Result]]) -> _Resu
         ) from exc
 
 
+async def _zrok_call(operation: Callable[[], Awaitable[_Result]]) -> _Result:
+    try:
+        return await operation()
+    except ZrokUnavailableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ZrokValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ZrokNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ZrokOperationError, ZrokProtocolError) as exc:
+        raise HTTPException(status_code=502, detail="zrok connector operation failed") from exc
+
+
 @router.get("")
 async def list_connections(
     request: Request,
@@ -178,6 +231,7 @@ async def list_connections(
     _set_private_no_store(response)
     connector_available = settings.cloudflared_connector_enabled
     tailscale_available = settings.tailscale_connector_enabled
+    zrok_available = settings.zrok_connector_enabled
     tailscale_reason = (
         None if tailscale_available else "connector_not_installed"
     )
@@ -197,10 +251,73 @@ async def list_connections(
                 "capability": "available" if tailscale_available else "unavailable",
                 "reason": tailscale_reason,
             },
+            {
+                "id": "zrok",
+                "name": "zrok",
+                "capability": "available" if zrok_available else "unavailable",
+                "reason": None if zrok_available else "connector_not_installed",
+            },
         ],
         "connections": [
             _serialize_connection(connection) for connection in store.list_connections()
         ],
+    }
+
+
+@router.get("/zrok/setup")
+async def zrok_setup(
+    response: Response,
+    service: ZrokService = Depends(get_zrok_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    return service.setup()
+
+
+@router.post("/zrok/provision", status_code=status.HTTP_201_CREATED)
+async def provision_zrok(
+    payload: ZrokProvisionRequest,
+    response: Response,
+    service: ZrokService = Depends(get_zrok_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    endpoint = (
+        CLOUD_API_ENDPOINT
+        if payload.mode == "cloud"
+        else str(payload.api_endpoint).rstrip("/")
+    )
+    connection = await _zrok_call(
+        lambda: service.provision(
+            mode=payload.mode,
+            account_token=payload.account_token,
+            api_endpoint=endpoint,
+            namespace=payload.namespace,
+            name=payload.name,
+        )
+    )
+    return _serialize_connection(connection)
+
+
+@router.post("/zrok/{connection_id}/status")
+async def refresh_zrok_status(
+    connection_id: str,
+    response: Response,
+    service: ZrokService = Depends(get_zrok_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    return _serialize_connection(
+        await _zrok_call(lambda: service.refresh(connection_id))
+    )
+
+
+@router.delete("/zrok/{connection_id}")
+async def disconnect_zrok(
+    connection_id: str,
+    response: Response,
+    service: ZrokService = Depends(get_zrok_service_dep),
+) -> dict[str, bool]:
+    _set_private_no_store(response)
+    return {
+        "disconnected": await _zrok_call(lambda: service.disconnect(connection_id))
     }
 
 

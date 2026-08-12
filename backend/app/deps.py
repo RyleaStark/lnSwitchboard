@@ -23,6 +23,8 @@ from .rate_limiter import RateLimiter
 from .request_utils import get_client_ip
 from .tailscale_connector import TailscaleConnector
 from .tailscale_service import TailscaleService
+from .zrok_connector import ZrokConnector
+from .zrok_service import ZrokService
 from .webhook_dispatcher import WebhookDispatcher
 
 
@@ -116,6 +118,20 @@ def _get_tailscale_service() -> TailscaleService:
 
 
 @lru_cache()
+def _get_zrok_service() -> ZrokService:
+    settings = get_settings()
+    return ZrokService(
+        connector=ZrokConnector(
+            control_dir=settings.zrok_control_dir,
+            status_dir=settings.zrok_status_dir,
+        ),
+        store=_get_connection_store(),
+        connector_enabled=settings.zrok_connector_enabled,
+        cloud_api_endpoint=settings.zrok_cloud_api_endpoint,
+    )
+
+
+@lru_cache()
 def _get_ln_client() -> LNClient:
     settings = get_settings()
     return LNClient(
@@ -203,6 +219,10 @@ async def get_cloudflare_oauth_manager_dep() -> CloudflareOAuthManager:
 
 async def get_tailscale_service_dep() -> TailscaleService:
     return _get_tailscale_service()
+
+
+async def get_zrok_service_dep() -> ZrokService:
+    return _get_zrok_service()
 
 
 async def get_webhook_dispatcher_dep() -> WebhookDispatcher:

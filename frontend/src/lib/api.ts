@@ -339,6 +339,23 @@ export type TailscaleLogin = {
   connection?: ProviderConnection
 }
 
+export type ZrokSetup = {
+  available: boolean
+  modes: Array<"cloud" | "self_hosted">
+  cloud_api_endpoint: string
+  default_namespace: string
+  public_origin: "http://public:21212"
+  cloud_interstitial_warning: boolean
+}
+
+export type ZrokProvisionPayload = {
+  mode: "cloud" | "self_hosted"
+  account_token: string
+  api_endpoint?: string
+  namespace: string
+  name: string
+}
+
 export class ApiError extends Error {
   status: number
   detail: unknown
@@ -559,6 +576,20 @@ export const api = {
     }),
   disconnectTailscale: (connectionId: string) =>
     request<{ disconnected: boolean }>(`api/connections/tailscale/${connectionId}`, {
+      method: "DELETE",
+    }),
+  zrokSetup: () => request<ZrokSetup>("api/connections/zrok/setup"),
+  provisionZrok: (payload: ZrokProvisionPayload) =>
+    request<ProviderConnection>("api/connections/zrok/provision", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  refreshZrokStatus: (connectionId: string) =>
+    request<ProviderConnection>(`api/connections/zrok/${connectionId}/status`, {
+      method: "POST",
+    }),
+  disconnectZrok: (connectionId: string) =>
+    request<{ disconnected: boolean }>(`api/connections/zrok/${connectionId}`, {
       method: "DELETE",
     }),
 }

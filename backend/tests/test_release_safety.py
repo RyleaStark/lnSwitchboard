@@ -220,7 +220,7 @@ def test_primary_application_container_is_least_privilege() -> None:
     ]
     assert all("/app/secrets" not in volume for volume in public["volumes"])
     assert all("/lnd" not in volume for volume in public["volumes"])
-    assert set(public["networks"]) == {"cloudflare-egress"}
+    assert set(public["networks"]) == {"cloudflare-egress", "zrok-public"}
     assert public["healthcheck"]["test"] == [
         "CMD",
         "python",
