@@ -50,8 +50,12 @@ case "${1:-}" in
   create) touch "$HOME/name" ;;
   list)
     if [ -f "$ZROK_TEST_LIST_ERROR" ]; then exit 1; fi
-    if [ -f "$HOME/name" ]; then printf '[{"namespaceToken":"public","name":"pay"}]\\n'; else printf '[]\\n'; fi ;;
-  delete) [ -f "$ZROK_TEST_FAIL_DELETE" ] && exit 1; rm -f "$HOME/name" ;;
+    if [ "${2:-}" = shares ]; then printf '{"shares":[]}\\n'
+    elif [ -f "$HOME/name" ]; then printf '[{"namespaceToken":"public","name":"pay"}]\\n'
+    else printf '[]\\n'; fi ;;
+  delete)
+    [ -f "$ZROK_TEST_FAIL_DELETE" ] && exit 1
+    [ "${2:-}" = name ] && rm -f "$HOME/name" ;;
   share)
     printf '{"msg":"boot","token":"do-not-persist","frontend_endpoints":["Pay.Example"]}\\n'
     if [ -f "$ZROK_TEST_SHARE_DIES" ]; then sleep 2; exit 7; fi
@@ -104,7 +108,7 @@ def test_supervisor_consumes_token_publishes_sanitized_status_and_exits_on_term(
             lambda: (
                 (_read_status(status / "status.json") or {}).get("state")
                 == "connected"
-                and (control / "active.json").exists()
+                and (_home / ".lnswitchboard-active.json").exists()
             )
         )
         payload = (status / "status.json").read_text(encoding="utf-8")
@@ -113,7 +117,9 @@ def test_supervisor_consumes_token_publishes_sanitized_status_and_exits_on_term(
         assert "do-not-persist" not in payload
         assert '"https://pay.example"' in payload
         assert not (control / "configure.json").exists()
-        assert (control / "active.json").exists()
+        active = (_home / ".lnswitchboard-active.json").read_text(encoding="utf-8")
+        assert "do-not-persist" in active
+        assert "sensitive-enrollment-token" not in active
         process.send_signal(signal.SIGTERM)
         assert process.wait(timeout=5) == 0
     finally:
@@ -128,14 +134,17 @@ def test_supervisor_exits_nonzero_when_share_child_dies(runtime) -> None:
     process = subprocess.Popen([str(SUPERVISOR)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     assert process.wait(timeout=8) != 0
     assert json.loads((status / "status.json").read_text(encoding="utf-8"))["state"] == "error"
-    assert (control / "active.json").exists()
+    assert (_home / ".lnswitchboard-active.json").exists()
 
 
 def test_disconnect_failure_retains_cleanup_authority(runtime) -> None:
     control, status, home, _log, env = runtime
     home.joinpath("enabled").touch()
     home.joinpath("name").touch()
-    control.joinpath("active.json").write_text('{"namespace":"public","name":"pay"}', encoding="utf-8")
+    home.joinpath(".lnswitchboard-active.json").write_text(
+        '{"phase":"active","namespace":"public","name":"pay","share_token":"share-token","operation_id":"recovery"}',
+        encoding="utf-8",
+    )
     Path(env["ZROK_TEST_FAIL_DELETE"]).touch()
     process = subprocess.Popen([str(SUPERVISOR)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -145,7 +154,7 @@ def test_disconnect_failure_retains_cleanup_authority(runtime) -> None:
             == "error"
         )
         assert json.loads((status / "status.json").read_text(encoding="utf-8"))["state"] == "error"
-        assert control.joinpath("active.json").exists()
+        assert home.joinpath(".lnswitchboard-active.json").exists()
         assert home.joinpath("enabled").exists()
     finally:
         process.send_signal(signal.SIGTERM)
