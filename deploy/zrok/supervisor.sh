@@ -37,7 +37,7 @@ name_exists() {
 }
 
 start_share() {
-  local namespace=$1 name=$2 fifo deadline state
+  local namespace=$1 name=$2 fifo deadline state endpoints
   stop_share
   rm -f "$STATUS/status.json"
   fifo="$STATUS/share.$$"
@@ -50,9 +50,12 @@ start_share() {
         if jq -e '
           .msg == "boot" and
           (.frontend_endpoints | type == "array" and length >= 1 and length <= 8) and
-          all(.frontend_endpoints[]; type == "string" and length <= 2048 and startswith("https://"))
+          all(.frontend_endpoints[];
+            type == "string" and length >= 1 and length <= 253 and
+            test("^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$"))
         ' <<<"$boot" >/dev/null; then
-          atomic_status connected "$(jq -c '{frontend_endpoints:.frontend_endpoints}' <<<"$boot")"
+          endpoints=$(jq -c '{frontend_endpoints:[.frontend_endpoints[] | "https://" + ascii_downcase]}' <<<"$boot")
+          atomic_status connected "$endpoints"
         else
           atomic_status error
         fi
