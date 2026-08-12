@@ -24,6 +24,7 @@ import { toast } from "sonner"
 import { CloudflareIcon } from "@/components/cloudflare-icon"
 import { CodeBlock, CopyButton } from "@/components/common"
 import { TailscaleIcon } from "@/components/tailscale-icon"
+import { ZrokIcon } from "@/components/zrok-icon"
 import { TemplateVariablesDialog } from "@/components/template-variables-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -188,6 +189,17 @@ export function AppShell() {
                               <SidebarNavLink to="/connections/tailscale/">
                                 <TailscaleIcon />
                                 <span>Tailscale</span>
+                              </SidebarNavLink>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                          <SidebarMenuSubItem>
+                            <SidebarMenuSubButton
+                              asChild
+                              isActive={isActiveRoute(location.pathname, "/connections/zrok/")}
+                            >
+                              <SidebarNavLink to="/connections/zrok/">
+                                <ZrokIcon />
+                                <span>zrok</span>
                               </SidebarNavLink>
                             </SidebarMenuSubButton>
                           </SidebarMenuSubItem>

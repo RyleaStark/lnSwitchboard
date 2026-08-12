@@ -33,6 +33,10 @@ vi.mock("@/lib/api", async (importOriginal) => ({
     cancelTailscaleLogin: vi.fn(),
     refreshTailscaleStatus: vi.fn(),
     disconnectTailscale: vi.fn(),
+    zrokSetup: vi.fn(),
+    provisionZrok: vi.fn(),
+    refreshZrokStatus: vi.fn(),
+    disconnectZrok: vi.fn(),
   },
 }))
 
@@ -924,4 +928,38 @@ test("renders connected Tailscale refresh and disconnect controls", async () => 
   expect(screen.getByRole("button", { name: "Refresh status" })).toBeInTheDocument()
   expect(screen.getByRole("button", { name: "Copy hostname" })).toBeInTheDocument()
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument()
+})
+
+test("offers zrok Cloud and self-hosted modes without a configurable tunnel target", async () => {
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "cloudflare", name: "Cloudflare", capability: "available", reason: null },
+      { id: "tailscale", name: "Tailscale Funnel", capability: "available", reason: null },
+      { id: "zrok", name: "zrok", capability: "available", reason: null },
+    ], connections: [],
+  })
+  vi.mocked(api.zrokSetup).mockResolvedValue({
+    available: true, modes: ["cloud", "self_hosted"], cloud_api_endpoint: "https://api-v2.zrok.io",
+    default_namespace: "public", public_origin: "http://public:21212", cloud_interstitial_warning: true,
+  })
+  vi.mocked(api.provisionZrok).mockResolvedValue({
+    id: "zrok-connection", provider: "zrok", external_id: "public:pay-bones", label: "Self-hosted zrok",
+    status: "connected", account_id: null, public_metadata: { mode: "self_hosted" }, last_error: null,
+    created_at: "2026-08-12T00:00:00Z", updated_at: "2026-08-12T00:00:00Z", domains: [],
+  })
+
+  const user = userEvent.setup()
+  renderPage("/connections/zrok/")
+  expect(await screen.findByRole("heading", { name: "zrok" })).toBeVisible()
+  expect(screen.getByText(/anti-phishing interstitial/)).toBeVisible()
+  expect(screen.queryByLabelText(/target/i)).not.toBeInTheDocument()
+  await user.selectOptions(screen.getByLabelText("Service"), "self_hosted")
+  await user.type(screen.getByLabelText("zrok API endpoint"), "https://zrok.example.com")
+  await user.type(screen.getByLabelText("Account token"), "secret-token")
+  await user.type(screen.getByLabelText("Reserved name"), "pay-bones")
+  await user.click(screen.getByRole("button", { name: "Create public share" }))
+  await waitFor(() => expect(vi.mocked(api.provisionZrok).mock.calls[0]?.[0]).toEqual({
+    mode: "self_hosted", account_token: "secret-token", api_endpoint: "https://zrok.example.com",
+    namespace: "public", name: "pay-bones",
+  }))
 })

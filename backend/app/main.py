@@ -66,6 +66,7 @@ SPA_ROUTES = (
     "/webhooks/",
     "/connections/cloudflare/",
     "/connections/tailscale/",
+    "/connections/zrok/",
 )
 FORWARDED_HEADERS = frozenset(
     {

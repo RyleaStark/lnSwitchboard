@@ -1,6 +1,6 @@
 services:
   permissions-init:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc22}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc23}
     container_name: lnswitchboard-permissions-init
     user: "0:0"
     network_mode: none
@@ -18,11 +18,13 @@ services:
       - ./secrets:/app-secrets
       - tailscale-control:/tailscale-control
       - tailscale-state:/tailscale-state
+      - zrok-control:/zrok-control
+      - zrok-state:/zrok-state
       - public-backend:/public-socket
     restart: "no"
 
   lnswitchboard:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc22}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc23}
     container_name: lnswitchboard
     restart: unless-stopped
     depends_on:
@@ -61,9 +63,13 @@ services:
       TAILSCALE_CONNECTOR_ENABLED: "true"
       TAILSCALE_CONTROL_DIR: /app/secrets/tailscale/control
       TAILSCALE_STATUS_DIR: /app/secrets/tailscale/status
+      ZROK_CONNECTOR_ENABLED: "true"
+      ZROK_CONTROL_DIR: /app/secrets/zrok/control
+      ZROK_STATUS_DIR: /app/secrets/zrok/status
     volumes:
       - ./secrets:/app/secrets:rw
       - tailscale-control:/app/secrets/tailscale
+      - zrok-control:/app/secrets/zrok
       - ${APP_LIGHTNING_NODE_DATA_DIR:-/app-data/lightning/data/lnd}:/lnd:ro
       - public-backend:/run/lnswitchboard-public:rw
     ports:
@@ -78,7 +84,7 @@ services:
       default: {}
 
   lnswitchboard-public:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc22}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc23}
     container_name: lnswitchboard-public
     restart: unless-stopped
     depends_on:
@@ -108,6 +114,9 @@ services:
         aliases:
           - lnswitchboard-public
           - lns.internal
+      zrok-public:
+        aliases:
+          - public
     healthcheck:
       test:
         - CMD
@@ -198,12 +207,47 @@ services:
       retries: 3
       start_period: 10s
 
+  zrok:
+    image: openziti/zrok2:2.0.4@sha256:310ab634172ce03dd23ff1ee8515195e1a564197dbc4e6cdfd57dad2fb822400
+    container_name: lnswitchboard-zrok
+    entrypoint: ["/usr/local/bin/lnswitchboard-zrok-supervisor"]
+    user: "1000:1000"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      permissions-init:
+        condition: service_completed_successfully
+      lnswitchboard-public:
+        condition: service_healthy
+    read_only: true
+    mem_limit: 128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOME: /var/lib/zrok
+      ZROK_CONTROL_DIR: /run/lnswitchboard/control
+      ZROK_STATUS_DIR: /run/lnswitchboard/status
+    volumes:
+      - zrok-state:/var/lib/zrok
+      - zrok-control:/run/lnswitchboard
+      - ./deploy/zrok/supervisor.sh:/usr/local/bin/lnswitchboard-zrok-supervisor:ro
+    networks:
+      - zrok-public
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
 volumes:
   public-backend:
   tailscale-state:
   tailscale-control:
+  zrok-state:
+  zrok-control:
   cloudflare-mesh-state:
 
 networks:
   cloudflare-egress:
+    driver: bridge
+  zrok-public:
     driver: bridge

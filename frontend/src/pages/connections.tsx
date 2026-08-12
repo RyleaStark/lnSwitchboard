@@ -9,6 +9,7 @@ import { toast } from "sonner"
 import { CloudflareIcon } from "@/components/cloudflare-icon"
 import { CopyButton } from "@/components/common"
 import { TailscaleIcon } from "@/components/tailscale-icon"
+import { ZrokIcon } from "@/components/zrok-icon"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -41,10 +42,12 @@ import {
   type CloudflareZone,
   type ProviderConnection,
   type TailscaleLogin,
+  type ZrokProvisionPayload,
 } from "@/lib/api"
 
 export function ConnectionsPage() {
   const location = useLocation()
+  if (location.pathname.includes("/connections/zrok")) return <ZrokConnectionsPage />
   return location.pathname.includes("/connections/tailscale") ? (
     <TailscaleConnectionsPage />
   ) : (
@@ -1491,6 +1494,104 @@ function ConnectedCloudflare({
           </AlertDialogContent>
         </AlertDialog>
       </div>
+    </div>
+  )
+}
+
+function ZrokConnectionsPage() {
+  const queryClient = useQueryClient()
+  const [mode, setMode] = useState<ZrokProvisionPayload["mode"]>("cloud")
+  const [accountToken, setAccountToken] = useState("")
+  const [apiEndpoint, setApiEndpoint] = useState("")
+  const [namespace, setNamespace] = useState("public")
+  const [name, setName] = useState("")
+
+  const connections = useQuery({ queryKey: ["connections"], queryFn: api.connections })
+  const setup = useQuery({ queryKey: ["zrok-setup"], queryFn: api.zrokSetup })
+  const connection = connections.data?.connections.find((item) => item.provider === "zrok")
+  const provider = connections.data?.providers.find((item) => item.id === "zrok")
+  const available = setup.data?.available === true && provider?.capability === "available"
+
+  const provision = useMutation({
+    mutationFn: api.provisionZrok,
+    onSuccess: async () => {
+      setAccountToken("")
+      await queryClient.invalidateQueries({ queryKey: ["connections"] })
+      toast.success("zrok public share connected")
+    },
+    onError: (error: Error) => toast.error(error.message),
+  })
+  const refresh = useMutation({
+    mutationFn: () => api.refreshZrokStatus(connection!.id),
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["connections"] }),
+    onError: (error: Error) => toast.error(error.message),
+  })
+  const disconnect = useMutation({
+    mutationFn: () => api.disconnectZrok(connection!.id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["connections"] })
+      toast.success("zrok disconnected")
+    },
+    onError: (error: Error) => toast.error(error.message),
+  })
+
+  if (connections.isLoading || setup.isLoading) return <ConnectionsSkeleton />
+  if (connections.isError || setup.isError) return <ConnectionsLoadError />
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex items-center gap-3">
+        <ZrokIcon className="size-11 shrink-0" />
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">zrok</h1>
+          <p className="text-sm text-muted-foreground">Publish the secretless Lightning endpoint through zrok Cloud or your own zrok instance.</p>
+        </div>
+      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>{connection ? "Public share" : "Connect zrok"}</CardTitle>
+          <CardDescription>
+            zrok receives traffic only from the public listener on port 21212. It cannot reach lnSwitchboard administration or LND.
+          </CardDescription>
+        </CardHeader>
+        <div className="space-y-5 px-6 pb-6">
+          {!available ? (
+            <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">The zrok connector is not installed in this deployment.</p>
+          ) : connection ? (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {connection.domains.map((domain) => (
+                  <div key={domain.hostname} className="rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
+                    <div className="flex items-center justify-between gap-3"><span className="truncate font-medium">{domain.hostname}</span><Badge variant="outline">{domain.status}</Badge></div>
+                    <p className="mt-2 text-xs text-muted-foreground">Mode: {String(connection.public_metadata.mode ?? "cloud").replace("_", " ")}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" disabled={refresh.isPending || disconnect.isPending} onClick={() => refresh.mutate()}><RefreshCwIcon className={refresh.isPending ? "animate-spin" : undefined} />Refresh status</Button>
+                <Button variant="destructive" disabled={refresh.isPending || disconnect.isPending} onClick={() => disconnect.mutate()}><Trash2Icon />Disconnect</Button>
+              </div>
+            </>
+          ) : (
+            <FieldGroup className="max-w-2xl">
+              <Field>
+                <FieldLabel htmlFor="zrok-mode">Service</FieldLabel>
+                <select id="zrok-mode" value={mode} onChange={(event) => setMode(event.target.value as ZrokProvisionPayload["mode"])} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm">
+                  <option value="cloud">zrok Cloud</option>
+                  <option value="self_hosted">Self-hosted zrok</option>
+                </select>
+                <FieldDescription>{mode === "cloud" ? "Uses zrok.io to assign a public HTTPS hostname." : "Uses an HTTPS zrok controller operated by you or your organization."}</FieldDescription>
+              </Field>
+              {mode === "self_hosted" ? <Field><FieldLabel htmlFor="zrok-api-endpoint">zrok API endpoint</FieldLabel><Input id="zrok-api-endpoint" type="url" placeholder="https://zrok.example.com" value={apiEndpoint} onChange={(event) => setApiEndpoint(event.target.value)} /><FieldDescription>Controller origin only. The tunnel destination remains fixed to the public listener.</FieldDescription></Field> : null}
+              <Field><FieldLabel htmlFor="zrok-account-token">Account token</FieldLabel><Input id="zrok-account-token" type="password" autoComplete="off" value={accountToken} onChange={(event) => setAccountToken(event.target.value)} /><FieldDescription>Used once to enroll this isolated connector; never returned to the browser.</FieldDescription></Field>
+              <Field><FieldLabel htmlFor="zrok-namespace">Namespace</FieldLabel><Input id="zrok-namespace" value={namespace} onChange={(event) => setNamespace(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="zrok-name">Reserved name</FieldLabel><Input id="zrok-name" placeholder="pay-bones" value={name} onChange={(event) => setName(event.target.value)} /><FieldDescription>A stable name suitable for Lightning Addresses.</FieldDescription></Field>
+              {mode === "cloud" && setup.data?.cloud_interstitial_warning ? <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">zrok Cloud may show an anti-phishing interstitial until the account is verified. Verify the resulting URL before publishing Lightning Addresses.</p> : null}
+              <Button disabled={!accountToken || !name || (mode === "self_hosted" && !apiEndpoint) || provision.isPending} onClick={() => provision.mutate({ mode, account_token: accountToken, api_endpoint: mode === "self_hosted" ? apiEndpoint : undefined, namespace, name })}>{provision.isPending ? "Connecting…" : "Create public share"}</Button>
+            </FieldGroup>
+          )}
+        </div>
+      </Card>
     </div>
   )
 }

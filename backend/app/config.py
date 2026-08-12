@@ -228,6 +228,18 @@ class Settings(BaseSettings):
     tailscale_status_dir: Path = _env_field(
         env="TAILSCALE_STATUS_DIR", default=Path("secrets/tailscale/status")
     )
+    zrok_connector_enabled: bool = _env_field(
+        env="ZROK_CONNECTOR_ENABLED", default=False
+    )
+    zrok_control_dir: Path = _env_field(
+        env="ZROK_CONTROL_DIR", default=Path("secrets/zrok/control")
+    )
+    zrok_status_dir: Path = _env_field(
+        env="ZROK_STATUS_DIR", default=Path("secrets/zrok/status")
+    )
+    zrok_cloud_api_endpoint: str = _env_field(
+        env="ZROK_CLOUD_API_ENDPOINT", default="https://api-v2.zrok.io"
+    )
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     trusted_proxy_cidrs: str = _env_field(env="TRUSTED_PROXY_CIDRS", default="")
     trusted_hosts: str = _env_field(env="TRUSTED_HOSTS", default="localhost,127.0.0.1,[::1]")
@@ -252,6 +264,8 @@ class Settings(BaseSettings):
         "cloudflared_token_path",
         "tailscale_control_dir",
         "tailscale_status_dir",
+        "zrok_control_dir",
+        "zrok_status_dir",
         "macaroon_store_path",
         "nostr_zap_secret_path",
         mode="before",
