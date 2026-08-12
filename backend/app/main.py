@@ -497,23 +497,34 @@ def _add_admin_access_control(target_app: FastAPI) -> None:
         return PlainTextResponse("Forbidden", status_code=status.HTTP_403_FORBIDDEN)
 
 
-def _add_cloudflare_response_privacy(target_app: FastAPI) -> None:
+def _add_provider_response_privacy(target_app: FastAPI) -> None:
     @target_app.middleware("http")
     async def prevent_cloudflare_admin_caching(request: Request, call_next):
-        is_cloudflare_admin = request.url.path.startswith(
-            ("/api/connections/cloudflare", "/api/cloudflare/oauth")
+        is_private_provider_admin = request.url.path.startswith(
+            (
+                "/api/connections/cloudflare",
+                "/api/cloudflare/oauth",
+                "/api/connections/zrok",
+            )
         )
         try:
             response = await call_next(request)
         except Exception:
-            if not is_cloudflare_admin:
+            if not is_private_provider_admin:
                 raise
-            LOGGER.error("Unhandled Cloudflare administration request failure")
+            LOGGER.error("Unhandled provider administration request failure")
+            detail = (
+                "Cloudflare operation failed"
+                if request.url.path.startswith(
+                    ("/api/connections/cloudflare", "/api/cloudflare/oauth")
+                )
+                else "zrok operation failed"
+            )
             response = JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": "Cloudflare operation failed"},
+                content={"detail": detail},
             )
-        if is_cloudflare_admin:
+        if is_private_provider_admin:
             response.headers["Cache-Control"] = "no-store, private"
             response.headers["Pragma"] = "no-cache"
         return response
@@ -553,7 +564,7 @@ public_app = FastAPI(
 
 
 @admin_app.exception_handler(RequestValidationError)
-async def sanitize_cloudflare_oauth_validation(
+async def sanitize_provider_validation(
     request: Request, exc: RequestValidationError
 ):
     if request.url.path.startswith(
@@ -563,12 +574,17 @@ async def sanitize_cloudflare_oauth_validation(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"detail": "Invalid Cloudflare request"},
         )
+    if request.url.path.startswith("/api/connections/zrok"):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": "Invalid zrok request"},
+        )
     return await request_validation_exception_handler(request, exc)
 
 
 _add_admin_access_control(admin_app)
 _add_request_security(admin_app)
-_add_cloudflare_response_privacy(admin_app)
+_add_provider_response_privacy(admin_app)
 _add_request_security(public_app)
 
 admin_app.include_router(ui_router.router)

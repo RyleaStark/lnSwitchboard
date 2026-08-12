@@ -23,7 +23,6 @@ class StubConnector:
         return {
             "state": "connected",
             "operation_id": self.operation_id,
-            "share_token": "secret-runtime-share-token",
             "frontend_endpoints": [self.endpoint],
         }
 

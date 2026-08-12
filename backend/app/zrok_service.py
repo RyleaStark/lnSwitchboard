@@ -217,10 +217,12 @@ class ZrokService:
 
     def _persist(self, status: dict[str, object], *, mode: str, endpoint: str, namespace: str, name: str) -> ProviderConnection:
         frontend_endpoints = status.get("frontend_endpoints")
-        if not isinstance(frontend_endpoints, list) or not frontend_endpoints:
+        if not isinstance(frontend_endpoints, list) or not (1 <= len(frontend_endpoints) <= 8):
             raise ZrokOperationError("zrok connector did not return a public endpoint")
         hostnames: list[str] = []
         for value in frontend_endpoints:
+            if not isinstance(value, str) or len(value) > 2048:
+                raise ZrokOperationError("zrok connector returned an invalid public endpoint")
             parsed = urlsplit(str(value))
             try:
                 port = parsed.port
@@ -238,9 +240,6 @@ class ZrokService:
             ):
                 raise ZrokOperationError("zrok connector returned an invalid public endpoint")
             hostnames.append(parsed.hostname.lower())
-        share_token = str(status.get("share_token", "")).strip()
-        if not share_token:
-            raise ZrokOperationError("zrok connector did not return a share token")
         metadata = {"mode": mode, "api_endpoint": endpoint, "namespace": namespace, "name": name}
         reserved_name = f"{namespace}:{name}"
         connection = self.store.upsert_connection(

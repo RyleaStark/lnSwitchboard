@@ -39,7 +39,7 @@ def test_zrok_supervisor_has_fixed_target_and_never_logs_subordinate_access() ->
     supervisor = (ROOT / "deploy/zrok/supervisor.sh").read_text(encoding="utf-8")
     assert "TARGET=http://public:21212" in supervisor
     assert ":22121" not in supervisor
-    assert "--backend-mode proxy --open --subordinate --force-local" in supervisor
+    assert "--backend-mode proxy --open --headless --subordinate --force-local" in supervisor
     assert '2>/dev/null' in supervisor
     assert 'account_token' in supervisor
     assert 'operation_id' in supervisor
