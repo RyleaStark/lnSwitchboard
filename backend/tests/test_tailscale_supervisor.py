@@ -169,6 +169,18 @@ fi
     yield control_dir, status_dir, state_dir, command_log, env
 
 
+def test_supervisor_uses_pinned_busybox_compatible_nonblocking_flock() -> None:
+    source = SUPERVISOR.read_text(encoding="utf-8")
+    assert "flock -xn 9" in source
+    assert "flock -x -w" not in source
+
+
+def test_supervisor_default_shutdown_budget_fits_compose_grace_period() -> None:
+    source = SUPERVISOR.read_text(encoding="utf-8")
+    assert 'COMMAND_TIMEOUT="${TS_COMMAND_TIMEOUT:-15}"' in source
+    assert 'LOGIN_STOP_TIMEOUT="${TS_LOGIN_STOP_TIMEOUT:-3}"' in source
+
+
 def test_supervisor_starts_userspace_daemon_and_publishes_self_only_status(
     supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
 ) -> None:
