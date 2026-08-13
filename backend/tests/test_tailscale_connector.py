@@ -315,6 +315,8 @@ def test_connector_requeues_retryable_error_result_under_protocol_lock(
                 "state": "error",
                 "error": "funnel_disable_failed",
                 "operation_id": operation_id,
+                "external_id": "node-a",
+                "hostname": "a.example.ts.net",
             }
         ),
         encoding="utf-8",
@@ -329,3 +331,42 @@ def test_connector_requeues_retryable_error_result_under_protocol_lock(
 
     assert not result.exists()
     assert queue.exists()
+
+
+def test_connector_rejects_retryable_result_for_different_identity(
+    tmp_path: Path,
+) -> None:
+    connector = _connector(tmp_path)
+    operation_id = "c" * 32
+    connector.disconnect(
+        external_id="node-a",
+        hostname="a.example.ts.net",
+        operation_id=operation_id,
+    )
+    queue = tmp_path / "control" / "queue" / f"{operation_id}.json"
+    queue.unlink()
+    result = tmp_path / "status" / "results" / f"{operation_id}.json"
+    result.write_text(
+        json.dumps(
+            {
+                "command": "disconnect",
+                "state": "error",
+                "error": "funnel_disable_failed",
+                "operation_id": operation_id,
+                "external_id": "node-b",
+                "hostname": "b.example.ts.net",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TailscaleProtocolError, match="does not match"):
+        connector.disconnect(
+            external_id="node-a",
+            hostname="a.example.ts.net",
+            operation_id=operation_id,
+            retry=True,
+        )
+
+    assert result.exists()
+    assert not queue.exists()

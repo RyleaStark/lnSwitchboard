@@ -15,8 +15,9 @@ PROCESSING_DIR="$CONTROL_DIR/processing"
 COMPLETED_DIR="$CONTROL_DIR/completed"
 ACK_DIR="$CONTROL_DIR/acks"
 RESULT_DIR="$STATUS_DIR/results"
-
+LOCK_ROOT=$(dirname "$CONTROL_DIR")
 POLL_INTERVAL="${TS_POLL_INTERVAL:-2}"
+COMMAND_TIMEOUT="${TS_COMMAND_TIMEOUT:-30}"
 LOGIN_RETENTION_SECONDS="${TS_LOGIN_RETENTION_SECONDS:-300}"
 COMPLETED_RETENTION_SECONDS="${TS_COMPLETED_RETENTION_SECONDS:-2592000}"
 COMPLETED_MAX_RECORDS="${TS_COMPLETED_MAX_RECORDS:-4096}"
@@ -42,6 +43,12 @@ case "$COMPLETED_RETENTION_SECONDS:$COMPLETED_MAX_RECORDS" in
         exit 1
         ;;
 esac
+case "$COMMAND_TIMEOUT" in
+    "" | *[!0-9]* | 0)
+        printf '%s\n' "TS_COMMAND_TIMEOUT must be a positive integer" >&2
+        exit 1
+        ;;
+esac
 
 TAILSCALED_PID=""
 LOGIN_PID=""
@@ -49,7 +56,7 @@ LOGIN_COMPLETED_AT=""
 
 mkdir -p "$STATE_DIR" "$QUEUE_DIR" "$OPERATION_DIR" "$PROCESSING_DIR" "$COMPLETED_DIR" "$ACK_DIR" "$RESULT_DIR" "$(dirname "$SOCKET")"
 chmod 0700 "$CONTROL_DIR" "$STATUS_DIR" "$QUEUE_DIR" "$OPERATION_DIR" "$PROCESSING_DIR" "$COMPLETED_DIR" "$ACK_DIR" "$RESULT_DIR"
-exec 9<"$CONTROL_DIR"
+exec 9<"$LOCK_ROOT"
 
 if [ -f "$STATUS_DIR/login.json" ]; then
     LOGIN_COMPLETED_AT=$(stat -c %Y "$STATUS_DIR/login.json" 2>/dev/null || date +%s)
@@ -83,6 +90,10 @@ start_daemon() {
         --socket="$SOCKET" \
         >/dev/null 2>/dev/null &
     TAILSCALED_PID=$!
+}
+
+run_tailscale() {
+    timeout -k 5 "$COMMAND_TIMEOUT" "$TAILSCALE_BIN" "$@"
 }
 
 sync_path() {
@@ -136,7 +147,7 @@ publish_node_status() {
     destination="$STATUS_DIR/node.json"
     temporary="$destination.tmp.$$"
     raw_status=""
-    if raw_status=$("$TAILSCALE_BIN" --socket="$SOCKET" status --json --peers=false 2>/dev/null); then
+    if raw_status=$(run_tailscale --socket="$SOCKET" status --json --peers=false 2>/dev/null); then
         printf '%s\n' "$raw_status" | sed -E \
             -e 's/"AuthURL"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*//' \
             -e 's/,[[:space:]]*"AuthURL"[[:space:]]*:[[:space:]]*"[^"]*"//' \
@@ -227,7 +238,7 @@ read_claimed_command() {
 
 fresh_runtime_identity() {
     live_status="$STATUS_DIR/identity.json.tmp.$$"
-    if ! "$TAILSCALE_BIN" --socket="$SOCKET" status --json --peers=false \
+    if ! run_tailscale --socket="$SOCKET" status --json --peers=false \
         >"$live_status" 2>/dev/null; then
         rm -f "$live_status"
         return 1
@@ -277,7 +288,7 @@ enable_funnel() {
         publish_result enable error identity_mismatch "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
         return
     fi
-    if "$TAILSCALE_BIN" --socket="$SOCKET" funnel --bg --yes "$FUNNEL_TARGET" >/dev/null 2>/dev/null; then
+    if run_tailscale --socket="$SOCKET" funnel --bg --yes "$FUNNEL_TARGET" >/dev/null 2>/dev/null; then
         persist_active_identity
         publish_result enable complete "" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
     else
@@ -290,7 +301,7 @@ disable_funnel() {
         publish_result disable error identity_mismatch "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
         return
     fi
-    if "$TAILSCALE_BIN" --socket="$SOCKET" funnel reset >/dev/null 2>/dev/null; then
+    if run_tailscale --socket="$SOCKET" funnel reset >/dev/null 2>/dev/null; then
         persist_active_identity
         publish_result disable complete "" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
     else
@@ -329,7 +340,7 @@ resume_disconnect() {
     # Intent phases are written before each side effect. Replaying reset/logout
     # is safe, so a crash after the provider call cannot strand the operation.
     if [ "$phase" = funnel_disabling ]; then
-        if ! "$TAILSCALE_BIN" --socket="$SOCKET" funnel reset >/dev/null 2>/dev/null; then
+        if ! run_tailscale --socket="$SOCKET" funnel reset >/dev/null 2>/dev/null; then
             publish_result disconnect error funnel_disable_failed "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
             return
         fi
@@ -341,12 +352,12 @@ resume_disconnect() {
         phase=provider_logging_out
     fi
     if [ "$phase" = provider_logging_out ]; then
-        if ! "$TAILSCALE_BIN" --socket="$SOCKET" logout >/dev/null 2>/dev/null; then
+        if ! run_tailscale --socket="$SOCKET" logout >/dev/null 2>/dev/null; then
             # A successful logout followed by a crash is observed as NeedsLogin.
             # This is accepted only with the durable, previously identity-bound
             # provider_logging_out intent—not from status or active metadata alone.
             logout_status="$STATUS_DIR/logout-status.json.tmp.$$"
-            if ! "$TAILSCALE_BIN" --socket="$SOCKET" status --json --peers=false >"$logout_status" 2>/dev/null \
+            if ! run_tailscale --socket="$SOCKET" status --json --peers=false >"$logout_status" 2>/dev/null \
                 || [ "$(json_string_field BackendState "$logout_status")" != NeedsLogin ]; then
                 rm -f "$logout_status"
                 publish_result disconnect error logout_failed "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
@@ -566,7 +577,7 @@ while :; do
     flock -u 9
     publish_node_status
     publish_command "$STATUS_DIR/funnel.json" \
-        "$TAILSCALE_BIN" --socket="$SOCKET" funnel status --json
+        run_tailscale --socket="$SOCKET" funnel status --json
     sleep "$POLL_INTERVAL" &
     wait $! 2>/dev/null || true
 done

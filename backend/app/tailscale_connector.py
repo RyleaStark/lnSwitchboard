@@ -90,14 +90,15 @@ class TailscaleConnector:
 
     @contextmanager
     def _protocol_lock(self) -> Iterator[None]:
+        lock_root = self.control_dir.parent
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        descriptor = os.open(self.control_dir, flags)
+        descriptor = os.open(lock_root, flags)
         try:
             metadata = os.fstat(descriptor)
             if not stat.S_ISDIR(metadata.st_mode):
                 raise TailscaleProtocolError("Tailscale protocol lock is unsafe")
             fcntl.flock(descriptor, fcntl.LOCK_EX)
-            current = os.stat(self.control_dir, follow_symlinks=False)
+            current = os.stat(lock_root, follow_symlinks=False)
             if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
                 raise TailscaleProtocolError("Tailscale protocol lock changed")
             yield
@@ -162,6 +163,8 @@ class TailscaleConnector:
                 or result.get("command") != operation
                 or result.get("operation_id") != operation_id
                 or result.get("state") != "error"
+                or result.get("external_id") != parameters.get("external_id")
+                or result.get("hostname") != parameters.get("hostname")
             ):
                 raise TailscaleProtocolError(
                     "Tailscale retry result does not match the operation"
