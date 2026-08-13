@@ -313,6 +313,10 @@ class TailscaleService:
                 and (hostname is None or status.get("hostname") == hostname)
             ):
                 state = status.get("state")
+                if not isinstance(state, str):
+                    raise TailscaleProtocolError(
+                        "Tailscale command result state is invalid"
+                    )
                 if state in {"complete", "started"}:
                     if consume_result:
                         self.connector.consume_command_result(operation_id)

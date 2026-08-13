@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .sqlite_utils import sqlite_connection
+from .sqlite_utils import sqlite_connection, sqlite_read_connection
 
 _PROVIDER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _CONNECTION_STATUSES = {
@@ -282,7 +282,7 @@ class ConnectionStore:
             )
 
     def get_connection(self, connection_id: str) -> ProviderConnection | None:
-        with sqlite_connection(self.path) as connection:
+        with sqlite_read_connection(self.path) as connection:
             row = connection.execute(
                 "SELECT * FROM provider_connections WHERE id = ?", (connection_id,)
             ).fetchone()
@@ -300,7 +300,7 @@ class ConnectionStore:
         return self._row_to_connection(row, domain_rows)
 
     def list_connections(self) -> list[ProviderConnection]:
-        with sqlite_connection(self.path) as connection:
+        with sqlite_read_connection(self.path) as connection:
             rows = connection.execute(
                 "SELECT * FROM provider_connections ORDER BY created_at ASC, id ASC"
             ).fetchall()

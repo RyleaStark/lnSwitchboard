@@ -34,14 +34,18 @@ class TailscaleConnector:
         self.control_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.status_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.command_dir = self.control_dir / "queue"
+        self.operation_dir = self.control_dir / "operations"
+        self.processing_dir = self.control_dir / "processing"
         self.ack_dir = self.control_dir / "acks"
         self.result_dir = self.status_dir / "results"
         self.command_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.operation_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.ack_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.result_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.control_dir, 0o700)
         os.chmod(self.status_dir, 0o700)
         os.chmod(self.command_dir, 0o700)
+        os.chmod(self.operation_dir, 0o700)
         os.chmod(self.ack_dir, 0o700)
         os.chmod(self.result_dir, 0o700)
 
@@ -93,13 +97,19 @@ class TailscaleConnector:
             "operation_id": operation_id,
             **parameters,
         }
-        self._atomic_write(
-            self.command_dir / f"{operation_id}.json",
-            (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode(
-                "utf-8"
-            ),
-            immutable=True,
-        )
+        content = (
+            json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
+        ).encode("utf-8")
+        operation_path = self.operation_dir / f"{operation_id}.json"
+        self._atomic_write(operation_path, content, immutable=True)
+        processing_path = self.processing_dir / f"{operation_id}.json"
+        queue_path = self.command_dir / f"{operation_id}.json"
+        if not processing_path.exists() and not queue_path.exists():
+            try:
+                os.link(operation_path, queue_path)
+                self._sync_directory(self.command_dir)
+            except FileExistsError:
+                pass
         return operation_id
 
     def _read_bounded(self, path: Path) -> str | None:

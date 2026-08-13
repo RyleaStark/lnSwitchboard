@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import fcntl
+import os
 import sqlite3
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .sqlite_utils import sqlite_connection
+from .sqlite_utils import sqlite_connection, sqlite_read_connection
+
+_KEEP_ERROR = object()
+_LIFECYCLE_LOCK = threading.RLock()
 
 
 def _utc_now() -> str:
@@ -32,7 +40,8 @@ class TailscaleLifecycleStore:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite_connection(self.path) as connection:
+        self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        with self._write_connection() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tailscale_lifecycle (
@@ -48,6 +57,34 @@ class TailscaleLifecycleStore:
                 """
             )
 
+    @contextmanager
+    def _process_lock(self) -> Iterator[None]:
+        descriptor = os.open(
+            self.lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    @contextmanager
+    def _write_connection(self) -> Iterator[sqlite3.Connection]:
+        with _LIFECYCLE_LOCK:
+            with self._process_lock():
+                with sqlite_connection(self.path) as connection:
+                    yield connection
+
+    @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        with _LIFECYCLE_LOCK:
+            with sqlite_read_connection(self.path) as connection:
+                yield connection
+
     def create_disconnect(
         self,
         *,
@@ -58,7 +95,7 @@ class TailscaleLifecycleStore:
     ) -> TailscaleLifecycle:
         now = _utc_now()
         try:
-            with sqlite_connection(self.path) as connection:
+            with self._write_connection() as connection:
                 connection.execute(
                     """
                     INSERT INTO tailscale_lifecycle (
@@ -81,23 +118,32 @@ class TailscaleLifecycleStore:
         return result
 
     def update(
-        self, operation_id: str, *, phase: str, last_error: str | None = None
+        self,
+        operation_id: str,
+        *,
+        phase: str,
+        last_error: str | None | object = _KEEP_ERROR,
     ) -> TailscaleLifecycle:
-        with sqlite_connection(self.path) as connection:
-            cursor = connection.execute(
-                """
-                UPDATE tailscale_lifecycle
-                SET phase = ?, last_error = ?, updated_at = ?
-                WHERE operation_id = ?
-                """,
-                (phase, last_error, _utc_now(), operation_id),
-            )
+        with self._write_connection() as connection:
+            if last_error is _KEEP_ERROR:
+                cursor = connection.execute(
+                    "UPDATE tailscale_lifecycle SET phase = ?, updated_at = ? WHERE operation_id = ?",
+                    (phase, _utc_now(), operation_id),
+                )
+            else:
+                cursor = connection.execute(
+                    "UPDATE tailscale_lifecycle SET phase = ?, last_error = ?, updated_at = ? WHERE operation_id = ?",
+                    (phase, last_error, _utc_now(), operation_id),
+                )
             if cursor.rowcount == 0:
                 raise KeyError(operation_id)
-        return self.get(operation_id)  # type: ignore[return-value]
+        result = self.get(operation_id)
+        if result is None:  # pragma: no cover
+            raise KeyError(operation_id)
+        return result
 
     def get(self, operation_id: str) -> TailscaleLifecycle | None:
-        with sqlite_connection(self.path) as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT * FROM tailscale_lifecycle WHERE operation_id = ?",
                 (operation_id,),
@@ -105,14 +151,14 @@ class TailscaleLifecycleStore:
         return self._record(row) if row is not None else None
 
     def list_pending(self) -> list[TailscaleLifecycle]:
-        with sqlite_connection(self.path) as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM tailscale_lifecycle ORDER BY created_at, operation_id"
             ).fetchall()
         return [self._record(row) for row in rows]
 
     def get_for_connection(self, connection_id: str) -> TailscaleLifecycle | None:
-        with sqlite_connection(self.path) as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT * FROM tailscale_lifecycle WHERE connection_id = ?",
                 (connection_id,),
@@ -120,7 +166,7 @@ class TailscaleLifecycleStore:
         return self._record(row) if row is not None else None
 
     def delete(self, operation_id: str) -> bool:
-        with sqlite_connection(self.path) as connection:
+        with self._write_connection() as connection:
             cursor = connection.execute(
                 "DELETE FROM tailscale_lifecycle WHERE operation_id = ?",
                 (operation_id,),

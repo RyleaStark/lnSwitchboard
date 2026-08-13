@@ -207,3 +207,31 @@ def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
     with _SQLITE_OPEN_LOCK:
         with _sqlite_connection_locked(path) as connection:
             yield connection
+
+
+@contextmanager
+def sqlite_read_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    """Yield a descriptor-bound read-only connection without write transactions."""
+
+    with private_regular(path, writable=False, create=False) as (
+        descriptor,
+        parent_fd,
+        name,
+    ):
+        opened = os.fstat(descriptor)
+        stable_path = f"/proc/self/fd/{descriptor}"
+        connection = sqlite3.connect(
+            f"file:{stable_path}?mode=ro",
+            uri=True,
+            detect_types=sqlite3.PARSE_DECLTYPES,
+            check_same_thread=False,
+        )
+        try:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise OSError("SQLite database path changed while opening")
+            connection.row_factory = sqlite3.Row
+            connection.set_authorizer(_deny_sidecar_mode_changes)
+            yield connection
+        finally:
+            connection.close()

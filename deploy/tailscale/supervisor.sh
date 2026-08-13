@@ -10,6 +10,7 @@ SOCKET="${TS_SOCKET:-/var/run/tailscale/tailscaled.sock}"
 CONTROL_DIR="${TS_CONTROL_DIR:-/run/lnswitchboard/control}"
 STATUS_DIR="${TS_STATUS_DIR:-/run/lnswitchboard/status}"
 QUEUE_DIR="$CONTROL_DIR/queue"
+OPERATION_DIR="$CONTROL_DIR/operations"
 PROCESSING_DIR="$CONTROL_DIR/processing"
 ACK_DIR="$CONTROL_DIR/acks"
 RESULT_DIR="$STATUS_DIR/results"
@@ -36,8 +37,8 @@ TAILSCALED_PID=""
 LOGIN_PID=""
 LOGIN_COMPLETED_AT=""
 
-mkdir -p "$STATE_DIR" "$QUEUE_DIR" "$PROCESSING_DIR" "$ACK_DIR" "$RESULT_DIR" "$(dirname "$SOCKET")"
-chmod 0700 "$CONTROL_DIR" "$STATUS_DIR" "$QUEUE_DIR" "$PROCESSING_DIR" "$ACK_DIR" "$RESULT_DIR"
+mkdir -p "$STATE_DIR" "$QUEUE_DIR" "$OPERATION_DIR" "$PROCESSING_DIR" "$ACK_DIR" "$RESULT_DIR" "$(dirname "$SOCKET")"
+chmod 0700 "$CONTROL_DIR" "$STATUS_DIR" "$QUEUE_DIR" "$OPERATION_DIR" "$PROCESSING_DIR" "$ACK_DIR" "$RESULT_DIR"
 
 if [ -f "$STATUS_DIR/login.json" ]; then
     LOGIN_COMPLETED_AT=$(stat -c %Y "$STATUS_DIR/login.json" 2>/dev/null || date +%s)
@@ -430,6 +431,7 @@ consume_results() {
             && [ "$(tr -d '\r\n' <"$acknowledgement")" = "$operation_id" ]; then
             durable_remove "$RESULT_DIR/$operation_id.json"
             durable_remove "$STATE_DIR/.lnswitchboard-disconnect-$operation_id.json"
+            durable_remove "$OPERATION_DIR/$operation_id.json"
         fi
         durable_remove "$acknowledgement"
     done

@@ -198,7 +198,8 @@ def test_supervisor_starts_and_cancels_login_with_validated_device_name(
         _wait_for(lambda: not (status_dir / "login.json").exists())
         _wait_for(
             lambda: (
-                '"command":"cancel_login"'
+                _command_result(status_dir, "7" * 32).exists()
+                and '"command":"cancel_login"'
                 in _command_result(status_dir, "7" * 32).read_text(encoding="utf-8")
             )
         )
