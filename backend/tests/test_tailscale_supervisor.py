@@ -94,7 +94,11 @@ def supervisor_runtime(
         bin_dir / "tailscaled",
         """#!/bin/sh
 printf 'tailscaled %s\\n' "$*" >> "$TS_TEST_COMMAND_LOG"
-trap 'exit 0' TERM INT
+if [ -f "$TS_TEST_IGNORE_DAEMON_TERM_FILE" ]; then
+  trap '' TERM INT
+else
+  trap 'exit 0' TERM INT
+fi
 while :; do sleep 1; done
 """,
     )
@@ -119,6 +123,10 @@ elif [ "${1:-}" = "up" ]; then
     trap '' TERM INT
   else
     trap 'exit 0' TERM INT
+  fi
+  if [ -f "$TS_TEST_LOGIN_DESCENDANT_PID_FILE" ]; then
+    sh -c 'trap "" TERM INT; while :; do sleep 1; done' &
+    printf '%s\n' "$!" > "$TS_TEST_LOGIN_DESCENDANT_PID_FILE"
   fi
   while :; do sleep 1; done
 elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "reset" ]; then
@@ -150,6 +158,8 @@ fi
             "TS_TEST_RUNNING_FILE": str(tmp_path / "node-running"),
             "TS_TEST_COMPLETE_LOGIN_FILE": str(tmp_path / "complete-login"),
             "TS_TEST_IGNORE_LOGIN_TERM_FILE": str(tmp_path / "ignore-login-term"),
+            "TS_TEST_IGNORE_DAEMON_TERM_FILE": str(tmp_path / "ignore-daemon-term"),
+            "TS_TEST_LOGIN_DESCENDANT_PID_FILE": str(tmp_path / "login-descendant-pid"),
             "TS_TEST_BLOCK_FUNNEL_FILE": str(tmp_path / "block-funnel"),
             "TS_LOGIN_RETENTION_SECONDS": "2",
             "TS_LOGIN_STOP_TIMEOUT": "1",
@@ -579,6 +589,66 @@ def test_cancel_login_force_kills_term_resistant_provider_and_releases_protocol_
         connector = TailscaleConnector(control_dir=control_dir, status_dir=status_dir)
         operation_id = connector.cancel_login()
         assert (control_dir / "queue" / f"{operation_id}.json").exists()
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_cancel_login_terminates_term_resistant_descendants(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, _state_dir, _command_log, env = supervisor_runtime
+    Path(env["TS_TEST_IGNORE_LOGIN_TERM_FILE"]).touch()
+    descendant_pid_file = Path(env["TS_TEST_LOGIN_DESCENDANT_PID_FILE"])
+    descendant_pid_file.touch()
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        begin_id = "9" * 32
+        cancel_id = "a" * 32
+        _write_command(control_dir, "begin-login", begin_id, device_name="lns")
+        _wait_for(lambda: descendant_pid_file.read_text(encoding="utf-8").strip() != "")
+        descendant_pid = int(descendant_pid_file.read_text(encoding="utf-8"))
+        _write_command(control_dir, "cancel-login", cancel_id)
+        _wait_for(lambda: _command_result(status_dir, cancel_id).exists(), timeout=3)
+
+        def descendant_stopped() -> bool:
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        _wait_for(descendant_stopped, timeout=3)
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_disconnect_force_kills_term_resistant_daemon_and_releases_protocol_lock(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, state_dir, _command_log, env = supervisor_runtime
+    Path(env["TS_TEST_RUNNING_FILE"]).touch()
+    Path(env["TS_TEST_IGNORE_DAEMON_TERM_FILE"]).touch()
+    (state_dir / "owned-node-state").write_text("private", encoding="utf-8")
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        operation_id = "b" * 32
+        _write_command(
+            control_dir,
+            "disconnect",
+            operation_id,
+            external_id="node-123",
+            hostname="lns.tailnet.example.ts.net",
+        )
+        _wait_for(lambda: _command_result(status_dir, operation_id).exists(), timeout=4)
+        assert '"state":"complete"' in _command_result(
+            status_dir, operation_id
+        ).read_text(encoding="utf-8")
+
+        connector = TailscaleConnector(control_dir=control_dir, status_dir=status_dir)
+        next_operation = connector.cancel_login()
+        assert (control_dir / "queue" / f"{next_operation}.json").exists()
     finally:
         process.terminate()
         process.wait(timeout=3)

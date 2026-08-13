@@ -72,11 +72,11 @@ fi
 stop_process() {
     process_pid=$1
     [ -n "$process_pid" ] || return 0
-    kill "$process_pid" 2>/dev/null || true
+    kill -TERM "-$process_pid" 2>/dev/null || kill "$process_pid" 2>/dev/null || true
     if ! timeout -k 1 "$LOGIN_STOP_TIMEOUT" sh -c '
         while kill -0 "$1" 2>/dev/null; do sleep 0.1; done
     ' sh "$process_pid"; then
-        kill -KILL "$process_pid" 2>/dev/null || true
+        kill -KILL "-$process_pid" 2>/dev/null || kill -KILL "$process_pid" 2>/dev/null || true
     fi
     wait "$process_pid" 2>/dev/null || true
 }
@@ -100,7 +100,7 @@ stop_children() {
 trap 'stop_children; exit 0' TERM INT HUP
 
 start_daemon() {
-    "$TAILSCALED_BIN" \
+    setsid "$TAILSCALED_BIN" \
         --tun=userspace-networking \
         --state="$STATE_DIR/tailscaled.state" \
         --statedir="$STATE_DIR" \
@@ -276,7 +276,7 @@ begin_login() {
     fi
     stop_login
     rm -f "$STATUS_DIR/login.json"
-    "$TAILSCALE_BIN" --socket="$SOCKET" up --json --reset \
+    setsid "$TAILSCALE_BIN" --socket="$SOCKET" up --json --reset \
         --hostname="$DEVICE_NAME" --accept-dns=false \
         >"$STATUS_DIR/login.json" 2>/dev/null &
     LOGIN_PID=$!
@@ -393,8 +393,7 @@ resume_disconnect() {
         stop_login
         rm -f "$STATUS_DIR/login.json"
         if [ -n "$TAILSCALED_PID" ]; then
-            kill "$TAILSCALED_PID" 2>/dev/null || true
-            wait "$TAILSCALED_PID" 2>/dev/null || true
+            stop_process "$TAILSCALED_PID"
             TAILSCALED_PID=""
         fi
         find "$STATE_DIR" -mindepth 1 -maxdepth 1 \
