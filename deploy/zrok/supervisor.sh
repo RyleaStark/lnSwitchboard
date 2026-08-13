@@ -45,6 +45,10 @@ shutdown() { stop_share; exit 0; }
 enabled() { zrok2 status 2>/dev/null | grep -q 'EnvZId.*<<SET>>'; }
 share_alive() { [ -n "${share_pid:-}" ] && jobs -pr | grep -qx "$share_pid"; }
 
+environment_zid() {
+  jq -er '.ziti_identity | select(type == "string" and length >= 1)' "$HOME/.zrok2/environment.json"
+}
+
 name_exists() {
   local namespace=$1 name=$2 names
   names=$(zrok2 list names --namespace-token "$namespace" --json 2>/dev/null) || return 2
@@ -53,21 +57,34 @@ name_exists() {
 }
 
 cleanup_fixed_shares() {
-  local shares token
-  shares=$(zrok2 list shares --share-mode public --target "$TARGET" --json 2>/dev/null) || return 1
+  local expected_endpoints=${1:-'[]'} env_zid shares token
+  env_zid=$(environment_zid) || return 1
+  shares=$(zrok2 list shares --env-zid "$env_zid" --share-mode public --backend-mode proxy --target "$TARGET" --json 2>/dev/null) || return 1
   while IFS= read -r token; do
     [ -n "$token" ] || continue
     zrok2 delete share "$token" >/dev/null 2>&1 || return 1
-  done < <(jq -r --arg target "$TARGET" '.shares[]? | select(.target == $target) | .shareToken' <<<"$shares")
+  done < <(jq -r --arg target "$TARGET" --arg env_zid "$env_zid" --argjson expected_endpoints "$expected_endpoints" '
+    .shares[]? |
+    select(
+      .envZId == $env_zid and
+      .target == $target and
+      .shareMode == "public" and
+      .backendMode == "proxy" and
+      ($expected_endpoints == [] or ([.frontendEndpoints[] | "https://" + ascii_downcase] == $expected_endpoints))
+    ) |
+    .shareToken
+  ' <<<"$shares")
 }
 
 reconcile_active_share() {
-  local expected_endpoints=$1 shares
-  shares=$(zrok2 list shares --share-mode public --backend-mode proxy --target "$TARGET" --json 2>/dev/null) || return 2
-  jq -ce --arg target "$TARGET" --argjson expected_endpoints "$expected_endpoints" '
+  local expected_endpoints=$1 env_zid shares
+  env_zid=$(environment_zid) || return 2
+  shares=$(zrok2 list shares --env-zid "$env_zid" --share-mode public --backend-mode proxy --target "$TARGET" --json 2>/dev/null) || return 2
+  jq -ce --arg target "$TARGET" --arg env_zid "$env_zid" --argjson expected_endpoints "$expected_endpoints" '
     [
       .shares[]? |
       select(
+        .envZId == $env_zid and
         .target == $target and
         .shareMode == "public" and
         .backendMode == "proxy" and
@@ -129,7 +146,7 @@ start_share() {
 }
 
 configure() {
-  local cfg=$CONTROL/configure.json payload endpoint token namespace name created=false
+  local cfg=$CONTROL/configure.json payload endpoint token namespace name previous_endpoints='[]' created=false
   payload=$(cat "$cfg")
   rm -f "$cfg"
   operation_id=$(jq -er '.operation_id | select(type == "string" and length == 32)' <<<"$payload")
@@ -140,7 +157,8 @@ configure() {
   payload=
   stop_share
   if enabled; then
-    cleanup_fixed_shares || { atomic_status error; token=; return 1; }
+    if [ -f "$ACTIVE" ]; then previous_endpoints=$(jq -c '.frontend_endpoints // []' "$ACTIVE"); fi
+    cleanup_fixed_shares "$previous_endpoints" || { atomic_status error; token=; return 1; }
     zrok2 disable >/dev/null 2>&1 || { atomic_status error; token=; return 1; }
   fi
   if ! ZROK2_API_ENDPOINT="$endpoint" zrok2 enable --headless --description lnswitchboard "$token" >/dev/null 2>&1; then
@@ -194,7 +212,7 @@ disconnect() {
   fi
   atomic_active cleanup "$namespace" "$name" "$(jq -c '.frontend_endpoints // []' "$ACTIVE")"
   stop_share
-  cleanup_fixed_shares || { atomic_status error; return 1; }
+  cleanup_fixed_shares "$(jq -c '.frontend_endpoints // []' "$ACTIVE")" || { atomic_status error; return 1; }
   if name_exists "$namespace" "$name"; then
     zrok2 delete name --namespace-token "$namespace" "$name" >/dev/null 2>&1 || { atomic_status error; return 1; }
   elif [ "$?" = 2 ]; then atomic_status error; return 1; fi
@@ -242,7 +260,7 @@ if [ -f "$ACTIVE" ]; then
       '{operation_id:$operation_id,namespace:$namespace,name:$name}' >"$CONTROL/disconnect.json"
     disconnect || exit 1
   elif enabled; then
-    cleanup_fixed_shares || exit 1
+    cleanup_fixed_shares "$(jq -c '.frontend_endpoints // []' "$ACTIVE")" || exit 1
     start_share "$namespace" "$name" || exit 1
   else
     atomic_status error

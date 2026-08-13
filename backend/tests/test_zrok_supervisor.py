@@ -45,14 +45,17 @@ set -euo pipefail
 printf '%s\\n' "$*" >> "$ZROK_TEST_LOG"
 case "${1:-}" in
   status) [ -f "$HOME/enabled" ] && printf 'EnvZId <<SET>>\\n' || exit 1 ;;
-  enable) touch "$HOME/enabled" ;;
+  enable)
+    touch "$HOME/enabled"
+    mkdir -p "$HOME/.zrok2"
+    printf '{"zrok_token":"secret","ziti_identity":"local-env","api_endpoint":"https://api-v2.zrok.io"}\\n' >"$HOME/.zrok2/environment.json" ;;
   disable) [ -f "$ZROK_TEST_FAIL_DISABLE" ] && exit 1; rm -f "$HOME/enabled" ;;
   create) touch "$HOME/name" ;;
   list)
     if [ -f "$ZROK_TEST_LIST_ERROR" ]; then exit 1; fi
     if [ "${2:-}" = shares ]; then
       if [ -f "$HOME/share-live" ]; then
-        printf '{"shares":[{"shareToken":"runtime-token","frontendEndpoints":["Pay.Example"],"shareMode":"public","backendMode":"proxy","target":"http://extended-umbrella-lnswitchboard_public:21212"}]}\\n'
+        printf '{"shares":[{"shareToken":"runtime-token","envZId":"local-env","frontendEndpoints":["Pay.Example"],"shareMode":"public","backendMode":"proxy","target":"http://extended-umbrella-lnswitchboard_public:21212"},{"shareToken":"foreign-token","envZId":"foreign-env","frontendEndpoints":["Pay.Example"],"shareMode":"public","backendMode":"proxy","target":"http://extended-umbrella-lnswitchboard_public:21212"}]}\\n'
       else printf '{"shares":[]}\\n'; fi
     elif [ -f "$HOME/name" ]; then printf '[{"namespaceToken":"public","name":"pay"}]\\n'
     else printf '[]\\n'; fi ;;
@@ -104,6 +107,15 @@ def _configure(control: Path, operation_id: str = "a" * 32) -> None:
                 "name": "pay",
             }
         ),
+        encoding="utf-8",
+    )
+
+
+def _enable_existing(home: Path) -> None:
+    home.joinpath("enabled").touch()
+    home.joinpath(".zrok2").mkdir(exist_ok=True)
+    home.joinpath(".zrok2/environment.json").write_text(
+        '{"zrok_token":"secret","ziti_identity":"local-env","api_endpoint":"https://api-v2.zrok.io"}',
         encoding="utf-8",
     )
 
@@ -170,7 +182,7 @@ def test_refresh_republishes_correlated_status_after_requester_clears_snapshot(r
 
 def test_recovery_migrates_legacy_active_state_without_persisting_share_token(runtime) -> None:
     _control, status, home, _log, env = runtime
-    home.joinpath("enabled").touch()
+    _enable_existing(home)
     home.joinpath("name").touch()
     home.joinpath(".lnswitchboard-active.json").write_text(
         '{"phase":"active","namespace":"public","name":"pay","share_token":"legacy-secret","operation_id":"recovery"}',
@@ -200,7 +212,7 @@ def test_supervisor_exits_nonzero_when_share_child_dies(runtime) -> None:
 
 def test_disconnect_failure_retains_cleanup_authority(runtime) -> None:
     control, status, home, _log, env = runtime
-    home.joinpath("enabled").touch()
+    _enable_existing(home)
     home.joinpath("name").touch()
     home.joinpath(".lnswitchboard-active.json").write_text(
         '{"phase":"active","namespace":"public","name":"pay","share_token":"share-token","operation_id":"recovery"}',
@@ -248,7 +260,7 @@ def test_failed_first_boot_clears_fully_compensated_starting_state(runtime) -> N
 
 def test_recovery_reconciles_starting_state_instead_of_restart_looping(runtime) -> None:
     _control, status, home, _log, env = runtime
-    home.joinpath("enabled").touch()
+    _enable_existing(home)
     home.joinpath("name").touch()
     home.joinpath(".lnswitchboard-active.json").write_text(
         '{"phase":"starting","namespace":"public","name":"pay","operation_id":"recovery","frontend_endpoints":[]}',
@@ -267,7 +279,7 @@ def test_recovery_reconciles_starting_state_instead_of_restart_looping(runtime) 
 
 def test_disconnect_rejects_identity_mismatch_without_remote_cleanup(runtime) -> None:
     control, status, home, log, env = runtime
-    home.joinpath("enabled").touch()
+    _enable_existing(home)
     home.joinpath("name").touch()
     home.joinpath(".lnswitchboard-active.json").write_text(
         '{"phase":"active","namespace":"public","name":"pay","operation_id":"recovery","frontend_endpoints":["https://pay.example"]}',
@@ -290,6 +302,34 @@ def test_disconnect_rejects_identity_mismatch_without_remote_cleanup(runtime) ->
         after = log.read_text(encoding="utf-8")
         assert "delete name" not in after[len(before):]
         assert home.joinpath(".lnswitchboard-active.json").exists()
+    finally:
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=5)
+
+
+def test_disconnect_deletes_only_current_environment_share(runtime) -> None:
+    control, status, home, log, env = runtime
+    _enable_existing(home)
+    home.joinpath("name").touch()
+    home.joinpath("share-live").touch()
+    home.joinpath(".lnswitchboard-active.json").write_text(
+        '{"phase":"active","namespace":"public","name":"pay","operation_id":"recovery","frontend_endpoints":["https://pay.example"]}',
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        [str(SUPERVISOR)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        _wait_for(lambda: (_read_status(status / "status.json") or {}).get("state") == "connected")
+        control.joinpath("disconnect.json").write_text(
+            json.dumps({"operation_id": "e" * 32, "namespace": "public", "name": "pay"}),
+            encoding="utf-8",
+        )
+        _wait_for(lambda: (_read_status(status / "status.json") or {}).get("state") == "disconnected")
+        commands = log.read_text(encoding="utf-8")
+        assert "list shares --env-zid local-env" in commands
+        assert "delete share runtime-token" in commands
+        assert "delete share foreign-token" not in commands
     finally:
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=5)
