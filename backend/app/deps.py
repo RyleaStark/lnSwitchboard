@@ -23,6 +23,7 @@ from .rate_limiter import RateLimiter
 from .request_utils import get_client_ip
 from .tailscale_connector import TailscaleConnector
 from .tailscale_service import TailscaleService
+from .deployment import public_connector_origin
 from .zrok_connector import ZrokConnector
 from .zrok_service import ZrokService
 from .webhook_dispatcher import WebhookDispatcher
@@ -114,7 +115,7 @@ def _get_tailscale_service() -> TailscaleService:
         ),
         store=_get_connection_store(),
         connector_enabled=settings.tailscale_connector_enabled,
-        public_origin=settings.tailscale_public_origin,
+        public_origin=public_connector_origin(settings.dep_env),
     )
 
 
@@ -129,7 +130,7 @@ def _get_zrok_service() -> ZrokService:
         store=_get_connection_store(),
         connector_enabled=settings.zrok_connector_enabled,
         cloud_api_endpoint=settings.zrok_cloud_api_endpoint,
-        public_origin=settings.zrok_public_origin,
+        public_origin=public_connector_origin(settings.dep_env),
     )
 
 

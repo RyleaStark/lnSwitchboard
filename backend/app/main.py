@@ -476,7 +476,7 @@ def _add_admin_access_control(target_app: FastAPI) -> None:
         proxy_is_https = peer_is_proxy and forwarded_proto == "https"
 
         if (
-            settings.dep_env.upper() in {"UMBREL", "UMBREL-DEV"}
+            settings.dep_env.upper() in {"UMBREL", "UMBREL_DEV"}
             and peer_is_proxy
             and _is_lan_address(peer)
         ):

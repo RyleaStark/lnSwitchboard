@@ -26,7 +26,7 @@ def test_zrok_runtime_is_isolated_digest_pinned_and_public_only() -> None:
     assert zrok["networks"] == ["zrok-public"]
     assert "zrok-public" not in admin.get("networks", {})
     assert public["networks"]["zrok-public"]["aliases"] == ["public"]
-    assert zrok["environment"]["ZROK_TARGET"] == "http://public:21212"
+    assert zrok["environment"]["DEP_ENV"] == "DOCKER"
     assert "zrok-state:/var/lib/zrok" in zrok["volumes"]
     assert "zrok-control:/run/lnswitchboard" in zrok["volumes"]
     assert "zrok-control:/app/secrets/zrok" in admin["volumes"]
@@ -38,7 +38,7 @@ def test_zrok_runtime_is_isolated_digest_pinned_and_public_only() -> None:
 
 def test_zrok_supervisor_has_fixed_target_and_never_logs_subordinate_access() -> None:
     supervisor = (ROOT / "deploy/zrok/supervisor.sh").read_text(encoding="utf-8")
-    assert "TARGET=${ZROK_TARGET:?" in supervisor
+    assert "DEP_ENV" in supervisor
     assert ":22121" not in supervisor
     assert "--backend-mode proxy --open --subordinate --force-local" in supervisor
     assert "--headless --subordinate" not in supervisor

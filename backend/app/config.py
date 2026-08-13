@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 from urllib.parse import urlsplit
 
+from .deployment import normalize_deployment_env
+
 import idna
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_core import PydanticUndefined
@@ -228,9 +230,7 @@ class Settings(BaseSettings):
     tailscale_status_dir: Path = _env_field(
         env="TAILSCALE_STATUS_DIR", default=Path("secrets/tailscale/status")
     )
-    tailscale_public_origin: str = _env_field(
-        env="TAILSCALE_PUBLIC_ORIGIN", default="http://127.0.0.1:21212"
-    )
+
     zrok_connector_enabled: bool = _env_field(
         env="ZROK_CONNECTOR_ENABLED", default=False
     )
@@ -243,9 +243,7 @@ class Settings(BaseSettings):
     zrok_cloud_api_endpoint: str = _env_field(
         env="ZROK_CLOUD_API_ENDPOINT", default="https://api-v2.zrok.io"
     )
-    zrok_public_origin: str = _env_field(
-        env="ZROK_PUBLIC_ORIGIN", default="http://public:21212"
-    )
+
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     trusted_proxy_cidrs: str = _env_field(env="TRUSTED_PROXY_CIDRS", default="")
     trusted_hosts: str = _env_field(env="TRUSTED_HOSTS", default="localhost,127.0.0.1,[::1]")
@@ -325,14 +323,7 @@ class Settings(BaseSettings):
     @field_validator("dep_env", mode="before")
     @classmethod
     def _normalize_dep_env(cls, value: Optional[str]) -> str:
-        if value is None:
-            return "DOCKER"
-        normalized = str(value).strip().upper().replace("_", "-")
-        if not normalized:
-            return "DOCKER"
-        if normalized not in {"DOCKER", "UMBREL", "UMBREL-DEV"}:
-            raise ValueError("DEP_ENV must be one of DOCKER, UMBREL, or UMBREL-DEV")
-        return normalized
+        return normalize_deployment_env(value)
 
     @field_validator("cloudflare_oauth_redirect_loopback")
     @classmethod

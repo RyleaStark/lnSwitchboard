@@ -180,7 +180,7 @@ export type EnvSetting = {
   hint_link?: { label?: string; href: string }
 }
 
-export type DeploymentEnv = "DOCKER" | "UMBREL" | "UMBREL-DEV"
+export type DeploymentEnv = "DOCKER" | "UMBREL" | "UMBREL_DEV"
 
 export type VersionInfo = {
   version: string
