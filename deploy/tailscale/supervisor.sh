@@ -17,8 +17,8 @@ ACK_DIR="$CONTROL_DIR/acks"
 RESULT_DIR="$STATUS_DIR/results"
 LOCK_ROOT=$(dirname "$CONTROL_DIR")
 POLL_INTERVAL="${TS_POLL_INTERVAL:-2}"
-COMMAND_TIMEOUT="${TS_COMMAND_TIMEOUT:-15}"
-LOGIN_STOP_TIMEOUT="${TS_LOGIN_STOP_TIMEOUT:-3}"
+COMMAND_TIMEOUT="${TS_COMMAND_TIMEOUT:-12}"
+LOGIN_STOP_TIMEOUT="${TS_LOGIN_STOP_TIMEOUT:-2}"
 LOCK_WAIT_TIMEOUT="${TS_LOCK_WAIT_TIMEOUT:-1}"
 LOGIN_RETENTION_SECONDS="${TS_LOGIN_RETENTION_SECONDS:-300}"
 COMPLETED_RETENTION_SECONDS="${TS_COMPLETED_RETENTION_SECONDS:-2592000}"
@@ -67,6 +67,7 @@ esac
 TAILSCALED_PID=""
 LOGIN_PID=""
 LOGIN_COMPLETED_AT=""
+PROVIDER_SEQUENCE=0
 
 mkdir -p "$STATE_DIR" "$QUEUE_DIR" "$OPERATION_DIR" "$PROCESSING_DIR" "$COMPLETED_DIR" "$ACK_DIR" "$RESULT_DIR" "$(dirname "$SOCKET")"
 chmod 0700 "$CONTROL_DIR" "$STATUS_DIR" "$QUEUE_DIR" "$OPERATION_DIR" "$PROCESSING_DIR" "$COMPLETED_DIR" "$ACK_DIR" "$RESULT_DIR"
@@ -121,7 +122,34 @@ start_daemon() {
 }
 
 run_tailscale() {
-    timeout -k 5 "$COMMAND_TIMEOUT" "$TAILSCALE_BIN" "$@"
+    PROVIDER_SEQUENCE=$((PROVIDER_SEQUENCE + 1))
+    provider_token="lnswitchboard-provider-$$-$(date +%s)-$PROVIDER_SEQUENCE"
+    exit_code=0
+    LNS_PROVIDER_OPERATION="$provider_token" \
+        timeout -k 5 "$COMMAND_TIMEOUT" "$TAILSCALE_BIN" "$@" || exit_code=$?
+    cleanup_provider_descendants "$provider_token"
+    return "$exit_code"
+}
+
+cleanup_provider_descendants() {
+    provider_token=$1
+    attempts=0
+    while [ "$attempts" -lt 10 ]; do
+        found=false
+        for environment in /proc/[0-9]*/environ; do
+            [ -r "$environment" ] || continue
+            if tr '\000' '\n' <"$environment" 2>/dev/null \
+                | grep -Fxq "LNS_PROVIDER_OPERATION=$provider_token"; then
+                provider_pid=${environment#/proc/}
+                provider_pid=${provider_pid%/environ}
+                kill -KILL "$provider_pid" 2>/dev/null || true
+                found=true
+            fi
+        done
+        [ "$found" = true ] || return 0
+        attempts=$((attempts + 1))
+        sleep 0.1
+    done
 }
 
 sync_path() {

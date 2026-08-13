@@ -134,6 +134,10 @@ elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "reset" ]; then
   exit 0
 elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "status" ]; then
   if [ -f "$TS_TEST_FAIL_FUNNEL_STATUS_FILE" ]; then exit 1; fi
+  if [ -f "$TS_TEST_PROVIDER_DESCENDANT_PID_FILE" ]; then
+    setsid sh -c 'trap "" TERM INT; while :; do sleep 1; done' &
+    printf '%s\n' "$!" > "$TS_TEST_PROVIDER_DESCENDANT_PID_FILE"
+  fi
   printf '%s\\n' '{}'
 elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "--bg" ]; then
   while [ -f "$TS_TEST_BLOCK_FUNNEL_FILE" ]; do sleep 0.02; done
@@ -160,6 +164,9 @@ fi
             "TS_TEST_IGNORE_LOGIN_TERM_FILE": str(tmp_path / "ignore-login-term"),
             "TS_TEST_IGNORE_DAEMON_TERM_FILE": str(tmp_path / "ignore-daemon-term"),
             "TS_TEST_LOGIN_DESCENDANT_PID_FILE": str(tmp_path / "login-descendant-pid"),
+            "TS_TEST_PROVIDER_DESCENDANT_PID_FILE": str(
+                tmp_path / "provider-descendant-pid"
+            ),
             "TS_TEST_BLOCK_FUNNEL_FILE": str(tmp_path / "block-funnel"),
             "TS_LOGIN_RETENTION_SECONDS": "2",
             "TS_LOGIN_STOP_TIMEOUT": "1",
@@ -177,8 +184,33 @@ def test_supervisor_uses_pinned_busybox_compatible_nonblocking_flock() -> None:
 
 def test_supervisor_default_shutdown_budget_fits_compose_grace_period() -> None:
     source = SUPERVISOR.read_text(encoding="utf-8")
-    assert 'COMMAND_TIMEOUT="${TS_COMMAND_TIMEOUT:-15}"' in source
-    assert 'LOGIN_STOP_TIMEOUT="${TS_LOGIN_STOP_TIMEOUT:-3}"' in source
+    assert 'COMMAND_TIMEOUT="${TS_COMMAND_TIMEOUT:-12}"' in source
+    assert 'LOGIN_STOP_TIMEOUT="${TS_LOGIN_STOP_TIMEOUT:-2}"' in source
+
+
+def test_synchronous_provider_cannot_leave_an_escaped_descendant(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    _control_dir, status_dir, _state_dir, _command_log, env = supervisor_runtime
+    descendant_pid_file = Path(env["TS_TEST_PROVIDER_DESCENDANT_PID_FILE"])
+    descendant_pid_file.touch()
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        _wait_for(lambda: descendant_pid_file.read_text(encoding="utf-8").strip() != "")
+        descendant_pid = int(descendant_pid_file.read_text(encoding="utf-8"))
+        _wait_for(lambda: (status_dir / "funnel.json").exists())
+
+        def descendant_stopped() -> bool:
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        _wait_for(descendant_stopped, timeout=3)
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
 
 
 def test_supervisor_starts_userspace_daemon_and_publishes_self_only_status(
