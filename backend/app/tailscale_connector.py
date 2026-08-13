@@ -115,7 +115,14 @@ class TailscaleConnector:
         self._atomic_write(operation_path, content, immutable=True)
         processing_path = self.processing_dir / f"{operation_id}.json"
         queue_path = self.command_dir / f"{operation_id}.json"
-        if not processing_path.exists() and not queue_path.exists():
+        result_path = self.result_dir / f"{operation_id}.json"
+        ack_path = self.ack_dir / f"{operation_id}.ack"
+        if (
+            not processing_path.exists()
+            and not queue_path.exists()
+            and not result_path.exists()
+            and not ack_path.exists()
+        ):
             try:
                 os.link(operation_path, queue_path)
                 self._sync_directory(self.command_dir)
@@ -127,6 +134,9 @@ class TailscaleConnector:
                 raise TailscaleProtocolError(
                     "Tailscale operation ID already has different content"
                 )
+            queue_path.unlink(missing_ok=True)
+            self._sync_directory(self.command_dir)
+        if result_path.exists() or ack_path.exists():
             queue_path.unlink(missing_ok=True)
             self._sync_directory(self.command_dir)
         return operation_id

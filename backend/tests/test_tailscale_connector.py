@@ -169,6 +169,37 @@ def test_connector_rejects_conflict_against_terminal_tombstone(tmp_path: Path) -
         )
 
 
+@pytest.mark.parametrize("terminal_state", ["result", "ack"])
+def test_connector_does_not_requeue_operation_while_terminal_state_is_pending(
+    tmp_path: Path, terminal_state: str
+) -> None:
+    connector = _connector(tmp_path)
+    operation_id = "1" * 32
+    connector.disconnect(
+        external_id="node-a", hostname="a.example.ts.net", operation_id=operation_id
+    )
+    queue = tmp_path / "control" / "queue" / f"{operation_id}.json"
+    queue.unlink()
+    if terminal_state == "result":
+        (tmp_path / "status" / "results" / f"{operation_id}.json").write_text(
+            '{"state":"complete"}', encoding="utf-8"
+        )
+    else:
+        (tmp_path / "control" / "acks" / f"{operation_id}.ack").write_text(
+            operation_id, encoding="utf-8"
+        )
+
+    assert (
+        connector.disconnect(
+            external_id="node-a",
+            hostname="a.example.ts.net",
+            operation_id=operation_id,
+        )
+        == operation_id
+    )
+    assert not queue.exists()
+
+
 def test_connector_reads_sanitized_command_ack(tmp_path: Path) -> None:
     connector = _connector(tmp_path)
     operation_id = "a" * 32
