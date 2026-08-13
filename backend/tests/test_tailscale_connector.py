@@ -125,6 +125,50 @@ def test_connector_rejects_conflicting_id_after_supervisor_claim(tmp_path: Path)
     assert not (tmp_path / "control" / "queue" / f"{operation_id}.json").exists()
 
 
+def test_connector_does_not_requeue_terminal_operation(tmp_path: Path) -> None:
+    connector = _connector(tmp_path)
+    operation_id = "e" * 32
+    connector.disconnect(
+        external_id="node-a", hostname="a.example.ts.net", operation_id=operation_id
+    )
+    queue = tmp_path / "control" / "queue" / f"{operation_id}.json"
+    completed = tmp_path / "control" / "completed" / f"{operation_id}.json"
+    completed.write_bytes(
+        (tmp_path / "control" / "operations" / f"{operation_id}.json").read_bytes()
+    )
+    queue.unlink()
+
+    assert (
+        connector.disconnect(
+            external_id="node-a",
+            hostname="a.example.ts.net",
+            operation_id=operation_id,
+        )
+        == operation_id
+    )
+    assert not queue.exists()
+
+
+def test_connector_rejects_conflict_against_terminal_tombstone(tmp_path: Path) -> None:
+    connector = _connector(tmp_path)
+    operation_id = "f" * 32
+    connector.disconnect(
+        external_id="node-a", hostname="a.example.ts.net", operation_id=operation_id
+    )
+    completed = tmp_path / "control" / "completed" / f"{operation_id}.json"
+    completed.write_bytes(
+        (tmp_path / "control" / "operations" / f"{operation_id}.json").read_bytes()
+    )
+    (tmp_path / "control" / "queue" / f"{operation_id}.json").unlink()
+
+    with pytest.raises(TailscaleProtocolError, match="different content"):
+        connector.disconnect(
+            external_id="node-b",
+            hostname="b.example.ts.net",
+            operation_id=operation_id,
+        )
+
+
 def test_connector_reads_sanitized_command_ack(tmp_path: Path) -> None:
     connector = _connector(tmp_path)
     operation_id = "a" * 32

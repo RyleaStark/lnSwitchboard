@@ -213,20 +213,32 @@ def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
 def sqlite_read_connection(path: Path) -> Iterator[sqlite3.Connection]:
     """Yield a descriptor-bound read-only connection without write transactions."""
 
-    with private_regular(path, writable=False, create=False) as (
+    with private_regular(path, writable=True, create=False) as (
         descriptor,
         parent_fd,
         name,
     ):
+        _secure_existing_sidecars(parent_fd, name)
         opened = os.fstat(descriptor)
+        os.fchmod(descriptor, 0o600)
+        header = os.pread(descriptor, 20, 0)
+        if len(header) >= 20 and header[18:20] == b"\x02\x02":
+            raise OSError("SQLite WAL mode is not permitted for private state")
         stable_path = f"/proc/self/fd/{descriptor}"
-        connection = sqlite3.connect(
-            f"file:{stable_path}?mode=ro",
-            uri=True,
-            detect_types=sqlite3.PARSE_DECLTYPES,
-            check_same_thread=False,
-        )
+        connection: sqlite3.Connection | None = None
         try:
+            with _SQLITE_OPEN_LOCK:
+                descriptor_count = _count_open_inode_descriptors(opened)
+                connection = sqlite3.connect(
+                    f"file:{stable_path}?mode=ro",
+                    uri=True,
+                    detect_types=sqlite3.PARSE_DECLTYPES,
+                    check_same_thread=False,
+                )
+                if _count_open_inode_descriptors(opened) <= descriptor_count:
+                    raise OSError(
+                        "SQLite opened a different inode than the validated database"
+                    )
             current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
                 raise OSError("SQLite database path changed while opening")
@@ -234,4 +246,10 @@ def sqlite_read_connection(path: Path) -> Iterator[sqlite3.Connection]:
             connection.set_authorizer(_deny_sidecar_mode_changes)
             yield connection
         finally:
-            connection.close()
+            if connection is not None:
+                with _SQLITE_OPEN_LOCK:
+                    connection.close()
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise OSError("SQLite database path changed while in use")
+            _secure_existing_sidecars(parent_fd, name)

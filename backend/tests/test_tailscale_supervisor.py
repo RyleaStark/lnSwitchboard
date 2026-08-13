@@ -52,6 +52,24 @@ def _write_command(
     )
 
 
+def _write_operation_record(
+    control_dir: Path, name: str, operation_id: str
+) -> Path:
+    import json
+
+    operations = control_dir / "operations"
+    operations.mkdir(exist_ok=True)
+    path = operations / f"{operation_id}.json"
+    path.write_text(
+        json.dumps(
+            {"command": name.replace("-", "_"), "operation_id": operation_id},
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _command_result(status_dir: Path, operation_id: str) -> Path:
     return status_dir / "results" / f"{operation_id}.json"
 
@@ -158,6 +176,47 @@ def test_supervisor_starts_userspace_daemon_and_publishes_self_only_status(
         assert stat.S_IMODE((status_dir / "node.json").stat().st_mode) == 0o600
         assert not (status_dir / "tailscaled.stderr").exists()
         assert process.poll() is None
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_supervisor_recovers_operation_published_before_queue_link(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, _state_dir, _command_log, env = supervisor_runtime
+    operation_id = "e" * 32
+    _write_operation_record(control_dir, "cancel-login", operation_id)
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        _wait_for(lambda: _command_result(status_dir, operation_id).exists())
+        assert '"command":"cancel_login"' in _command_result(
+            status_dir, operation_id
+        ).read_text(encoding="utf-8")
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_ack_creates_terminal_tombstone_before_cleanup(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, _state_dir, _command_log, env = supervisor_runtime
+    operation_id = "f" * 32
+    _write_operation_record(control_dir, "cancel-login", operation_id)
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        result = _command_result(status_dir, operation_id)
+        _wait_for(result.exists)
+        ack_dir = control_dir / "acks"
+        ack_dir.mkdir(exist_ok=True)
+        (ack_dir / f"{operation_id}.ack").write_text(operation_id, encoding="utf-8")
+        completed = control_dir / "completed" / f"{operation_id}.json"
+        _wait_for(completed.exists)
+        _wait_for(lambda: not result.exists())
+        assert '"operation_id":"' + operation_id + '"' in completed.read_text(
+            encoding="utf-8"
+        )
     finally:
         process.terminate()
         process.wait(timeout=3)
@@ -528,7 +587,7 @@ def test_supervisor_replays_claimed_disconnect_after_restart(
     try:
         result = _command_result(status_dir, operation_id)
         _wait_for(lambda: result.exists() and '"state":"complete"' in result.read_text(encoding="utf-8"))
-        assert not (processing / f"{operation_id}.json").exists()
+        _wait_for(lambda: not (processing / f"{operation_id}.json").exists())
         assert not (state_dir / "owned-node-state").exists()
         lines = command_log.read_text(encoding="utf-8").splitlines()
         assert any("funnel reset" in line for line in lines)

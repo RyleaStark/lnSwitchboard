@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .secure_files import private_regular
 from .sqlite_utils import sqlite_connection, sqlite_read_connection
 
 _KEEP_ERROR = object()
@@ -59,18 +60,22 @@ class TailscaleLifecycleStore:
 
     @contextmanager
     def _process_lock(self) -> Iterator[None]:
-        descriptor = os.open(
-            self.lock_path,
-            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        try:
-            os.fchmod(descriptor, 0o600)
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            yield
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
+        with private_regular(
+            self.lock_path, writable=True, create=True, mode=0o600
+        ) as (descriptor, parent_fd, name):
+            # The stable parent lock prevents pathname replacement from creating
+            # a second lock domain while this critical section is active.
+            fcntl.flock(parent_fd, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                    raise OSError("Tailscale lifecycle lock path changed while opening")
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                fcntl.flock(parent_fd, fcntl.LOCK_UN)
 
     @contextmanager
     def _write_connection(self) -> Iterator[sqlite3.Connection]:

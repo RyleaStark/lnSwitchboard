@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.sqlite_utils import sqlite_connection
+from backend.app.sqlite_utils import sqlite_connection, sqlite_read_connection
 
 
 def _mode(path: Path) -> int:
@@ -101,3 +101,55 @@ def test_sqlite_connection_descriptor_binding_survives_concurrent_lifecycles(
         completed = list(executor.map(worker, range(4)))
 
     assert completed == [30, 30, 30, 30]
+
+
+def test_sqlite_read_repairs_mode_without_mutating_database_contents(tmp_path: Path) -> None:
+    database = tmp_path / "read.db"
+    with sqlite_connection(database) as connection:
+        connection.execute("CREATE TABLE records(value TEXT)")
+        connection.execute("INSERT INTO records VALUES ('safe')")
+    before = database.read_bytes()
+    before_mtime = database.stat().st_mtime_ns
+    os.chmod(database, 0o644)
+
+    with sqlite_read_connection(database) as connection:
+        assert connection.execute("SELECT value FROM records").fetchone()[0] == "safe"
+
+    assert _mode(database) == 0o600
+    assert database.read_bytes() == before
+    assert database.stat().st_mtime_ns == before_mtime
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo"])
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
+def test_sqlite_read_rejects_hostile_sidecars(
+    tmp_path: Path, kind: str, suffix: str
+) -> None:
+    database = tmp_path / "read.db"
+    with sqlite_connection(database) as connection:
+        connection.execute("CREATE TABLE records(value TEXT)")
+    sidecar = Path(f"{database}{suffix}")
+    sidecar.unlink(missing_ok=True)
+    outside = tmp_path / f"outside-{kind}-{suffix[1:]}"
+    outside.write_bytes(b"outside")
+    if kind == "symlink":
+        sidecar.symlink_to(outside)
+    elif kind == "hardlink":
+        os.link(outside, sidecar)
+    else:
+        os.mkfifo(sidecar)
+
+    with pytest.raises(OSError):
+        with sqlite_read_connection(database):
+            pass
+
+
+def test_sqlite_read_rejects_persisted_wal_database(tmp_path: Path) -> None:
+    database = tmp_path / "wal.db"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        connection.execute("CREATE TABLE records(value INTEGER)")
+
+    with pytest.raises(OSError, match="WAL mode is not permitted"):
+        with sqlite_read_connection(database):
+            pass
