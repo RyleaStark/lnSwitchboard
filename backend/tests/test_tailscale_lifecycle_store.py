@@ -1,3 +1,4 @@
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -47,3 +48,4 @@ def test_disconnect_creation_is_cross_process_idempotent_per_connection(
 
     assert rows[0].operation_id == rows[1].operation_id
     assert len(TailscaleLifecycleStore(path).list_pending()) == 1
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600

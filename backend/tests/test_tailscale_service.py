@@ -163,6 +163,7 @@ class FakeTailscaleConnector:
         }
         self.command_status: dict[str, str] | None = None
         self.calls: list[tuple[str, str | None]] = []
+        self.consumed_operation_ids: list[str] = []
         self.disconnect_error = False
         self.disable_error = False
         self.cancel_error = False
@@ -271,6 +272,7 @@ class FakeTailscaleConnector:
         return self.command_status
 
     def consume_command_result(self, operation_id: str) -> None:
+        self.consumed_operation_ids.append(operation_id)
         if self.command_status and self.command_status.get("operation_id") == operation_id:
             self.command_status = None
 
@@ -727,9 +729,15 @@ def test_disconnect_keeps_registry_when_runtime_cannot_disable_funnel(
     with pytest.raises(TailscaleOperationError, match="disable Funnel"):
         asyncio.run(service.disconnect(connection.id))
     assert service.store.get_connection(connection.id) is not None
+    pending = service.lifecycle.get_for_connection(connection.id)
+    assert pending is not None
+    assert pending.phase == "prepared"
+    assert pending.last_error == "funnel_disable_failed"
+    operation_id = pending.operation_id
 
     connector.disconnect_error = False
     assert asyncio.run(service.disconnect(connection.id)) is True
+    assert operation_id in connector.consumed_operation_ids
     assert service.store.get_connection(connection.id) is None
 
 
@@ -812,6 +820,25 @@ def test_refresh_missing_prerequisites_preserves_existing_connection(
     assert preserved.status == "connected"
     assert preserved.last_error is None
     assert preserved.domains[0].status == "active"
+
+
+def test_refresh_is_observational_without_registry_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connector = FakeTailscaleConnector()
+    service = _service(tmp_path, connector)
+    connection = _persist_connection(service)
+
+    def reject_write(*_args, **_kwargs):
+        raise AssertionError("refresh attempted a registry write")
+
+    monkeypatch.setattr(service.store, "upsert_connection", reject_write)
+    monkeypatch.setattr(service.store, "replace_domains", reject_write)
+    monkeypatch.setattr(service.store, "delete_connection", reject_write)
+
+    observed = asyncio.run(service.refresh(connection.id))
+
+    assert observed == connection
 
 
 def test_refresh_status_failure_preserves_runtime_identity_and_registry(

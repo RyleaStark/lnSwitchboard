@@ -341,11 +341,14 @@ class TailscaleService:
                     "Tailscale disconnect result does not match persisted intent"
                 )
             if result.get("state") == "error":
-                self.connector.consume_command_result(journal.operation_id)
-                self.lifecycle.delete(journal.operation_id)
-                raise TailscaleOperationError(
-                    str(result.get("error") or "operation_failed")
+                error = str(result.get("error") or "operation_failed")
+                self.lifecycle.update(
+                    journal.operation_id,
+                    phase="prepared",
+                    last_error=error,
                 )
+                self.connector.consume_command_result(journal.operation_id)
+                raise TailscaleOperationError(error)
             if result.get("state") == "complete":
                 self.lifecycle.update(journal.operation_id, phase="provider_acknowledged")
 
@@ -867,27 +870,7 @@ class TailscaleService:
             if funnel_status is not None and funnel_status_matches(
                 funnel_status, hostname, self.public_origin
             ):
-                self.store.upsert_connection(
-                    provider="tailscale",
-                    external_id=connection.external_id,
-                    label=connection.label,
-                    status="connected",
-                    public_metadata={
-                        "device_name": device_name,
-                        "origin": self.public_origin,
-                        **key_expiry_metadata(status["Self"]),
-                    },
-                )
-                self.store.replace_domains(
-                    connection.id,
-                    [{"hostname": hostname, "status": "active"}],
-                )
-                observed = self.store.get_connection(connection.id)
-                if observed is None:  # pragma: no cover
-                    raise TailscaleOperationError(
-                        "Tailscale connection registration failed"
-                    )
-                return observed
+                return connection
             await self._sleep()
         raise TailscaleOperationError("Tailscale Funnel status did not reconcile")
 
@@ -995,6 +978,10 @@ class TailscaleService:
             )
             try:
                 return await self._run_disconnect_journal(journal)
+            except TailscaleProtocolError as exc:
+                raise TailscaleOperationError(
+                    "Tailscale returned an invalid disconnect result"
+                ) from exc
             except TailscaleOperationError as exc:
                 if "registry cleanup failed" in str(exc):
                     raise

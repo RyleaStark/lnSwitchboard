@@ -73,13 +73,37 @@ start_daemon() {
     TAILSCALED_PID=$!
 }
 
+sync_path() {
+    sync -f "$1"
+}
+
+durable_remove() {
+    path=$1
+    parent=$(dirname "$path")
+    rm -f "$path"
+    sync_path "$parent"
+}
+
+durable_move() {
+    source=$1
+    destination=$2
+    source_parent=$(dirname "$source")
+    destination_parent=$(dirname "$destination")
+    mv -f "$source" "$destination"
+    sync_path "$destination_parent"
+    if [ "$source_parent" != "$destination_parent" ]; then
+        sync_path "$source_parent"
+    fi
+}
+
 atomic_text() {
     destination=$1
     content=$2
     temporary="$destination.tmp.$$"
     printf '%s\n' "$content" >"$temporary"
     chmod 0600 "$temporary"
-    mv -f "$temporary" "$destination"
+    sync_path "$temporary"
+    durable_move "$temporary" "$destination"
 }
 
 publish_command() {
@@ -88,9 +112,11 @@ publish_command() {
     temporary="$destination.tmp.$$"
     if "$@" >"$temporary" 2>/dev/null; then
         chmod 0600 "$temporary"
-        mv -f "$temporary" "$destination"
+        sync_path "$temporary"
+        durable_move "$temporary" "$destination"
     else
         rm -f "$temporary" "$destination"
+        sync_path "$(dirname "$destination")"
     fi
 }
 
@@ -106,10 +132,12 @@ publish_node_status() {
             >"$temporary"
         unset raw_status
         chmod 0600 "$temporary"
-        mv -f "$temporary" "$destination"
+        sync_path "$temporary"
+        durable_move "$temporary" "$destination"
     else
         unset raw_status
         rm -f "$temporary" "$destination"
+        sync_path "$(dirname "$destination")"
     fi
 }
 
@@ -168,7 +196,8 @@ persist_active_identity() {
     printf '{"external_id":"%s","hostname":"%s"}\n' \
         "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME" >"$temporary"
     chmod 0600 "$temporary"
-    mv -f "$temporary" "$ACTIVE_STATE"
+    sync_path "$temporary"
+    durable_move "$temporary" "$ACTIVE_STATE"
 }
 
 read_claimed_command() {
@@ -350,7 +379,7 @@ process_claim() {
             OPERATION_ID=$filename_operation
             publish_result invalid error invalid_command "$OPERATION_ID"
         fi
-        rm -f "$command_path"
+        durable_remove "$command_path"
         return
     fi
     case "$COMMAND_NAME" in
@@ -364,7 +393,7 @@ process_claim() {
             if [ ! -f "$journal" ]; then
                 valid_identity || {
                     publish_result disconnect error invalid_command "$OPERATION_ID"
-                    rm -f "$command_path"
+                    durable_remove "$command_path"
                     return
                 }
                 write_disconnect_phase prepared
@@ -373,7 +402,7 @@ process_claim() {
             ;;
         *) publish_result "$COMMAND_NAME" error invalid_command "$OPERATION_ID" ;;
     esac
-    rm -f "$command_path"
+    durable_remove "$command_path"
 }
 
 recover_disconnect_journals() {
@@ -399,10 +428,10 @@ consume_results() {
         operation_id=$(basename "$acknowledgement" .ack)
         if valid_operation_id "$operation_id" \
             && [ "$(tr -d '\r\n' <"$acknowledgement")" = "$operation_id" ]; then
-            rm -f "$RESULT_DIR/$operation_id.json" \
-                "$STATE_DIR/.lnswitchboard-disconnect-$operation_id.json"
+            durable_remove "$RESULT_DIR/$operation_id.json"
+            durable_remove "$STATE_DIR/.lnswitchboard-disconnect-$operation_id.json"
         fi
-        rm -f "$acknowledgement"
+        durable_remove "$acknowledgement"
     done
 }
 
@@ -415,7 +444,7 @@ claim_next_command() {
     for command_path in "$QUEUE_DIR"/*.json; do
         [ -f "$command_path" ] || continue
         claimed="$PROCESSING_DIR/$(basename "$command_path")"
-        if mv "$command_path" "$claimed" 2>/dev/null; then
+        if durable_move "$command_path" "$claimed" 2>/dev/null; then
             process_claim "$claimed"
         fi
         return

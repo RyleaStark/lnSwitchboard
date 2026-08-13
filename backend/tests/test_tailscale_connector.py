@@ -83,6 +83,26 @@ def test_connector_emits_immutable_operation_id_commands_without_overwrite(
     }
 
 
+def test_connector_rejects_conflicting_reuse_of_operation_id(tmp_path: Path) -> None:
+    connector = _connector(tmp_path)
+    operation_id = "c" * 32
+    connector.disconnect(
+        external_id="node-a", hostname="a.example.ts.net", operation_id=operation_id
+    )
+
+    with pytest.raises(TailscaleProtocolError, match="different content"):
+        connector.disconnect(
+            external_id="node-b",
+            hostname="b.example.ts.net",
+            operation_id=operation_id,
+        )
+
+    payload = json.loads(
+        (tmp_path / "control" / "queue" / f"{operation_id}.json").read_text()
+    )
+    assert payload["external_id"] == "node-a"
+
+
 def test_connector_reads_sanitized_command_ack(tmp_path: Path) -> None:
     connector = _connector(tmp_path)
     operation_id = "a" * 32

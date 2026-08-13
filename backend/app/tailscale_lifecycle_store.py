@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .sqlite_utils import sqlite_connection
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -30,7 +32,7 @@ class TailscaleLifecycleStore:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as connection:
+        with sqlite_connection(self.path) as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tailscale_lifecycle (
@@ -56,7 +58,7 @@ class TailscaleLifecycleStore:
     ) -> TailscaleLifecycle:
         now = _utc_now()
         try:
-            with sqlite3.connect(self.path) as connection:
+            with sqlite_connection(self.path) as connection:
                 connection.execute(
                     """
                     INSERT INTO tailscale_lifecycle (
@@ -81,7 +83,7 @@ class TailscaleLifecycleStore:
     def update(
         self, operation_id: str, *, phase: str, last_error: str | None = None
     ) -> TailscaleLifecycle:
-        with sqlite3.connect(self.path) as connection:
+        with sqlite_connection(self.path) as connection:
             cursor = connection.execute(
                 """
                 UPDATE tailscale_lifecycle
@@ -95,8 +97,7 @@ class TailscaleLifecycleStore:
         return self.get(operation_id)  # type: ignore[return-value]
 
     def get(self, operation_id: str) -> TailscaleLifecycle | None:
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
+        with sqlite_connection(self.path) as connection:
             row = connection.execute(
                 "SELECT * FROM tailscale_lifecycle WHERE operation_id = ?",
                 (operation_id,),
@@ -104,16 +105,14 @@ class TailscaleLifecycleStore:
         return self._record(row) if row is not None else None
 
     def list_pending(self) -> list[TailscaleLifecycle]:
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
+        with sqlite_connection(self.path) as connection:
             rows = connection.execute(
                 "SELECT * FROM tailscale_lifecycle ORDER BY created_at, operation_id"
             ).fetchall()
         return [self._record(row) for row in rows]
 
     def get_for_connection(self, connection_id: str) -> TailscaleLifecycle | None:
-        with sqlite3.connect(self.path) as connection:
-            connection.row_factory = sqlite3.Row
+        with sqlite_connection(self.path) as connection:
             row = connection.execute(
                 "SELECT * FROM tailscale_lifecycle WHERE connection_id = ?",
                 (connection_id,),
@@ -121,7 +120,7 @@ class TailscaleLifecycleStore:
         return self._record(row) if row is not None else None
 
     def delete(self, operation_id: str) -> bool:
-        with sqlite3.connect(self.path) as connection:
+        with sqlite_connection(self.path) as connection:
             cursor = connection.execute(
                 "DELETE FROM tailscale_lifecycle WHERE operation_id = ?",
                 (operation_id,),

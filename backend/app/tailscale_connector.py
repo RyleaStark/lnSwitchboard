@@ -45,7 +45,17 @@ class TailscaleConnector:
         os.chmod(self.ack_dir, 0o700)
         os.chmod(self.result_dir, 0o700)
 
-    def _atomic_write(self, path: Path, content: bytes) -> None:
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _atomic_write(
+        self, path: Path, content: bytes, *, immutable: bool = False
+    ) -> None:
         temporary = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -53,7 +63,18 @@ class TailscaleConnector:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            if immutable:
+                try:
+                    os.link(temporary, path)
+                except FileExistsError:
+                    if self._read_bounded(path) != content.decode("utf-8"):
+                        raise TailscaleProtocolError(
+                            "Tailscale operation ID already has different content"
+                        ) from None
+                self._sync_directory(path.parent)
+            else:
+                os.replace(temporary, path)
+                self._sync_directory(path.parent)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -77,6 +98,7 @@ class TailscaleConnector:
             (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode(
                 "utf-8"
             ),
+            immutable=True,
         )
         return operation_id
 
