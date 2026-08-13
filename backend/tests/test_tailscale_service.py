@@ -223,17 +223,28 @@ class FakeTailscaleConnector:
         self.command_status.update({"external_id": external_id, "hostname": hostname})
         return operation_id
 
-    def disconnect(self, *, external_id: str, hostname: str) -> str:
+    def disconnect(
+        self,
+        *,
+        external_id: str,
+        hostname: str,
+        operation_id: str | None = None,
+    ) -> str:
         self.calls.append(("disconnect", None))
-        operation_id = self._operation(
+        generated_id = self._operation(
             "disconnect",
             "error" if self.disconnect_error else "complete",
             "funnel_disable_failed" if self.disconnect_error else None,
         )
+        if operation_id is not None:
+            generated_id = operation_id
+            assert self.command_status is not None
+            self.command_status["operation_id"] = operation_id
+        assert self.command_status is not None
         self.command_status.update({"external_id": external_id, "hostname": hostname})
         if not self.disconnect_error:
             self.login_artifact = False
-        return operation_id
+        return generated_id
 
     def read_login_records(self):
         return self.records
@@ -250,10 +261,18 @@ class FakeTailscaleConnector:
             raise OSError("synthetic Funnel status failure")
         return self.funnel_status
 
-    def read_command_status(self):
+    def read_command_status(self, operation_id: str):
         if self.command_protocol_error:
             raise TailscaleProtocolError("synthetic malformed command acknowledgement")
+        if self.command_status is None:
+            return None
+        if self.command_status.get("operation_id") != operation_id:
+            return None
         return self.command_status
+
+    def consume_command_result(self, operation_id: str) -> None:
+        if self.command_status and self.command_status.get("operation_id") == operation_id:
+            self.command_status = None
 
     def has_login_artifact(self) -> bool:
         return self.login_artifact
@@ -839,13 +858,20 @@ def test_stale_disconnect_ack_does_not_delete_registry(tmp_path: Path) -> None:
     connection = _persist_connection(service)
     original_disconnect = connector.disconnect
 
-    def stale_disconnect(*, external_id: str, hostname: str) -> str:
-        operation_id = original_disconnect(
-            external_id=external_id, hostname=hostname
+    def stale_disconnect(
+        *,
+        external_id: str,
+        hostname: str,
+        operation_id: str | None = None,
+    ) -> str:
+        generated_id = original_disconnect(
+            external_id=external_id,
+            hostname=hostname,
+            operation_id=operation_id,
         )
         assert connector.command_status is not None
         connector.command_status["operation_id"] = "f" * 32
-        return operation_id
+        return generated_id
 
     connector.disconnect = stale_disconnect
 
@@ -853,3 +879,32 @@ def test_stale_disconnect_ack_does_not_delete_registry(tmp_path: Path) -> None:
         asyncio.run(service.disconnect(connection.id))
 
     assert service.store.get_connection(connection.id) is not None
+
+
+def test_recovery_completes_registry_cleanup_from_durable_disconnect_result(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    service = _service(tmp_path, connector)
+    connection = _persist_connection(service)
+    operation_id = "d" * 32
+    service.lifecycle.create_disconnect(
+        operation_id=operation_id,
+        connection_id=connection.id,
+        external_id="node-123",
+        hostname="lns.example.ts.net",
+    )
+    service.lifecycle.update(operation_id, phase="command_published")
+    connector.command_status = {
+        "command": "disconnect",
+        "state": "complete",
+        "operation_id": operation_id,
+        "external_id": "node-123",
+        "hostname": "lns.example.ts.net",
+    }
+    connector.node_status["BackendState"] = "NeedsLogin"
+
+    asyncio.run(service.recover_incomplete_provisioning())
+
+    assert service.store.get_connection(connection.id) is None
+    assert service.lifecycle.get(operation_id) is None

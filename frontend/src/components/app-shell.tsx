@@ -127,7 +127,7 @@ export function AppShell() {
 
   return (
     <TooltipProvider>
-      <SidebarProvider>
+      <SidebarProvider className="h-svh min-h-0 overflow-hidden">
         <Sidebar collapsible="offcanvas">
           <SidebarHeader className="p-4">
             <SidebarNavLink to="/" className="flex items-center gap-3 rounded-md">
@@ -298,7 +298,7 @@ export function AppShell() {
             <ProductFooter versionLabel={versionLabel} compact />
           </SidebarFooter>
         </Sidebar>
-        <SidebarInset>
+        <SidebarInset className="min-h-0 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
           <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b bg-background/95 px-4 backdrop-blur md:hidden">
             <div className="flex items-center gap-2">
               <SidebarTrigger aria-label="Open navigation">

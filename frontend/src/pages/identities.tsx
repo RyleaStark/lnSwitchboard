@@ -109,70 +109,66 @@ export function IdentitiesPage() {
     <>
       <PageHeader
         title="Nostr Identities"
-        action={<Button onClick={openCreate}><PlusIcon data-icon="inline-start" /> Add mapping</Button>}
+        action={(
+          <>
+            <div className="relative">
+              <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input aria-label="Search mappings" value={search} onChange={(event) => setSearch(event.target.value)} className="pl-8 sm:w-72" placeholder="Search mappings" />
+            </div>
+            <Button onClick={openCreate}><PlusIcon data-icon="inline-start" /> Add mapping</Button>
+          </>
+        )}
       />
-      <Card>
-        <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <CardTitle>Nostr mappings</CardTitle>
-            <CardDescription>{rows.length} mapping{rows.length === 1 ? "" : "s"}</CardDescription>
-          </div>
-          <div className="relative">
-            <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-8 sm:w-72" placeholder="Search mappings" />
-          </div>
-        </CardHeader>
-        <CardContent>
-          {identities.isLoading ? <LoadingRows /> : null}
-          {identities.isError ? <PageError message="Unable to load NIP-05 mappings." onRetry={() => void identities.refetch()} retrying={identities.isFetching} /> : null}
-          {!identities.isLoading && !identities.isError && rows.length === 0 ? (
-            <EmptyPanel title={search ? "No matching mappings" : "No mappings yet"} description="Create a mapping to publish a Nostr identity from this domain." />
-          ) : null}
-          {rows.length ? (
-            <>
-              <div className="hidden overflow-hidden rounded-md border lg:block">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Handle</TableHead>
-                      <TableHead>Relays</TableHead>
-                      <TableHead className="text-right">Actions</TableHead>
+      <div>
+        {identities.isLoading ? <LoadingRows /> : null}
+        {identities.isError ? <PageError message="Unable to load NIP-05 mappings." onRetry={() => void identities.refetch()} retrying={identities.isFetching} /> : null}
+        {!identities.isLoading && !identities.isError && rows.length === 0 ? (
+          <EmptyPanel title={search ? "No matching mappings" : "No mappings yet"} description="Create a mapping to publish a Nostr identity from this domain." />
+        ) : null}
+        {rows.length ? (
+          <>
+            <div className="hidden overflow-hidden rounded-md border lg:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Handle</TableHead>
+                    <TableHead>Relays</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((item) => (
+                    <TableRow key={item.id}>
+                      <TableCell>
+                        <div className="flex flex-col gap-1">
+                          <span className="font-medium">{item.identifier}</span>
+                          <code className="font-mono text-xs text-muted-foreground">{shortHash(item.npub, 16, 8)}</code>
+                        </div>
+                      </TableCell>
+                      <TableCell><RelayList relays={item.relays} /></TableCell>
+                      <TableCell className="text-right"><RowActions onEdit={() => openEdit(item)} onDelete={() => setDeleting(item)} /></TableCell>
                     </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {rows.map((item) => (
-                      <TableRow key={item.id}>
-                        <TableCell>
-                          <div className="flex flex-col gap-1">
-                            <span className="font-medium">{item.identifier}</span>
-                            <code className="font-mono text-xs text-muted-foreground">{shortHash(item.npub, 16, 8)}</code>
-                          </div>
-                        </TableCell>
-                        <TableCell><RelayList relays={item.relays} /></TableCell>
-                        <TableCell className="text-right"><RowActions onEdit={() => openEdit(item)} onDelete={() => setDeleting(item)} /></TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-              <div className="grid gap-3 lg:hidden">
-                {rows.map((item) => (
-                  <Card key={item.id}>
-                    <CardHeader>
-                      <CardTitle className="min-w-0 break-all text-base">{item.identifier}</CardTitle>
-                      <CardDescription>{shortHash(item.npub, 18, 8)}</CardDescription>
-                    </CardHeader>
-                    <CardContent className="flex flex-col gap-3">
-                      <RelayList relays={item.relays} />
-                      <RowActions onEdit={() => openEdit(item)} onDelete={() => setDeleting(item)} />
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-            </>
-          ) : null}
-        </CardContent>
-      </Card>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <div className="grid gap-3 lg:hidden">
+              {rows.map((item) => (
+                <Card key={item.id}>
+                  <CardHeader>
+                    <CardTitle className="min-w-0 break-all text-base">{item.identifier}</CardTitle>
+                    <CardDescription>{shortHash(item.npub, 18, 8)}</CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3">
+                    <RelayList relays={item.relays} />
+                    <RowActions onEdit={() => openEdit(item)} onDelete={() => setDeleting(item)} />
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </>
+        ) : null}
+      </div>
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>

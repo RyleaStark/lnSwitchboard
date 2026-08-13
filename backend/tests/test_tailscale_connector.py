@@ -50,28 +50,33 @@ def test_connector_rejects_unbounded_or_non_object_status(tmp_path: Path) -> Non
         connector.read_node_status()
 
 
-def test_connector_emits_only_fixed_atomic_marker_operations(tmp_path: Path) -> None:
+def test_connector_emits_immutable_operation_id_commands_without_overwrite(
+    tmp_path: Path,
+) -> None:
     connector = _connector(tmp_path)
 
     login_operation = connector.begin_login("lns")
-    assert json.loads(
-        (tmp_path / "control" / "begin-login").read_text(encoding="utf-8")
-    ) == {"device_name": "lns", "operation_id": login_operation}
-    assert stat.S_IMODE((tmp_path / "control" / "begin-login").stat().st_mode) == 0o600
+    login_command = tmp_path / "control" / "queue" / f"{login_operation}.json"
+    assert json.loads(login_command.read_text(encoding="utf-8")) == {
+        "command": "begin_login",
+        "device_name": "lns",
+        "operation_id": login_operation,
+    }
+    assert stat.S_IMODE(login_command.stat().st_mode) == 0o600
 
-    connector.enable_funnel(
+    enable_operation = connector.enable_funnel(
         external_id="node-123", hostname="lns.example.ts.net"
     )
-    assert (tmp_path / "control" / "enable").exists()
-    connector.clear_login()
-    assert not (tmp_path / "control" / "enable").exists()
-    assert (tmp_path / "control" / "clear-login").exists()
-    assert not list((tmp_path / "control").glob("*.tmp.*"))
+    clear_operation = connector.clear_login()
+    assert (tmp_path / "control" / "queue" / f"{enable_operation}.json").exists()
+    assert (tmp_path / "control" / "queue" / f"{clear_operation}.json").exists()
+    assert login_command.exists()
+    assert not list((tmp_path / "control").rglob("*.tmp.*"))
 
     assert set(connector.supported_operations) == {
-        "begin-login",
-        "cancel-login",
-        "clear-login",
+        "begin_login",
+        "cancel_login",
+        "clear_login",
         "enable",
         "disable",
         "disconnect",
@@ -80,14 +85,42 @@ def test_connector_emits_only_fixed_atomic_marker_operations(tmp_path: Path) -> 
 
 def test_connector_reads_sanitized_command_ack(tmp_path: Path) -> None:
     connector = _connector(tmp_path)
-    command_path = tmp_path / "status" / "command.json"
+    operation_id = "a" * 32
+    result_dir = tmp_path / "status" / "results"
+    command_path = result_dir / f"{operation_id}.json"
     command_path.write_text(
         '{"command":"enable","state":"error","error":"funnel_enable_failed"}\n',
         encoding="utf-8",
     )
 
-    assert connector.read_command_status() == {
+    assert connector.read_command_status(operation_id) == {
         "command": "enable",
         "state": "error",
         "error": "funnel_enable_failed",
     }
+
+
+def test_connector_consumes_only_the_requested_durable_result(tmp_path: Path) -> None:
+    connector = _connector(tmp_path)
+    first = "a" * 32
+    second = "b" * 32
+    result_dir = tmp_path / "status" / "results"
+    for operation_id in (first, second):
+        (result_dir / f"{operation_id}.json").write_text(
+            json.dumps(
+                {
+                    "command": "disconnect",
+                    "state": "complete",
+                    "operation_id": operation_id,
+                    "external_id": "node-123",
+                    "hostname": "lns.example.ts.net",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    connector.consume_command_result(first)
+
+    assert connector.read_command_status(first) is not None
+    assert (tmp_path / "control" / "acks" / f"{first}.ack").exists()
+    assert connector.read_command_status(second) is not None

@@ -20,9 +20,9 @@ class TailscaleConnector:
     """Issue fixed supervisor operations and read bounded status snapshots."""
 
     supported_operations = (
-        "begin-login",
-        "cancel-login",
-        "clear-login",
+        "begin_login",
+        "cancel_login",
+        "clear_login",
         "enable",
         "disable",
         "disconnect",
@@ -33,8 +33,17 @@ class TailscaleConnector:
         self.status_dir = Path(status_dir)
         self.control_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.status_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.command_dir = self.control_dir / "queue"
+        self.ack_dir = self.control_dir / "acks"
+        self.result_dir = self.status_dir / "results"
+        self.command_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.ack_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.result_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.control_dir, 0o700)
         os.chmod(self.status_dir, 0o700)
+        os.chmod(self.command_dir, 0o700)
+        os.chmod(self.ack_dir, 0o700)
+        os.chmod(self.result_dir, 0o700)
 
     def _atomic_write(self, path: Path, content: bytes) -> None:
         temporary = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
@@ -48,16 +57,23 @@ class TailscaleConnector:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def _mark(self, operation: str, **parameters: str) -> str:
+    def _mark(
+        self, operation: str, *, operation_id: str | None = None, **parameters: str
+    ) -> str:
         if operation not in self.supported_operations:
             raise ValueError("unsupported Tailscale operation")
-        operation_id = uuid.uuid4().hex
-        (self.status_dir / "command.json").unlink(missing_ok=True)
-        for pending_operation in self.supported_operations:
-            (self.control_dir / pending_operation).unlink(missing_ok=True)
-        payload = {"operation_id": operation_id, **parameters}
+        operation_id = operation_id or uuid.uuid4().hex
+        if len(operation_id) != 32 or any(
+            character not in "0123456789abcdef" for character in operation_id
+        ):
+            raise ValueError("invalid Tailscale operation ID")
+        payload = {
+            "command": operation,
+            "operation_id": operation_id,
+            **parameters,
+        }
         self._atomic_write(
-            self.control_dir / operation,
+            self.command_dir / f"{operation_id}.json",
             (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode(
                 "utf-8"
             ),
@@ -91,13 +107,13 @@ class TailscaleConnector:
 
     def begin_login(self, device_name: str) -> str:
         (self.status_dir / "login.json").unlink(missing_ok=True)
-        return self._mark("begin-login", device_name=device_name)
+        return self._mark("begin_login", device_name=device_name)
 
     def cancel_login(self) -> str:
-        return self._mark("cancel-login")
+        return self._mark("cancel_login")
 
     def clear_login(self) -> str:
-        return self._mark("clear-login")
+        return self._mark("clear_login")
 
     def enable_funnel(self, *, external_id: str, hostname: str) -> str:
         return self._mark("enable", external_id=external_id, hostname=hostname)
@@ -105,8 +121,15 @@ class TailscaleConnector:
     def disable_funnel(self, *, external_id: str, hostname: str) -> str:
         return self._mark("disable", external_id=external_id, hostname=hostname)
 
-    def disconnect(self, *, external_id: str, hostname: str) -> str:
-        return self._mark("disconnect", external_id=external_id, hostname=hostname)
+    def disconnect(
+        self, *, external_id: str, hostname: str, operation_id: str | None = None
+    ) -> str:
+        return self._mark(
+            "disconnect",
+            operation_id=operation_id,
+            external_id=external_id,
+            hostname=hostname,
+        )
 
     def read_login_records(self) -> list[dict[str, Any]]:
         raw = self._read_bounded(self.status_dir / "login.json")
@@ -135,8 +158,14 @@ class TailscaleConnector:
     def read_funnel_status(self) -> dict[str, Any] | None:
         return self._read_object("funnel.json")
 
-    def read_command_status(self) -> dict[str, Any] | None:
-        return self._read_object("command.json")
+    def read_command_status(self, operation_id: str) -> dict[str, Any] | None:
+        return self._read_object(f"results/{operation_id}.json")
+
+    def consume_command_result(self, operation_id: str) -> None:
+        self._atomic_write(
+            self.ack_dir / f"{operation_id}.ack",
+            (operation_id + "\n").encode("ascii"),
+        )
 
     def has_login_artifact(self) -> bool:
         return (self.status_dir / "login.json").exists()

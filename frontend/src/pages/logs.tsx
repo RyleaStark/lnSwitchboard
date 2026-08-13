@@ -76,12 +76,9 @@ export function LogsPage() {
           </AlertDialog>
         }
       />
-      <Card>
-        <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <CardTitle>Request activity</CardTitle>
-            <CardDescription>{logs.isError ? "Couldn’t load logs" : paginationLabel(logs.data, query, "log")}</CardDescription>
-          </div>
+      <section className="flex flex-col gap-4" aria-label="Request activity">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <p className="text-sm text-muted-foreground">{logs.isError ? "Couldn’t load logs" : paginationLabel(logs.data, query, "log")}</p>
           <div className="flex flex-col gap-2 sm:flex-row">
             <div className="relative">
               <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -97,8 +94,8 @@ export function LogsPage() {
             </div>
             {!logs.isError ? <Pager page={page} totalPages={logs.data?.total_pages ?? 0} setPage={setPage} /> : null}
           </div>
-        </CardHeader>
-        <CardContent>
+        </div>
+        <div>
           {logs.isLoading ? <LoadingRows /> : null}
           {logs.isError ? <PageError message="Unable to load logs." onRetry={() => void logs.refetch()} retrying={logs.isFetching} /> : null}
           {!logs.isLoading && !logs.isError && items.length === 0 ? (
@@ -147,19 +144,65 @@ export function LogsPage() {
               </div>
             </>
           ) : null}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
       <Dialog open={details !== null} onOpenChange={(open) => !open && setDetails(null)}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
-            <DialogTitle>Log details</DialogTitle>
-            <DialogDescription>Raw structured context stored for this request.</DialogDescription>
+            <DialogTitle>Request details</DialogTitle>
+            <DialogDescription>Useful information recorded while handling this request.</DialogDescription>
           </DialogHeader>
-          <CodeBlock>{JSON.stringify(details, null, 2)}</CodeBlock>
+          <LogDetails details={details} />
         </DialogContent>
       </Dialog>
     </>
   )
+}
+
+function LogDetails({ details }: { details: JsonValue | null }) {
+  if (!details || typeof details !== "object" || Array.isArray(details)) {
+    return <p className="text-sm text-muted-foreground">{formatDetailValue(details)}</p>
+  }
+  const entries = Object.entries(details)
+  const readable = entries.filter(([, value]) => value === null || typeof value !== "object")
+  const technical = entries.filter(([, value]) => value !== null && typeof value === "object")
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      {readable.length ? (
+        <dl className="grid min-w-0 gap-x-6 gap-y-3 sm:grid-cols-2">
+          {readable.map(([key, value]) => (
+            <div key={key} className="min-w-0 border-b pb-3">
+              <dt className="text-xs font-medium text-muted-foreground">{friendlyDetailLabel(key)}</dt>
+              <dd className="mt-1 break-words text-sm">{formatDetailValue(value)}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      {technical.length ? (
+        <details className="rounded-lg border p-3">
+          <summary className="cursor-pointer text-sm font-medium">Technical details</summary>
+          <div className="mt-3"><CodeBlock>{JSON.stringify(Object.fromEntries(technical), null, 2)}</CodeBlock></div>
+        </details>
+      ) : null}
+    </div>
+  )
+}
+
+function friendlyDetailLabel(key: string): string {
+  const known: Record<string, string> = {
+    payment_hash: "Payment hash",
+    forwarded: "Forwarded",
+    amount_msat: "Amount (millisatoshis)",
+    callback_url: "Callback address",
+  }
+  return known[key] ?? key.replace(/[_-]+/g, " ").replace(/^./, (letter) => letter.toUpperCase())
+}
+
+function formatDetailValue(value: JsonValue | null): string {
+  if (value === true) return "Yes"
+  if (value === false) return "No"
+  if (value === null || value === undefined || value === "") return "Not available"
+  return String(value)
 }
 
 function LogTableRow({ entry, onDetails }: { entry: RequestLog; onDetails: (details: JsonValue | null) => void }) {

@@ -38,16 +38,22 @@ def _write_command(
 ) -> None:
     import json
 
-    payload = {"operation_id": operation_id}
+    payload = {"command": name.replace("-", "_"), "operation_id": operation_id}
     if external_id is not None:
         payload["external_id"] = external_id
     if hostname is not None:
         payload["hostname"] = hostname
     if device_name is not None:
         payload["device_name"] = device_name
-    (control_dir / name).write_text(
+    queue_dir = control_dir / "queue"
+    queue_dir.mkdir(exist_ok=True)
+    (queue_dir / f"{operation_id}.json").write_text(
         json.dumps(payload, separators=(",", ":")), encoding="utf-8"
     )
+
+
+def _command_result(status_dir: Path, operation_id: str) -> Path:
+    return status_dir / "results" / f"{operation_id}.json"
 
 
 @pytest.fixture
@@ -193,7 +199,7 @@ def test_supervisor_starts_and_cancels_login_with_validated_device_name(
         _wait_for(
             lambda: (
                 '"command":"cancel_login"'
-                in (status_dir / "command.json").read_text(encoding="utf-8")
+                in _command_result(status_dir, "7" * 32).read_text(encoding="utf-8")
             )
         )
         assert process.stdout.read(0) == ""
@@ -225,9 +231,9 @@ def test_supervisor_rejects_multiline_device_name_without_running_login(
 
         _wait_for(
             lambda: (
-                (status_dir / "command.json").exists()
+                _command_result(status_dir, "2" * 32).exists()
                 and '"error":"invalid_command"'
-                in (status_dir / "command.json").read_text(encoding="utf-8")
+                in _command_result(status_dir, "2" * 32).read_text(encoding="utf-8")
             )
         )
         commands = command_log.read_text(encoding="utf-8")
@@ -259,9 +265,9 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
         )
         _wait_for(
             lambda: (
-                (status_dir / "command.json").exists()
+                _command_result(status_dir, "3" * 32).exists()
                 and '"command":"enable"'
-                in (status_dir / "command.json").read_text(encoding="utf-8")
+                in _command_result(status_dir, "3" * 32).read_text(encoding="utf-8")
             )
         )
         _wait_for(lambda: (status_dir / "funnel.json").exists())
@@ -277,8 +283,9 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
         )
         _wait_for(
             lambda: (
-                '"command":"disable"'
-                in (status_dir / "command.json").read_text(encoding="utf-8")
+                _command_result(status_dir, "4" * 32).exists()
+                and '"command":"disable"'
+                in _command_result(status_dir, "4" * 32).read_text(encoding="utf-8")
             )
         )
 
@@ -288,8 +295,9 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
         )
         _wait_for(
             lambda: (
-                '"command":"disconnect"'
-                in (status_dir / "command.json").read_text(encoding="utf-8")
+                _command_result(status_dir, "5" * 32).exists()
+                and '"command":"disconnect"'
+                in _command_result(status_dir, "5" * 32).read_text(encoding="utf-8")
             )
         )
         _wait_for(lambda: not (state_dir / "owned-node-state").exists())
@@ -306,10 +314,10 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
         process.wait(timeout=3)
 
 
-def test_supervisor_disconnect_survives_funnel_reset_failure(
+def test_supervisor_disconnect_needs_live_identity_when_key_is_expired(
     supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
 ) -> None:
-    """Expired key (NeedsLogin): reset/logout cannot run; disconnect must not jam."""
+    """Historical identity metadata cannot authorize deletion of ambiguous state."""
     control_dir, status_dir, state_dir, command_log, env = supervisor_runtime
     Path(env["TS_TEST_FAIL_FUNNEL_RESET_FILE"]).touch()
     process = subprocess.Popen(
@@ -333,16 +341,19 @@ def test_supervisor_disconnect_survives_funnel_reset_failure(
         )
         _wait_for(
             lambda: (
-                (status_dir / "command.json").exists()
-                and '"command":"disconnect"' in (status_dir / "command.json").read_text(encoding="utf-8")
+                _command_result(status_dir, "5" * 32).exists()
+                and '"command":"disconnect"' in _command_result(status_dir, "5" * 32).read_text(encoding="utf-8")
             )
         )
-        command_status = (status_dir / "command.json").read_text(encoding="utf-8")
-        assert '"state":"complete"' in command_status
-        _wait_for(lambda: not (state_dir / "owned-node-state").exists())
-        # The daemon is restarted after teardown even though reset failed.
+        command_status = _command_result(status_dir, "5" * 32).read_text(encoding="utf-8")
+        assert '"state":"error"' in command_status
+        assert '"error":"identity_mismatch"' in command_status
+        assert (state_dir / "owned-node-state").exists()
+        # No provider mutation or daemon restart is authorized without live identity.
         lines = command_log.read_text(encoding="utf-8").splitlines()
-        assert sum(line.startswith("tailscaled ") for line in lines) >= 2
+        assert not any("funnel reset" in line for line in lines)
+        assert not any(line.endswith(" logout") for line in lines)
+        assert sum(line.startswith("tailscaled ") for line in lines) == 1
     finally:
         process.terminate()
         process.wait(timeout=3)
@@ -446,7 +457,7 @@ def test_supervisor_disconnect_stays_fail_closed_when_running_and_reset_fails(
             control_dir, "disconnect", "5" * 32,
             external_id="node-123", hostname="lns.tailnet.example.ts.net",
         )
-        command_status = status_dir / "command.json"
+        command_status = _command_result(status_dir, "5" * 32)
         _wait_for(
             lambda: (
                 command_status.exists()
@@ -460,6 +471,67 @@ def test_supervisor_disconnect_stays_fail_closed_when_running_and_reset_fails(
             line.endswith(" logout")
             for line in command_log.read_text(encoding="utf-8").splitlines()
         )
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_supervisor_uses_fresh_identity_bound_status_not_cached_node_snapshot(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, state_dir, command_log, env = supervisor_runtime
+    process = subprocess.Popen(
+        [str(SUPERVISOR)], env=env, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, text=True,
+    )
+    try:
+        _wait_for(lambda: (status_dir / "node.json").exists())
+        assert '"NeedsLogin"' in (status_dir / "node.json").read_text(encoding="utf-8")
+        Path(env["TS_TEST_RUNNING_FILE"]).touch()
+        owned_state = state_dir / "owned-node-state"
+        owned_state.write_text("private", encoding="utf-8")
+        operation_id = "9" * 32
+        _write_command(
+            control_dir, "disconnect", operation_id,
+            external_id="node-123", hostname="lns.tailnet.example.ts.net",
+        )
+        result = _command_result(status_dir, operation_id)
+        _wait_for(lambda: result.exists() and '"state":"complete"' in result.read_text(encoding="utf-8"))
+        lines = command_log.read_text(encoding="utf-8").splitlines()
+        assert any("funnel reset" in line for line in lines)
+        assert any(line.endswith(" logout") for line in lines)
+        assert not owned_state.exists()
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_supervisor_replays_claimed_disconnect_after_restart(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, state_dir, command_log, env = supervisor_runtime
+    Path(env["TS_TEST_RUNNING_FILE"]).touch()
+    operation_id = "a" * 32
+    processing = control_dir / "processing"
+    processing.mkdir(exist_ok=True)
+    (processing / f"{operation_id}.json").write_text(
+        '{"command":"disconnect","operation_id":"' + operation_id
+        + '","external_id":"node-123","hostname":"lns.tailnet.example.ts.net"}',
+        encoding="utf-8",
+    )
+    (state_dir / "owned-node-state").write_text("private", encoding="utf-8")
+    process = subprocess.Popen(
+        [str(SUPERVISOR)], env=env, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, text=True,
+    )
+    try:
+        result = _command_result(status_dir, operation_id)
+        _wait_for(lambda: result.exists() and '"state":"complete"' in result.read_text(encoding="utf-8"))
+        assert not (processing / f"{operation_id}.json").exists()
+        assert not (state_dir / "owned-node-state").exists()
+        lines = command_log.read_text(encoding="utf-8").splitlines()
+        assert any("funnel reset" in line for line in lines)
+        assert any(line.endswith(" logout") for line in lines)
     finally:
         process.terminate()
         process.wait(timeout=3)
@@ -483,7 +555,7 @@ def test_supervisor_rejects_disconnect_identity_mismatch_without_deleting_state(
             external_id="different-node",
             hostname="other.tailnet.example.ts.net",
         )
-        command_status = status_dir / "command.json"
+        command_status = _command_result(status_dir, "8" * 32)
         _wait_for(
             lambda: command_status.exists()
             and '"error":"identity_mismatch"'

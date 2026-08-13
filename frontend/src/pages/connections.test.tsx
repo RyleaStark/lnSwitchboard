@@ -616,6 +616,8 @@ test("opens the transient Tailscale login link and QR without query or browser s
     "src",
     expect.stringMatching(/^data:image\/svg\+xml/),
   )
+  expect(screen.getByText(/approve this lnSwitchboard device/)).toBeVisible()
+  expect(document.body).not.toHaveTextContent(/dedicated node/i)
   expect(client.getMutationCache().getAll()).toHaveLength(0)
   expect(window.localStorage?.length ?? 0).toBe(0)
   expect(window.sessionStorage?.length ?? 0).toBe(0)
@@ -821,8 +823,9 @@ test("explains that Tailscale onboarding needs its connector", async () => {
 
   renderPage("/connections/tailscale/")
 
-  expect(await screen.findByText("Connector not installed")).toBeInTheDocument()
-  expect(screen.getByText(/Add the Tailscale sidecar to this deployment stack/)).toBeInTheDocument()
+  expect(await screen.findByText("Tailscale unavailable")).toBeInTheDocument()
+  expect(screen.getByText(/Ask the person who manages this lnSwitchboard to install the Tailscale connection service/)).toBeInTheDocument()
+  expect(document.body).not.toHaveTextContent(/sidecar|deployment stack|onboarding/i)
   expect(screen.getByRole("button", { name: "Connect Tailscale" })).toBeDisabled()
   expect(api.tailscaleSetup).not.toHaveBeenCalled()
   expect(api.tailscaleLoginStatus).not.toHaveBeenCalled()
@@ -841,10 +844,11 @@ test("shows missing tailnet prerequisites without changing policy", async () => 
   await waitFor(() => expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(1))
   await user.click(await screen.findByRole("button", { name: "Connect Tailscale" }))
 
-  expect(await screen.findByText("Tailnet setup required")).toBeInTheDocument()
+  expect(await screen.findByText("Finish setting up Tailscale")).toBeInTheDocument()
   expect(screen.getByText(/Enable MagicDNS/)).toBeInTheDocument()
   expect(screen.getByText(/Allow Funnel on HTTPS port 443/)).toBeInTheDocument()
-  expect(screen.getByText(/will not change tailnet policy automatically/)).toBeInTheDocument()
+  expect(screen.getByText(/lnSwitchboard will not change these Tailscale settings for you/)).toBeInTheDocument()
+  expect(document.body).not.toHaveTextContent(/tailnet policy|node attribute|reported node hostname/i)
 })
 
 test("disables existing Tailscale management when its connector is unavailable", async () => {
@@ -885,7 +889,8 @@ test("disables existing Tailscale management when its connector is unavailable",
   renderPage("/connections/tailscale/")
 
   expect(await screen.findByText("lns.example.ts.net")).toBeInTheDocument()
-  expect(screen.getByText(/Restore the Tailscale connector to refresh or disconnect/)).toBeInTheDocument()
+  expect(screen.getByText(/Ask the person who manages this lnSwitchboard to restore the Tailscale connection service/)).toBeInTheDocument()
+  expect(document.body).not.toHaveTextContent(/Tailscale connector/i)
   expect(screen.getByRole("button", { name: "Refresh status" })).toBeDisabled()
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeDisabled()
   expect(api.tailscaleSetup).not.toHaveBeenCalled()
@@ -893,6 +898,7 @@ test("disables existing Tailscale management when its connector is unavailable",
 })
 
 test("renders connected Tailscale refresh and disconnect controls", async () => {
+  const user = userEvent.setup()
   vi.mocked(api.connections).mockResolvedValue({
     providers: [
       { id: "tailscale", name: "Tailscale Funnel", capability: "available", reason: null },
@@ -928,6 +934,9 @@ test("renders connected Tailscale refresh and disconnect controls", async () => 
   expect(screen.getByRole("button", { name: "Refresh status" })).toBeInTheDocument()
   expect(screen.getByRole("button", { name: "Copy hostname" })).toBeInTheDocument()
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument()
+  await user.click(screen.getByRole("button", { name: "Disconnect" }))
+  expect(screen.getByText(/Your public Tailscale web address will stop working/)).toBeVisible()
+  expect(document.body).not.toHaveTextContent(/public Funnel ingress|dedicated node state/i)
 })
 
 test("offers zrok Cloud and self-hosted modes without a configurable tunnel target", async () => {
@@ -950,10 +959,19 @@ test("offers zrok Cloud and self-hosted modes without a configurable tunnel targ
 
   const user = userEvent.setup()
   renderPage("/connections/zrok/")
-  expect(await screen.findByRole("heading", { name: "zrok" })).toBeVisible()
-  expect(screen.getByText(/anti-phishing interstitial/)).toBeVisible()
+  const heading = await screen.findByRole("heading", { name: "zrok" })
+  expect(heading).toBeVisible()
+  expect(heading.closest('[data-slot="card"]')).toBeNull()
+  expect(screen.getByText("Make your Lightning Addresses available online with zrok Cloud or your own zrok service.")).toBeVisible()
+  expect(screen.queryByRole("heading", { name: "Connect zrok" })).not.toBeInTheDocument()
+  expect(screen.queryByText(/receives traffic only from the public listener/)).not.toBeInTheDocument()
+  expect(screen.getByText(/zrok Cloud may show a safety check page/)).toBeVisible()
+  expect(document.body).not.toHaveTextContent(/secretless|anti-phishing interstitial|controller origin|isolated connector|tunnel destination/i)
   expect(screen.queryByLabelText(/target/i)).not.toBeInTheDocument()
   await user.selectOptions(screen.getByLabelText("Service"), "self_hosted")
+  expect(screen.getByText("Connect to a zrok service run by you or your organization.")).toBeVisible()
+  expect(screen.getByText(/Enter the web address for your zrok service/)).toBeVisible()
+  expect(screen.getByText(/Used only to connect zrok/)).toBeVisible()
   await user.type(screen.getByLabelText("zrok API endpoint"), "https://zrok.example.com")
   await user.type(screen.getByLabelText("Account token"), "secret-token")
   await user.type(screen.getByLabelText("Reserved name"), "pay-bones")

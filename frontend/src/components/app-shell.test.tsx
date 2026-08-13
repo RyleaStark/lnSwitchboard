@@ -12,6 +12,14 @@ class ResizeObserverStub implements ResizeObserver {
 }
 
 vi.stubGlobal("ResizeObserver", ResizeObserverStub)
+vi.stubGlobal("matchMedia", vi.fn().mockImplementation((query: string) => ({
+  addEventListener: vi.fn(),
+  dispatchEvent: vi.fn(),
+  matches: false,
+  media: query,
+  onchange: null,
+  removeEventListener: vi.fn(),
+})))
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -40,6 +48,23 @@ function renderAppShell() {
     </QueryClientProvider>
   )
 }
+
+describe("AppShell scrolling", () => {
+  it("keeps the shell at the viewport while the content pane scrolls", () => {
+    const { container } = renderAppShell()
+
+    expect(container.querySelector('[data-slot="sidebar-wrapper"]')).toHaveClass(
+      "h-svh",
+      "min-h-0",
+      "overflow-hidden",
+    )
+    expect(container.querySelector('[data-slot="sidebar-inset"]')).toHaveClass(
+      "min-h-0",
+      "overflow-y-auto",
+      "overscroll-y-contain",
+    )
+  })
+})
 
 describe("AppShell mobile navigation", () => {
   beforeEach(() => {
