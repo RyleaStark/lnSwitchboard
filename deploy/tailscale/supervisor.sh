@@ -18,6 +18,7 @@ RESULT_DIR="$STATUS_DIR/results"
 LOCK_ROOT=$(dirname "$CONTROL_DIR")
 POLL_INTERVAL="${TS_POLL_INTERVAL:-2}"
 COMMAND_TIMEOUT="${TS_COMMAND_TIMEOUT:-30}"
+LOGIN_STOP_TIMEOUT="${TS_LOGIN_STOP_TIMEOUT:-5}"
 LOGIN_RETENTION_SECONDS="${TS_LOGIN_RETENTION_SECONDS:-300}"
 COMPLETED_RETENTION_SECONDS="${TS_COMPLETED_RETENTION_SECONDS:-2592000}"
 COMPLETED_MAX_RECORDS="${TS_COMPLETED_MAX_RECORDS:-4096}"
@@ -49,6 +50,12 @@ case "$COMMAND_TIMEOUT" in
         exit 1
         ;;
 esac
+case "$LOGIN_STOP_TIMEOUT" in
+    "" | *[!0-9]* | 0)
+        printf '%s\n' "TS_LOGIN_STOP_TIMEOUT must be a positive integer" >&2
+        exit 1
+        ;;
+esac
 
 TAILSCALED_PID=""
 LOGIN_PID=""
@@ -62,10 +69,21 @@ if [ -f "$STATUS_DIR/login.json" ]; then
     LOGIN_COMPLETED_AT=$(stat -c %Y "$STATUS_DIR/login.json" 2>/dev/null || date +%s)
 fi
 
+stop_process() {
+    process_pid=$1
+    [ -n "$process_pid" ] || return 0
+    kill "$process_pid" 2>/dev/null || true
+    if ! timeout -k 1 "$LOGIN_STOP_TIMEOUT" sh -c '
+        while kill -0 "$1" 2>/dev/null; do sleep 0.1; done
+    ' sh "$process_pid"; then
+        kill -KILL "$process_pid" 2>/dev/null || true
+    fi
+    wait "$process_pid" 2>/dev/null || true
+}
+
 stop_login() {
     if [ -n "$LOGIN_PID" ]; then
-        kill "$LOGIN_PID" 2>/dev/null || true
-        wait "$LOGIN_PID" 2>/dev/null || true
+        stop_process "$LOGIN_PID"
         LOGIN_PID=""
     fi
     LOGIN_COMPLETED_AT=""
@@ -74,8 +92,7 @@ stop_login() {
 stop_children() {
     stop_login
     if [ -n "$TAILSCALED_PID" ]; then
-        kill "$TAILSCALED_PID" 2>/dev/null || true
-        wait "$TAILSCALED_PID" 2>/dev/null || true
+        stop_process "$TAILSCALED_PID"
         TAILSCALED_PID=""
     fi
 }

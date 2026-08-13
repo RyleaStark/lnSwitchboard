@@ -115,7 +115,11 @@ elif [ "${1:-}" = "up" ]; then
     printf '%s\\n' '{"BackendState":"Running"}'
     exit 0
   fi
-  trap 'exit 0' TERM INT
+  if [ -f "$TS_TEST_IGNORE_LOGIN_TERM_FILE" ]; then
+    trap '' TERM INT
+  else
+    trap 'exit 0' TERM INT
+  fi
   while :; do sleep 1; done
 elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "reset" ]; then
   if [ -f "$TS_TEST_FAIL_FUNNEL_RESET_FILE" ]; then exit 1; fi
@@ -145,8 +149,10 @@ fi
             "TS_TEST_FAIL_FUNNEL_RESET_FILE": str(tmp_path / "fail-funnel-reset"),
             "TS_TEST_RUNNING_FILE": str(tmp_path / "node-running"),
             "TS_TEST_COMPLETE_LOGIN_FILE": str(tmp_path / "complete-login"),
+            "TS_TEST_IGNORE_LOGIN_TERM_FILE": str(tmp_path / "ignore-login-term"),
             "TS_TEST_BLOCK_FUNNEL_FILE": str(tmp_path / "block-funnel"),
             "TS_LOGIN_RETENTION_SECONDS": "2",
+            "TS_LOGIN_STOP_TIMEOUT": "1",
             "DEP_ENV": "UMBREL_DEV",
         }
     )
@@ -533,6 +539,46 @@ def test_supervisor_expires_completed_login_artifact_without_backend_cleanup(
         )
         _wait_for(lambda: not login_status.exists(), timeout=5)
         assert process.poll() is None
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_cancel_login_force_kills_term_resistant_provider_and_releases_protocol_lock(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, _state_dir, command_log, env = supervisor_runtime
+    Path(env["TS_TEST_IGNORE_LOGIN_TERM_FILE"]).touch()
+    process = subprocess.Popen(
+        [str(SUPERVISOR)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        begin_id = "7" * 32
+        cancel_id = "8" * 32
+        _write_command(control_dir, "begin-login", begin_id, device_name="lns")
+        _wait_for(lambda: _command_result(status_dir, begin_id).exists())
+        _wait_for(
+            lambda: any(
+                " up --json --reset " in f" {line} "
+                for line in command_log.read_text(encoding="utf-8").splitlines()
+            )
+        )
+
+        started = time.monotonic()
+        _write_command(control_dir, "cancel-login", cancel_id)
+        _wait_for(lambda: _command_result(status_dir, cancel_id).exists(), timeout=3)
+        assert time.monotonic() - started < 3
+        assert '"state":"complete"' in _command_result(
+            status_dir, cancel_id
+        ).read_text(encoding="utf-8")
+
+        connector = TailscaleConnector(control_dir=control_dir, status_dir=status_dir)
+        operation_id = connector.cancel_login()
+        assert (control_dir / "queue" / f"{operation_id}.json").exists()
     finally:
         process.terminate()
         process.wait(timeout=3)
