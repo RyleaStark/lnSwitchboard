@@ -200,6 +200,58 @@ def test_connector_does_not_requeue_operation_while_terminal_state_is_pending(
     assert not queue.exists()
 
 
+def test_connector_removes_queue_when_ack_becomes_completed_during_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connector = _connector(tmp_path)
+    operation_id = "2" * 32
+    connector.disconnect(
+        external_id="node-a", hostname="a.example.ts.net", operation_id=operation_id
+    )
+    operation = tmp_path / "control" / "operations" / f"{operation_id}.json"
+    queue = tmp_path / "control" / "queue" / f"{operation_id}.json"
+    completed = tmp_path / "control" / "completed" / f"{operation_id}.json"
+    result = tmp_path / "status" / "results" / f"{operation_id}.json"
+    acknowledgement = tmp_path / "control" / "acks" / f"{operation_id}.ack"
+    queue.unlink()
+    result.write_text('{"state":"complete"}', encoding="utf-8")
+    acknowledgement.write_text(operation_id, encoding="utf-8")
+
+    original_read = connector._read_bounded
+    original_exists = Path.exists
+    completed_reads = 0
+
+    def transition_after_completed_read(path: Path) -> str | None:
+        nonlocal completed_reads
+        value = original_read(path)
+        if path == completed:
+            completed_reads += 1
+            if completed_reads == 2:
+                completed.write_bytes(operation.read_bytes())
+                result.unlink()
+                acknowledgement.unlink()
+        return value
+
+    def terminal_artifact_disappeared(path: Path) -> bool:
+        if path in {result, acknowledgement}:
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr(connector, "_read_bounded", transition_after_completed_read)
+    monkeypatch.setattr(Path, "exists", terminal_artifact_disappeared)
+
+    assert (
+        connector.disconnect(
+            external_id="node-a",
+            hostname="a.example.ts.net",
+            operation_id=operation_id,
+        )
+        == operation_id
+    )
+    assert completed.exists()
+    assert not queue.exists()
+
+
 def test_connector_reads_sanitized_command_ack(tmp_path: Path) -> None:
     connector = _connector(tmp_path)
     operation_id = "a" * 32

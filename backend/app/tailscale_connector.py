@@ -139,6 +139,14 @@ class TailscaleConnector:
         if result_path.exists() or ack_path.exists():
             queue_path.unlink(missing_ok=True)
             self._sync_directory(self.command_dir)
+        completed = self._read_bounded(completed_path)
+        if completed is not None:
+            if completed != content.decode("utf-8"):
+                raise TailscaleProtocolError(
+                    "Tailscale operation ID already has different content"
+                )
+            queue_path.unlink(missing_ok=True)
+            self._sync_directory(self.command_dir)
         return operation_id
 
     def _read_bounded(self, path: Path) -> str | None:

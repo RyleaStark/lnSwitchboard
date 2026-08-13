@@ -495,13 +495,33 @@ consume_results() {
 claim_next_command() {
     for command_path in "$PROCESSING_DIR"/*.json; do
         [ -f "$command_path" ] || continue
+        operation_id=$(basename "$command_path" .json)
+        if [ -f "$COMPLETED_DIR/$operation_id.json" ] \
+            || [ -f "$RESULT_DIR/$operation_id.json" ] \
+            || [ -f "$ACK_DIR/$operation_id.ack" ]; then
+            durable_remove "$command_path"
+            continue
+        fi
         process_claim "$command_path"
         return
     done
     for command_path in "$QUEUE_DIR"/*.json; do
         [ -f "$command_path" ] || continue
+        operation_id=$(basename "$command_path" .json)
+        if [ -f "$COMPLETED_DIR/$operation_id.json" ] \
+            || [ -f "$RESULT_DIR/$operation_id.json" ] \
+            || [ -f "$ACK_DIR/$operation_id.ack" ]; then
+            durable_remove "$command_path"
+            continue
+        fi
         claimed="$PROCESSING_DIR/$(basename "$command_path")"
         if durable_move "$command_path" "$claimed" 2>/dev/null; then
+            if [ -f "$COMPLETED_DIR/$operation_id.json" ] \
+                || [ -f "$RESULT_DIR/$operation_id.json" ] \
+                || [ -f "$ACK_DIR/$operation_id.ack" ]; then
+                durable_remove "$claimed"
+                continue
+            fi
             process_claim "$claimed"
         fi
         return

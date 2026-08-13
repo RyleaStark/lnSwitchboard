@@ -222,6 +222,28 @@ def test_ack_creates_terminal_tombstone_before_cleanup(
         process.wait(timeout=3)
 
 
+def test_supervisor_discards_queue_link_for_completed_operation(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, _state_dir, command_log, env = supervisor_runtime
+    operation_id = "a" * 32
+    operation = _write_operation_record(control_dir, "cancel-login", operation_id)
+    completed_dir = control_dir / "completed"
+    completed_dir.mkdir(exist_ok=True)
+    (completed_dir / f"{operation_id}.json").write_bytes(operation.read_bytes())
+    _write_command(control_dir, "cancel-login", operation_id)
+
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        queue = control_dir / "queue" / f"{operation_id}.json"
+        _wait_for(lambda: not queue.exists())
+        time.sleep(0.15)
+        assert not _command_result(status_dir, operation_id).exists()
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
 def test_supervisor_starts_and_cancels_login_with_validated_device_name(
     supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
 ) -> None:
