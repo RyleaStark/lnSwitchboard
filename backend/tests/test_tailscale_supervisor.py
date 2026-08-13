@@ -27,6 +27,29 @@ def _wait_for(predicate, *, timeout: float = 3.0) -> None:
     raise AssertionError("timed out waiting for supervisor state")
 
 
+def _write_command(
+    control_dir: Path,
+    name: str,
+    operation_id: str,
+    *,
+    external_id: str | None = None,
+    hostname: str | None = None,
+    device_name: str | None = None,
+) -> None:
+    import json
+
+    payload = {"operation_id": operation_id}
+    if external_id is not None:
+        payload["external_id"] = external_id
+    if hostname is not None:
+        payload["hostname"] = hostname
+    if device_name is not None:
+        payload["device_name"] = device_name
+    (control_dir / name).write_text(
+        json.dumps(payload, separators=(",", ":")), encoding="utf-8"
+    )
+
+
 @pytest.fixture
 def supervisor_runtime(
     tmp_path: Path,
@@ -55,7 +78,7 @@ printf 'tailscale %s\\n' "$*" >> "$TS_TEST_COMMAND_LOG"
 case "${1:-}" in --socket=*) shift ;; esac
 if [ "${1:-}" = "status" ]; then
   if [ -f "$TS_TEST_RUNNING_FILE" ]; then
-    printf '%s\n' '{"BackendState":"Running","Self":{"DNSName":"lns.tailnet.example.ts.net."}}'
+    printf '%s\n' '{"BackendState":"Running","Self":{"ID":"node-123","DNSName":"lns.tailnet.example.ts.net."}}'
   else
     printf '%s\n' '{"BackendState":"NeedsLogin","AuthURL":"REDACTED","Self":{"DNSName":""}}'
   fi
@@ -147,8 +170,7 @@ def test_supervisor_starts_and_cancels_login_with_validated_device_name(
     )
     try:
         _wait_for(lambda: (status_dir / "node.json").exists())
-        (control_dir / "login.device-name").write_text("LNS\n", encoding="utf-8")
-        (control_dir / "begin-login").touch()
+        _write_command(control_dir, "begin-login", "1" * 32, device_name="lns")
 
         _wait_for(lambda: (status_dir / "login.json").exists())
         _wait_for(
@@ -166,7 +188,7 @@ def test_supervisor_starts_and_cancels_login_with_validated_device_name(
         assert process.stdout is not None
         assert process.stderr is not None
 
-        (control_dir / "cancel-login").touch()
+        _write_command(control_dir, "cancel-login", "7" * 32)
         _wait_for(lambda: not (status_dir / "login.json").exists())
         _wait_for(
             lambda: (
@@ -194,15 +216,17 @@ def test_supervisor_rejects_multiline_device_name_without_running_login(
     )
     try:
         _wait_for(lambda: (status_dir / "node.json").exists())
-        (control_dir / "login.device-name").write_text(
-            "lns\n--hostname=attacker", encoding="utf-8"
+        _write_command(
+            control_dir,
+            "begin-login",
+            "2" * 32,
+            device_name="lns\n--hostname=attacker",
         )
-        (control_dir / "begin-login").touch()
 
         _wait_for(
             lambda: (
                 (status_dir / "command.json").exists()
-                and '"error":"invalid_device_name"'
+                and '"error":"invalid_command"'
                 in (status_dir / "command.json").read_text(encoding="utf-8")
             )
         )
@@ -229,7 +253,10 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
         _wait_for(lambda: (status_dir / "node.json").exists())
         (state_dir / "owned-node-state").write_text("private", encoding="utf-8")
 
-        (control_dir / "enable").touch()
+        _write_command(
+            control_dir, "enable", "3" * 32,
+            external_id="node-123", hostname="lns.tailnet.example.ts.net",
+        )
         _wait_for(
             lambda: (
                 (status_dir / "command.json").exists()
@@ -244,7 +271,10 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
             "http://extended-umbrella-lnswitchboard_public:21212"
         ) in commands
 
-        (control_dir / "disable").touch()
+        _write_command(
+            control_dir, "disable", "4" * 32,
+            external_id="node-123", hostname="lns.tailnet.example.ts.net",
+        )
         _wait_for(
             lambda: (
                 '"command":"disable"'
@@ -252,7 +282,10 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
             )
         )
 
-        (control_dir / "disconnect").touch()
+        _write_command(
+            control_dir, "disconnect", "5" * 32,
+            external_id="node-123", hostname="lns.tailnet.example.ts.net",
+        )
         _wait_for(
             lambda: (
                 '"command":"disconnect"'
@@ -289,8 +322,15 @@ def test_supervisor_disconnect_survives_funnel_reset_failure(
     try:
         _wait_for(lambda: (status_dir / "node.json").exists())
         (state_dir / "owned-node-state").write_text("private", encoding="utf-8")
+        (state_dir / ".lnswitchboard-active.json").write_text(
+            '{"external_id":"node-123","hostname":"lns.tailnet.example.ts.net"}\n',
+            encoding="utf-8",
+        )
 
-        (control_dir / "disconnect").touch()
+        _write_command(
+            control_dir, "disconnect", "5" * 32,
+            external_id="node-123", hostname="lns.tailnet.example.ts.net",
+        )
         _wait_for(
             lambda: (
                 (status_dir / "command.json").exists()
@@ -341,8 +381,7 @@ def test_supervisor_expires_completed_login_artifact_without_backend_cleanup(
         text=True,
     )
     try:
-        (control_dir / "login.device-name").write_text("lns\n", encoding="utf-8")
-        (control_dir / "begin-login").touch()
+        _write_command(control_dir, "begin-login", "6" * 32, device_name="lns")
 
         login_status = status_dir / "login.json"
         _wait_for(
@@ -403,7 +442,10 @@ def test_supervisor_disconnect_stays_fail_closed_when_running_and_reset_fails(
     )
     try:
         _wait_for(lambda: (status_dir / "node.json").exists())
-        (control_dir / "disconnect").touch()
+        _write_command(
+            control_dir, "disconnect", "5" * 32,
+            external_id="node-123", hostname="lns.tailnet.example.ts.net",
+        )
         command_status = status_dir / "command.json"
         _wait_for(
             lambda: (
@@ -413,6 +455,40 @@ def test_supervisor_disconnect_stays_fail_closed_when_running_and_reset_fails(
             )
         )
 
+        assert owned_state.exists()
+        assert not any(
+            line.endswith(" logout")
+            for line in command_log.read_text(encoding="utf-8").splitlines()
+        )
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_supervisor_rejects_disconnect_identity_mismatch_without_deleting_state(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, state_dir, command_log, env = supervisor_runtime
+    Path(env["TS_TEST_RUNNING_FILE"]).touch()
+    owned_state = state_dir / "owned-node-state"
+    owned_state.write_text("private", encoding="utf-8")
+    process = subprocess.Popen(
+        [str(SUPERVISOR)], env=env, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, text=True,
+    )
+    try:
+        _wait_for(lambda: (status_dir / "node.json").exists())
+        _write_command(
+            control_dir, "disconnect", "8" * 32,
+            external_id="different-node",
+            hostname="other.tailnet.example.ts.net",
+        )
+        command_status = status_dir / "command.json"
+        _wait_for(
+            lambda: command_status.exists()
+            and '"error":"identity_mismatch"'
+            in command_status.read_text(encoding="utf-8")
+        )
         assert owned_state.exists()
         assert not any(
             line.endswith(" logout")

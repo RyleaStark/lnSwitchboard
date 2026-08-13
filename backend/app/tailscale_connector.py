@@ -48,11 +48,19 @@ class TailscaleConnector:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def _mark(self, operation: str) -> None:
+    def _mark(self, operation: str, **parameters: str) -> str:
         if operation not in self.supported_operations:
             raise ValueError("unsupported Tailscale operation")
+        operation_id = uuid.uuid4().hex
         (self.status_dir / "command.json").unlink(missing_ok=True)
-        self._atomic_write(self.control_dir / operation, b"")
+        payload = {"operation_id": operation_id, **parameters}
+        self._atomic_write(
+            self.control_dir / operation,
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode(
+                "utf-8"
+            ),
+        )
+        return operation_id
 
     def _read_bounded(self, path: Path) -> str | None:
         try:
@@ -79,27 +87,24 @@ class TailscaleConnector:
             raise TailscaleProtocolError("Tailscale status must be an object")
         return payload
 
-    def begin_login(self, device_name: str) -> None:
+    def begin_login(self, device_name: str) -> str:
         (self.status_dir / "login.json").unlink(missing_ok=True)
-        self._atomic_write(
-            self.control_dir / "login.device-name", f"{device_name}\n".encode("ascii")
-        )
-        self._mark("begin-login")
+        return self._mark("begin-login", device_name=device_name)
 
-    def cancel_login(self) -> None:
-        self._mark("cancel-login")
+    def cancel_login(self) -> str:
+        return self._mark("cancel-login")
 
-    def clear_login(self) -> None:
-        self._mark("clear-login")
+    def clear_login(self) -> str:
+        return self._mark("clear-login")
 
-    def enable_funnel(self) -> None:
-        self._mark("enable")
+    def enable_funnel(self, *, external_id: str, hostname: str) -> str:
+        return self._mark("enable", external_id=external_id, hostname=hostname)
 
-    def disable_funnel(self) -> None:
-        self._mark("disable")
+    def disable_funnel(self, *, external_id: str, hostname: str) -> str:
+        return self._mark("disable", external_id=external_id, hostname=hostname)
 
-    def disconnect(self) -> None:
-        self._mark("disconnect")
+    def disconnect(self, *, external_id: str, hostname: str) -> str:
+        return self._mark("disconnect", external_id=external_id, hostname=hostname)
 
     def read_login_records(self) -> list[dict[str, Any]]:
         raw = self._read_bounded(self.status_dir / "login.json")

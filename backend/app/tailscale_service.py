@@ -288,11 +288,24 @@ class TailscaleService:
     async def _sleep(self) -> None:
         await asyncio.sleep(self.poll_interval_seconds)
 
-    async def _wait_command(self, command: str) -> dict[str, Any]:
+    async def _wait_command(
+        self,
+        command: str,
+        operation_id: str,
+        *,
+        external_id: str | None = None,
+        hostname: str | None = None,
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + self.operation_timeout_seconds
         while time.monotonic() <= deadline:
             status = self.connector.read_command_status()
-            if status and status.get("command") == command:
+            if (
+                status
+                and status.get("command") == command
+                and status.get("operation_id") == operation_id
+                and (external_id is None or status.get("external_id") == external_id)
+                and (hostname is None or status.get("hostname") == hostname)
+            ):
                 state = status.get("state")
                 if state in {"complete", "started"}:
                     return status
@@ -313,19 +326,73 @@ class TailscaleService:
                 "Tailscale disconnected, but registry cleanup failed"
             ) from exc
 
+    def _stored_identity(
+        self, connection: ProviderConnection
+    ) -> tuple[str, str]:
+        external_id = connection.external_id.strip()
+        if not external_id or len(connection.domains) != 1:
+            raise TailscaleOperationError("Stored Tailscale identity is invalid")
+        hostname = validate_tailscale_hostname(connection.domains[0].hostname)
+        return external_id, hostname
+
+    def _runtime_identity(
+        self, status: Mapping[str, Any] | None = None
+    ) -> tuple[str, str]:
+        status = status or self._node_status()
+        self_status = status.get("Self")
+        if not isinstance(self_status, Mapping):
+            raise TailscaleOperationError("Tailscale status is missing node identity")
+        external_id = str(
+            self_status.get("ID") or self_status.get("PublicKey") or ""
+        ).strip()
+        raw_hostname = self_status.get("DNSName")
+        hostname = (
+            raw_hostname.strip().lower().rstrip(".")
+            if isinstance(raw_hostname, str)
+            else ""
+        )
+        if not external_id or not hostname or len(hostname) > 253:
+            raise TailscaleOperationError("Tailscale status is missing node identity")
+        return external_id, hostname
+
+    def _require_matching_runtime_identity(
+        self,
+        connection: ProviderConnection,
+        status: Mapping[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        stored_external_id, stored_hostname = self._stored_identity(connection)
+        runtime_external_id, runtime_hostname = self._runtime_identity(status)
+        if (
+            runtime_external_id != stored_external_id
+            or runtime_hostname != stored_hostname
+        ):
+            raise TailscaleOperationError(
+                "Tailscale runtime identity does not match the stored connection"
+            )
+        return runtime_external_id, runtime_hostname
+
     async def _cancel_pending_login(self) -> None:
         try:
-            self.connector.cancel_login()
+            operation_id = self.connector.cancel_login()
         except OSError as exc:
             raise TailscaleOperationError(
                 "Unable to request Tailscale login cancellation"
             ) from exc
-        await self._wait_command("cancel_login")
+        await self._wait_command("cancel_login", operation_id)
 
-    async def _disconnect_authenticated_runtime(self) -> None:
+    async def _disconnect_authenticated_runtime(
+        self, *, external_id: str, hostname: str
+    ) -> None:
         try:
-            self.connector.disconnect()
-            await self._wait_command("disconnect")
+            operation_id = self.connector.disconnect(
+                external_id=external_id, hostname=hostname
+            )
+            await self._wait_command(
+                "disconnect",
+                operation_id,
+                external_id=external_id,
+                hostname=hostname,
+            )
         except OSError as exc:
             raise TailscaleOperationError(
                 "Unable to request fail-closed Tailscale disconnect"
@@ -338,15 +405,26 @@ class TailscaleService:
 
     async def _cleanup_flow(self, flow_id: str, flow: _LoginFlow) -> None:
         if flow.authenticated:
-            await self._disconnect_authenticated_runtime()
+            external_id, hostname = self._runtime_identity()
+            await self._disconnect_authenticated_runtime(
+                external_id=external_id, hostname=hostname
+            )
         else:
             await self._cancel_pending_login()
         self._forget_flow(flow_id)
 
     async def _disable_funnel(self) -> None:
         try:
-            self.connector.disable_funnel()
-            await self._wait_command("disable")
+            external_id, hostname = self._runtime_identity()
+            operation_id = self.connector.disable_funnel(
+                external_id=external_id, hostname=hostname
+            )
+            await self._wait_command(
+                "disable",
+                operation_id,
+                external_id=external_id,
+                hostname=hostname,
+            )
         except OSError as exc:
             raise TailscaleOperationError(
                 "Unable to request Tailscale Funnel reset"
@@ -358,13 +436,13 @@ class TailscaleService:
         deadline = time.monotonic() + self.operation_timeout_seconds
         while time.monotonic() <= deadline:
             try:
-                self.connector.clear_login()
+                operation_id = self.connector.clear_login()
             except OSError as exc:
                 raise TailscaleOperationError(
                     "Unable to request Tailscale login artifact cleanup"
                 ) from exc
             try:
-                await self._wait_command("clear_login")
+                await self._wait_command("clear_login", operation_id)
                 return
             except TailscaleOperationError as exc:
                 if "login_active" not in str(exc):
@@ -451,7 +529,8 @@ class TailscaleService:
                 self._expire_flow(flow_id)
             )
             try:
-                self.connector.begin_login(normalized)
+                operation_id = self.connector.begin_login(normalized)
+                await self._wait_command("begin_login", operation_id)
             except OSError as exc:
                 await self._cleanup_flow(flow_id, flow)
                 raise TailscaleOperationError(
@@ -522,7 +601,12 @@ class TailscaleService:
             raise TailscaleOperationError("Tailscale node is not connected")
         return status
 
-    async def _finalize_running(self, flow: _LoginFlow) -> dict[str, object]:
+    async def _finalize_running(
+        self,
+        flow: _LoginFlow,
+        *,
+        preserve_existing_on_prerequisite_failure: bool = False,
+    ) -> dict[str, object]:
         status = self._node_status()
         self_status = status.get("Self")
         if not isinstance(self_status, Mapping):
@@ -535,6 +619,10 @@ class TailscaleService:
             ) from exc
         missing = prerequisite_failures(status)
         if missing:
+            if preserve_existing_on_prerequisite_failure:
+                raise TailscaleOperationError(
+                    "Tailscale status is missing required Funnel prerequisites"
+                )
             await self._disable_funnel()
             try:
                 self._register_prerequisite_connection(
@@ -556,8 +644,20 @@ class TailscaleService:
             }
 
         try:
-            self.connector.enable_funnel()
-            await self._wait_command("enable")
+            external_id = str(
+                self_status.get("ID") or self_status.get("PublicKey") or ""
+            ).strip()
+            if not external_id:
+                raise TailscaleOperationError("Tailscale status is missing node identity")
+            operation_id = self.connector.enable_funnel(
+                external_id=external_id, hostname=hostname
+            )
+            await self._wait_command(
+                "enable",
+                operation_id,
+                external_id=external_id,
+                hostname=hostname,
+            )
         except OSError as exc:
             raise TailscaleOperationError(
                 "Unable to request Tailscale Funnel enablement"
@@ -653,6 +753,53 @@ class TailscaleService:
             raise TailscaleOperationError("Tailscale connection registration failed")
         return registered
 
+    async def _observe_existing_funnel(
+        self,
+        connection: ProviderConnection,
+        status: Mapping[str, Any],
+        device_name: str,
+        hostname: str,
+    ) -> ProviderConnection:
+        missing = prerequisite_failures(status)
+        if missing:
+            raise TailscaleOperationError(
+                "Tailscale status is missing required Funnel prerequisites"
+            )
+        deadline = time.monotonic() + self.operation_timeout_seconds
+        while time.monotonic() <= deadline:
+            try:
+                funnel_status = self.connector.read_funnel_status()
+            except OSError as exc:
+                raise TailscaleOperationError(
+                    "Unable to read Tailscale Funnel status"
+                ) from exc
+            if funnel_status is not None and funnel_status_matches(
+                funnel_status, hostname, self.public_origin
+            ):
+                self.store.upsert_connection(
+                    provider="tailscale",
+                    external_id=connection.external_id,
+                    label=connection.label,
+                    status="connected",
+                    public_metadata={
+                        "device_name": device_name,
+                        "origin": self.public_origin,
+                        **key_expiry_metadata(status["Self"]),
+                    },
+                )
+                self.store.replace_domains(
+                    connection.id,
+                    [{"hostname": hostname, "status": "active"}],
+                )
+                observed = self.store.get_connection(connection.id)
+                if observed is None:  # pragma: no cover
+                    raise TailscaleOperationError(
+                        "Tailscale connection registration failed"
+                    )
+                return observed
+            await self._sleep()
+        raise TailscaleOperationError("Tailscale Funnel status did not reconcile")
+
     async def refresh(self, connection_id: str) -> ProviderConnection:
         self._require_available()
         async with self._lock:
@@ -662,50 +809,13 @@ class TailscaleService:
             device_name = normalize_device_name(
                 str(existing.public_metadata.get("device_name") or DEFAULT_DEVICE_NAME)
             )
-            flow = _LoginFlow(
-                device_name=device_name,
-                expires_at=time.monotonic(),
-                authenticated=True,
-            )
-            try:
-                result = await self._finalize_running(flow)
-            except (TailscaleServiceError, TailscaleProtocolError):
-                await self._disconnect_authenticated_runtime()
-                raise
-            if result["state"] == "connected":
-                refreshed = self.store.get_connection(connection_id)
-                if refreshed is None:
-                    raise TailscaleOperationError("Tailscale connection was not found")
-                return refreshed
-
             status = self._node_status()
+            self._require_matching_runtime_identity(existing, status)
             self_status = status["Self"]
             hostname = validate_tailscale_hostname(self_status.get("DNSName"))
-            missing = list(result["missing_prerequisites"])
-            updated = self.store.upsert_connection(
-                provider="tailscale",
-                external_id=existing.external_id,
-                label=existing.label,
-                status="error",
-                public_metadata={"device_name": device_name, "origin": self.public_origin, **key_expiry_metadata(self_status)},
-                last_error="Missing Tailscale prerequisites: " + ", ".join(missing),
+            return await self._observe_existing_funnel(
+                existing, status, device_name, hostname
             )
-            self.store.replace_domains(
-                updated.id,
-                [
-                    {
-                        "hostname": hostname,
-                        "status": "error",
-                        "last_error": updated.last_error,
-                    }
-                ],
-            )
-            refreshed = self.store.get_connection(updated.id)
-            if refreshed is None:  # pragma: no cover
-                raise TailscaleOperationError(
-                    "Tailscale connection registration failed"
-                )
-            return refreshed
 
     async def recover_incomplete_provisioning(self) -> None:
         if not self.connector_enabled:
@@ -728,16 +838,10 @@ class TailscaleService:
                     await self._cancel_pending_login()
                 return
             if backend_state != "Running":
-                if not has_artifact:
-                    return
-                await self._disconnect_authenticated_runtime()
-                raise TailscaleOperationError("Tailscale status is not safe to recover")
+                return
             self_status = status.get("Self")
             if not isinstance(self_status, Mapping):
-                await self._disconnect_authenticated_runtime()
-                raise TailscaleOperationError(
-                    "Tailscale status is missing node identity"
-                )
+                return
             flow = _LoginFlow(
                 device_name=DEFAULT_DEVICE_NAME,
                 expires_at=time.monotonic(),
@@ -752,6 +856,8 @@ class TailscaleService:
                     ),
                     None,
                 )
+                if existing is not None:
+                    self._require_matching_runtime_identity(existing, status)
                 stored_name = (
                     existing.public_metadata.get("device_name") if existing else None
                 )
@@ -763,12 +869,16 @@ class TailscaleService:
                         or dns_name.split(".", 1)[0]
                     )
                 )
-                await self._finalize_running(flow)
+                if existing is not None:
+                    hostname = validate_tailscale_hostname(self_status.get("DNSName"))
+                    await self._observe_existing_funnel(
+                        existing, status, flow.device_name, hostname
+                    )
+                else:
+                    await self._finalize_running(flow)
             except (TailscaleServiceError, TailscaleProtocolError):
-                await self._disconnect_authenticated_runtime()
                 raise
             except Exception as exc:
-                await self._disconnect_authenticated_runtime()
                 raise TailscaleOperationError(
                     "Unable to reconcile authenticated Tailscale runtime"
                 ) from exc
@@ -779,9 +889,17 @@ class TailscaleService:
             connection = self.store.get_connection(connection_id)
             if connection is None or connection.provider != "tailscale":
                 raise TailscaleNotFoundError("Tailscale connection was not found")
+            external_id, hostname = self._stored_identity(connection)
             try:
-                self.connector.disconnect()
-                await self._wait_command("disconnect")
+                operation_id = self.connector.disconnect(
+                    external_id=external_id, hostname=hostname
+                )
+                await self._wait_command(
+                    "disconnect",
+                    operation_id,
+                    external_id=external_id,
+                    hostname=hostname,
+                )
             except OSError as exc:
                 raise TailscaleOperationError(
                     "Unable to request fail-closed Tailscale disconnect"

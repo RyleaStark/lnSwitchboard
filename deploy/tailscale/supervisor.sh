@@ -19,6 +19,7 @@ case "$DEP_ENV" in
     *) printf '%s\n' "unsupported DEP_ENV" >&2; exit 1 ;;
 esac
 FUNNEL_TARGET="http://${PUBLIC_HOST}:21212"
+ACTIVE_STATE="$STATE_DIR/.lnswitchboard-active.json"
 
 case "$LOGIN_RETENTION_SECONDS" in
     "" | *[!0-9]*)
@@ -103,16 +104,71 @@ publish_ack() {
     command_name=$1
     command_state=$2
     error_code=${3:-}
+    operation_id=${4:-}
+    external_id=${5:-}
+    hostname=${6:-}
     temporary="$STATUS_DIR/command.json.tmp.$$"
     if [ -n "$error_code" ]; then
-        printf '{"command":"%s","state":"%s","error":"%s"}\n' \
-            "$command_name" "$command_state" "$error_code" >"$temporary"
+        printf '{"command":"%s","state":"%s","error":"%s","operation_id":"%s","external_id":"%s","hostname":"%s"}\n' \
+            "$command_name" "$command_state" "$error_code" "$operation_id" "$external_id" "$hostname" >"$temporary"
     else
-        printf '{"command":"%s","state":"%s"}\n' \
-            "$command_name" "$command_state" >"$temporary"
+        printf '{"command":"%s","state":"%s","operation_id":"%s","external_id":"%s","hostname":"%s"}\n' \
+            "$command_name" "$command_state" "$operation_id" "$external_id" "$hostname" >"$temporary"
     fi
     chmod 0600 "$temporary"
     mv -f "$temporary" "$STATUS_DIR/command.json"
+}
+
+json_string_field() {
+    field=$1
+    path=$2
+    sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$path" | head -n 1
+}
+
+valid_operation_id() {
+    candidate=$1
+    [ "${#candidate}" -eq 32 ] || return 1
+    case "$candidate" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+read_command_identity() {
+    command_path=$1
+    OPERATION_ID=$(json_string_field operation_id "$command_path")
+    REQUESTED_EXTERNAL_ID=$(json_string_field external_id "$command_path")
+    REQUESTED_HOSTNAME=$(json_string_field hostname "$command_path")
+    valid_operation_id "$OPERATION_ID"
+}
+
+runtime_identity_matches() {
+    live_status="$STATUS_DIR/identity.json.tmp.$$"
+    if ! "$TAILSCALE_BIN" --socket="$SOCKET" status --json --peers=false \
+        >"$live_status" 2>/dev/null; then
+        rm -f "$live_status"
+        return 1
+    fi
+    backend_state=$(json_string_field BackendState "$live_status")
+    current_external_id=$(json_string_field ID "$live_status")
+    current_hostname=$(json_string_field DNSName "$live_status" | sed 's/\.$//')
+    rm -f "$live_status"
+    if [ -n "$REQUESTED_EXTERNAL_ID" ] && [ -n "$REQUESTED_HOSTNAME" ] \
+        && [ "$current_external_id" = "$REQUESTED_EXTERNAL_ID" ] \
+        && [ "$current_hostname" = "$REQUESTED_HOSTNAME" ]; then
+        return 0
+    fi
+    case "$backend_state" in NeedsLogin|Stopped) ;; *) return 1 ;; esac
+    active_external_id=$(json_string_field external_id "$ACTIVE_STATE" 2>/dev/null || true)
+    active_hostname=$(json_string_field hostname "$ACTIVE_STATE" 2>/dev/null || true)
+    [ -n "$REQUESTED_EXTERNAL_ID" ] && [ -n "$REQUESTED_HOSTNAME" ] \
+        && [ "$active_external_id" = "$REQUESTED_EXTERNAL_ID" ] \
+        && [ "$active_hostname" = "$REQUESTED_HOSTNAME" ]
+}
+
+persist_active_identity() {
+    temporary="$ACTIVE_STATE.tmp.$$"
+    printf '{"external_id":"%s","hostname":"%s"}\n' \
+        "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME" >"$temporary"
+    chmod 0600 "$temporary"
+    mv -f "$temporary" "$ACTIVE_STATE"
 }
 
 valid_device_name() {
@@ -126,17 +182,12 @@ valid_device_name() {
 }
 
 begin_login() {
-    rm -f "$CONTROL_DIR/begin-login"
-    if [ ! -f "$CONTROL_DIR/login.device-name" ]; then
-        publish_ack "begin_login" "error" "invalid_device_name"
-        return
-    fi
-
-    requested_name=$(cat "$CONTROL_DIR/login.device-name" 2>/dev/null || true)
-    rm -f "$CONTROL_DIR/login.device-name"
-    device_name=$(printf '%s' "$requested_name" | tr '[:upper:]' '[:lower:]')
-    if ! valid_device_name "$device_name"; then
-        publish_ack "begin_login" "error" "invalid_device_name"
+    command_path="$CONTROL_DIR/begin-login"
+    operation_id=$(json_string_field operation_id "$command_path")
+    device_name=$(json_string_field device_name "$command_path")
+    rm -f "$command_path"
+    if ! valid_operation_id "$operation_id" || ! valid_device_name "$device_name"; then
+        publish_ack "begin_login" "error" "invalid_command" "$operation_id"
         return
     fi
 
@@ -148,25 +199,31 @@ begin_login() {
         >"$STATUS_DIR/login.json" 2>/dev/null &
     LOGIN_PID=$!
     chmod 0600 "$STATUS_DIR/login.json"
-    publish_ack "begin_login" "started"
+    publish_ack "begin_login" "started" "" "$operation_id"
 }
 
 cancel_login() {
-    rm -f "$CONTROL_DIR/cancel-login"
+    command_path="$CONTROL_DIR/cancel-login"
+    operation_id=$(json_string_field operation_id "$command_path")
+    rm -f "$command_path"
+    if ! valid_operation_id "$operation_id"; then return; fi
     stop_login
     rm -f "$STATUS_DIR/login.json"
-    publish_ack "cancel_login" "complete"
+    publish_ack "cancel_login" "complete" "" "$operation_id"
 }
 
 clear_login() {
-    rm -f "$CONTROL_DIR/clear-login"
+    command_path="$CONTROL_DIR/clear-login"
+    operation_id=$(json_string_field operation_id "$command_path")
+    rm -f "$command_path"
+    if ! valid_operation_id "$operation_id"; then return; fi
     if [ -n "$LOGIN_PID" ]; then
-        publish_ack "clear_login" "error" "login_active"
+        publish_ack "clear_login" "error" "login_active" "$operation_id"
         return
     fi
     rm -f "$STATUS_DIR/login.json"
     LOGIN_COMPLETED_AT=""
-    publish_ack "clear_login" "complete"
+    publish_ack "clear_login" "complete" "" "$operation_id"
 }
 
 expire_login_artifact() {
@@ -181,27 +238,56 @@ expire_login_artifact() {
 }
 
 enable_funnel() {
-    rm -f "$CONTROL_DIR/enable"
+    command_path="$CONTROL_DIR/enable"
+    if ! read_command_identity "$command_path"; then
+        rm -f "$command_path"
+        return
+    fi
+    rm -f "$command_path"
+    if ! runtime_identity_matches; then
+        publish_ack "enable" "error" "identity_mismatch" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
+        return
+    fi
     if "$TAILSCALE_BIN" --socket="$SOCKET" funnel --bg --yes "$FUNNEL_TARGET" \
         >/dev/null 2>/dev/null; then
-        publish_ack "enable" "complete"
+        persist_active_identity
+        publish_ack "enable" "complete" "" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
     else
-        publish_ack "enable" "error" "funnel_enable_failed"
+        publish_ack "enable" "error" "funnel_enable_failed" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
     fi
 }
 
 disable_funnel() {
-    rm -f "$CONTROL_DIR/disable"
+    command_path="$CONTROL_DIR/disable"
+    if ! read_command_identity "$command_path"; then
+        rm -f "$command_path"
+        return
+    fi
+    rm -f "$command_path"
+    if ! runtime_identity_matches; then
+        publish_ack "disable" "error" "identity_mismatch" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
+        return
+    fi
     if "$TAILSCALE_BIN" --socket="$SOCKET" funnel reset \
         >/dev/null 2>/dev/null; then
-        publish_ack "disable" "complete"
+        persist_active_identity
+        publish_ack "disable" "complete" "" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
     else
-        publish_ack "disable" "error" "funnel_disable_failed"
+        publish_ack "disable" "error" "funnel_disable_failed" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
     fi
 }
 
 disconnect_node() {
-    rm -f "$CONTROL_DIR/disconnect"
+    command_path="$CONTROL_DIR/disconnect"
+    if ! read_command_identity "$command_path"; then
+        rm -f "$command_path"
+        return
+    fi
+    rm -f "$command_path"
+    if ! runtime_identity_matches; then
+        publish_ack "disconnect" "error" "identity_mismatch" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
+        return
+    fi
     stop_login
     rm -f "$STATUS_DIR/login.json"
 
@@ -211,23 +297,16 @@ disconnect_node() {
     fi
 
     case "$node_state" in
-        NeedsLogin|Stopped|"")
-            # An unauthenticated node is not funneling anything, and Funnel
-            # reset/logout are guaranteed to fail here (for example after the
-            # device key expired). Teardown must proceed so the operator can
-            # re-authenticate instead of being trapped in a dead connection.
-            ;;
+        NeedsLogin|Stopped|"") ;;
         *)
-            # A live node may still be serving Funnel traffic: stay
-            # fail-closed so a reported disconnect never leaves exposure.
             if ! "$TAILSCALE_BIN" --socket="$SOCKET" funnel reset \
                 >/dev/null 2>/dev/null; then
-                publish_ack "disconnect" "error" "funnel_disable_failed"
+                publish_ack "disconnect" "error" "funnel_disable_failed" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
                 return
             fi
             if ! "$TAILSCALE_BIN" --socket="$SOCKET" logout \
                 >/dev/null 2>/dev/null; then
-                publish_ack "disconnect" "error" "logout_failed"
+                publish_ack "disconnect" "error" "logout_failed" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
                 return
             fi
             ;;
@@ -241,7 +320,7 @@ disconnect_node() {
     find "$STATE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf '{}' ';'
     rm -f "$SOCKET"
     start_daemon
-    publish_ack "disconnect" "complete"
+    publish_ack "disconnect" "complete" "" "$OPERATION_ID" "$REQUESTED_EXTERNAL_ID" "$REQUESTED_HOSTNAME"
 }
 
 start_daemon

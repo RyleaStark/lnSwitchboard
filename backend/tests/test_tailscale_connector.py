@@ -53,14 +53,15 @@ def test_connector_rejects_unbounded_or_non_object_status(tmp_path: Path) -> Non
 def test_connector_emits_only_fixed_atomic_marker_operations(tmp_path: Path) -> None:
     connector = _connector(tmp_path)
 
-    connector.begin_login("lns")
-    assert (tmp_path / "control" / "login.device-name").read_text(
-        encoding="utf-8"
-    ) == "lns\n"
-    assert (tmp_path / "control" / "begin-login").read_bytes() == b""
+    login_operation = connector.begin_login("lns")
+    assert json.loads(
+        (tmp_path / "control" / "begin-login").read_text(encoding="utf-8")
+    ) == {"device_name": "lns", "operation_id": login_operation}
     assert stat.S_IMODE((tmp_path / "control" / "begin-login").stat().st_mode) == 0o600
 
-    connector.enable_funnel()
+    connector.enable_funnel(
+        external_id="node-123", hostname="lns.example.ts.net"
+    )
     connector.clear_login()
     assert (tmp_path / "control" / "enable").exists()
     assert (tmp_path / "control" / "clear-login").exists()

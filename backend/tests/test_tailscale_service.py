@@ -173,52 +173,67 @@ class FakeTailscaleConnector:
         self.begin_error = False
         self.login_artifact = True
 
-    def begin_login(self, device_name: str) -> None:
+    def _operation(self, command: str, state: str = "complete", error: str | None = None) -> str:
+        operation_id = f"{len(self.calls):032x}"
+        self.command_status = {
+            "command": command,
+            "state": state,
+            "operation_id": operation_id,
+        }
+        if error is not None:
+            self.command_status["error"] = error
+        return operation_id
+
+    def begin_login(self, device_name: str) -> str:
         if self.begin_error:
             raise OSError("synthetic begin failure")
         self.calls.append(("begin_login", device_name))
-        self.command_status = {"command": "begin_login", "state": "started"}
+        return self._operation("begin_login", "started")
 
-    def cancel_login(self) -> None:
+    def cancel_login(self) -> str:
         self.calls.append(("cancel_login", None))
-        self.command_status = (
-            {"command": "cancel_login", "state": "error", "error": "cancel_failed"}
-            if self.cancel_error
-            else {"command": "cancel_login", "state": "complete"}
+        operation_id = self._operation(
+            "cancel_login",
+            "error" if self.cancel_error else "complete",
+            "cancel_failed" if self.cancel_error else None,
         )
         if not self.cancel_error:
             self.login_artifact = False
+        return operation_id
 
-    def clear_login(self) -> None:
+    def clear_login(self) -> str:
         self.calls.append(("clear_login", None))
-        self.command_status = {"command": "clear_login", "state": "complete"}
+        operation_id = self._operation("clear_login")
         self.login_artifact = False
+        return operation_id
 
-    def enable_funnel(self) -> None:
+    def enable_funnel(self, *, external_id: str, hostname: str) -> str:
         self.calls.append(("enable", None))
-        self.command_status = {"command": "enable", "state": "complete"}
+        operation_id = self._operation("enable")
+        self.command_status.update({"external_id": external_id, "hostname": hostname})
+        return operation_id
 
-    def disable_funnel(self) -> None:
+    def disable_funnel(self, *, external_id: str, hostname: str) -> str:
         self.calls.append(("disable", None))
-        self.command_status = (
-            {"command": "disable", "state": "error", "error": "funnel_disable_failed"}
-            if self.disable_error
-            else {"command": "disable", "state": "complete"}
+        operation_id = self._operation(
+            "disable",
+            "error" if self.disable_error else "complete",
+            "funnel_disable_failed" if self.disable_error else None,
         )
+        self.command_status.update({"external_id": external_id, "hostname": hostname})
+        return operation_id
 
-    def disconnect(self) -> None:
+    def disconnect(self, *, external_id: str, hostname: str) -> str:
         self.calls.append(("disconnect", None))
-        self.command_status = (
-            {
-                "command": "disconnect",
-                "state": "error",
-                "error": "funnel_disable_failed",
-            }
-            if self.disconnect_error
-            else {"command": "disconnect", "state": "complete"}
+        operation_id = self._operation(
+            "disconnect",
+            "error" if self.disconnect_error else "complete",
+            "funnel_disable_failed" if self.disconnect_error else None,
         )
+        self.command_status.update({"external_id": external_id, "hostname": hostname})
         if not self.disconnect_error:
             self.login_artifact = False
+        return operation_id
 
     def read_login_records(self):
         return self.records
@@ -664,18 +679,30 @@ def test_missing_recovery_status_never_queues_destructive_disconnect(
     assert connector.login_artifact is True
 
 
-def test_disconnect_keeps_registry_when_runtime_cannot_disable_funnel(
-    tmp_path: Path,
-) -> None:
-    connector = FakeTailscaleConnector()
-    service = _service(tmp_path, connector)
+def _persist_connection(service: TailscaleService):
     connection = service.store.upsert_connection(
         provider="tailscale",
         external_id="node-123",
         label="Tailscale Funnel",
         status="connected",
-        public_metadata={"origin": "http://127.0.0.1:21212"},
+        public_metadata={
+            "device_name": "lns",
+            "origin": "http://127.0.0.1:21212",
+        },
     )
+    service.store.replace_domains(
+        connection.id,
+        [{"hostname": "lns.example.ts.net", "status": "active"}],
+    )
+    return service.store.get_connection(connection.id)
+
+
+def test_disconnect_keeps_registry_when_runtime_cannot_disable_funnel(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    service = _service(tmp_path, connector)
+    connection = _persist_connection(service)
     connector.disconnect_error = True
 
     with pytest.raises(TailscaleOperationError, match="disable Funnel"):
@@ -692,13 +719,7 @@ def test_registry_cleanup_failure_is_translated_after_runtime_disconnect(
 ) -> None:
     connector = FakeTailscaleConnector()
     service = _service(tmp_path, connector)
-    connection = service.store.upsert_connection(
-        provider="tailscale",
-        external_id="node-123",
-        label="Tailscale Funnel",
-        status="connected",
-        public_metadata={"origin": "http://127.0.0.1:21212"},
-    )
+    connection = _persist_connection(service)
 
     def fail_delete(_connection_id: str) -> bool:
         raise OSError("synthetic registry failure")
@@ -706,7 +727,11 @@ def test_registry_cleanup_failure_is_translated_after_runtime_disconnect(
     monkeypatch.setattr(service.store, "delete_connection", fail_delete)
 
     with pytest.raises(TailscaleOperationError, match="registry cleanup failed"):
-        asyncio.run(service._disconnect_authenticated_runtime())
+        asyncio.run(
+            service._disconnect_authenticated_runtime(
+                external_id="node-123", hostname="lns.example.ts.net"
+            )
+        )
     assert ("disconnect", None) in connector.calls
     assert service.store.get_connection(connection.id) is not None
 
@@ -716,13 +741,7 @@ def test_explicit_disconnect_translates_registry_cleanup_failure(
 ) -> None:
     connector = FakeTailscaleConnector()
     service = _service(tmp_path, connector)
-    connection = service.store.upsert_connection(
-        provider="tailscale",
-        external_id="node-123",
-        label="Tailscale Funnel",
-        status="connected",
-        public_metadata={"origin": "http://127.0.0.1:21212"},
-    )
+    connection = _persist_connection(service)
 
     def fail_delete(_connection_id: str) -> bool:
         raise OSError("synthetic registry failure")
@@ -754,23 +773,83 @@ def test_recovery_finalizes_running_node_and_cancels_incomplete_login(
     assert ("cancel_login", None) in other.calls
 
 
-def test_refresh_records_missing_prerequisites_without_enabling(tmp_path: Path) -> None:
+def test_refresh_missing_prerequisites_preserves_existing_connection(
+    tmp_path: Path,
+) -> None:
     connector = FakeTailscaleConnector()
     service = _service(tmp_path, connector)
-    connection = service.store.upsert_connection(
-        provider="tailscale",
-        external_id="node-123",
-        label="Tailscale Funnel",
-        status="connected",
-        public_metadata={"device_name": "lns", "origin": "http://127.0.0.1:21212"},
-    )
+    connection = _persist_connection(service)
     connector.login_artifact = False
     connector.node_status["Self"]["CapMap"] = {}
     connector.node_status["CertDomains"] = []
 
-    refreshed = asyncio.run(service.refresh(connection.id))
+    with pytest.raises(TailscaleOperationError, match="missing required"):
+        asyncio.run(service.refresh(connection.id))
 
-    assert refreshed.status == "error"
-    assert "https_certificates" in (refreshed.last_error or "")
     assert ("enable", None) not in connector.calls
-    assert ("disable", None) in connector.calls
+    assert ("disable", None) not in connector.calls
+    preserved = service.store.get_connection(connection.id)
+    assert preserved is not None
+    assert preserved.status == "connected"
+    assert preserved.last_error is None
+    assert preserved.domains[0].status == "active"
+
+
+def test_refresh_status_failure_preserves_runtime_identity_and_registry(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    service = _service(tmp_path, connector)
+    connection = _persist_connection(service)
+    connector.funnel_status_error = True
+
+    with pytest.raises(TailscaleOperationError, match="read Tailscale Funnel status"):
+        asyncio.run(service.refresh(connection.id))
+
+    assert ("disconnect", None) not in connector.calls
+    preserved = service.store.get_connection(connection.id)
+    assert preserved is not None
+    assert preserved.external_id == "node-123"
+    assert preserved.domains[0].hostname == "lns.example.ts.net"
+
+
+def test_refresh_rejects_runtime_identity_mismatch_without_overwriting_registry(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    service = _service(tmp_path, connector)
+    connection = _persist_connection(service)
+    connector.node_status["Self"]["ID"] = "different-node"
+    connector.node_status["Self"]["DNSName"] = "other.example.ts.net."
+
+    with pytest.raises(TailscaleOperationError, match="does not match"):
+        asyncio.run(service.refresh(connection.id))
+
+    assert ("enable", None) not in connector.calls
+    assert ("disconnect", None) not in connector.calls
+    preserved = service.store.get_connection(connection.id)
+    assert preserved is not None
+    assert preserved.external_id == "node-123"
+    assert preserved.domains[0].hostname == "lns.example.ts.net"
+
+
+def test_stale_disconnect_ack_does_not_delete_registry(tmp_path: Path) -> None:
+    connector = FakeTailscaleConnector()
+    service = _service(tmp_path, connector)
+    connection = _persist_connection(service)
+    original_disconnect = connector.disconnect
+
+    def stale_disconnect(*, external_id: str, hostname: str) -> str:
+        operation_id = original_disconnect(
+            external_id=external_id, hostname=hostname
+        )
+        assert connector.command_status is not None
+        connector.command_status["operation_id"] = "f" * 32
+        return operation_id
+
+    connector.disconnect = stale_disconnect
+
+    with pytest.raises(TailscaleOperationError, match="disable Funnel"):
+        asyncio.run(service.disconnect(connection.id))
+
+    assert service.store.get_connection(connection.id) is not None
