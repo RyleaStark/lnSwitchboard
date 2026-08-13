@@ -43,12 +43,9 @@ export function InvoicesPage() {
       <PageHeader
         title="Invoices"
       />
-      <Card>
-        <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <CardTitle>Lightning invoices</CardTitle>
-            <CardDescription>{invoices.isError ? "Couldn’t load invoices" : paginationLabel(invoices.data, query, "invoice")}</CardDescription>
-          </div>
+      <section className="flex flex-col gap-4" aria-label="Lightning invoices">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <p className="text-sm text-muted-foreground">{invoices.isError ? "Couldn’t load invoices" : paginationLabel(invoices.data, query, "invoice")}</p>
           <div className="flex flex-col gap-2 sm:flex-row">
             <div className="relative">
               <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -64,8 +61,8 @@ export function InvoicesPage() {
             </div>
             {!invoices.isError ? <Pager page={page} totalPages={invoices.data?.total_pages ?? 0} setPage={setPage} /> : null}
           </div>
-        </CardHeader>
-        <CardContent>
+        </div>
+        <div>
           {invoices.isLoading ? <LoadingRows /> : null}
           {invoices.isError ? <PageError message="Unable to load invoices." onRetry={() => void invoices.refetch()} retrying={invoices.isFetching} /> : null}
           {!invoices.isLoading && !invoices.isError && items.length === 0 ? (
@@ -130,8 +127,8 @@ export function InvoicesPage() {
               </div>
             </>
           ) : null}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
       <InvoiceDetails
         channels={channels.data?.channels ?? []}
         invoice={selected}

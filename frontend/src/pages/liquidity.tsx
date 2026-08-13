@@ -56,12 +56,7 @@ export function LiquidityPage() {
               <CardContent className="text-3xl font-semibold">{formatSats(channels.data.total_receiving_capacity_sat)}</CardContent>
             </Card>
           </div>
-          <Card>
-            <CardHeader>
-              <CardTitle>Inbound capacity by peer</CardTitle>
-              <CardDescription>Sorted by receivable capacity descending.</CardDescription>
-            </CardHeader>
-            <CardContent>
+          <section aria-label="Inbound capacity by peer">
               {rows.length === 0 ? (
                 <EmptyPanel title="No channels found" description="Open a channel to advertise LNURL receiving capacity." />
               ) : (
@@ -113,8 +108,7 @@ export function LiquidityPage() {
                   </div>
                 </>
               )}
-            </CardContent>
-          </Card>
+          </section>
         </div>
       ) : null}
     </>

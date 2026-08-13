@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ForwardIcon, PencilIcon, PlusIcon, SearchIcon, Trash2Icon } from "lucide-react"
+import { PencilIcon, PlusIcon, SearchIcon, Trash2Icon } from "lucide-react"
 import { toast } from "sonner"
 
 import { EmptyPanel, LoadingRows, PageError, PageHeader } from "@/components/common"
@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
@@ -104,6 +104,7 @@ export function AddressesPage() {
   const [search, setSearch] = useState("")
   const [editing, setEditing] = useState<LNAddress | null>(null)
   const [deleting, setDeleting] = useState<LNAddress | null>(null)
+  const [addChoiceOpen, setAddChoiceOpen] = useState(false)
   const [formOpen, setFormOpen] = useState(false)
   const [forwardFormOpen, setForwardFormOpen] = useState(false)
   const [form, setForm] = useState<AddressFormState>(emptyForm)
@@ -172,7 +173,12 @@ export function AddressesPage() {
     ].join(" ").toLowerCase().includes(query))
   }, [addresses.data?.items, search])
 
+  function openAddChoice() {
+    setAddChoiceOpen(true)
+  }
+
   function openCreate() {
+    setAddChoiceOpen(false)
     setEditing(null)
     setForm(emptyForm)
     setFormError("")
@@ -180,6 +186,7 @@ export function AddressesPage() {
   }
 
   function openForwardCreate() {
+    setAddChoiceOpen(false)
     setEditing(null)
     setForwardForm(emptyForwardingForm)
     forwardToRef.current = ""
@@ -275,71 +282,78 @@ export function AddressesPage() {
       <PageHeader
         title="LN Addresses"
         action={(
-          <div className="flex flex-wrap justify-end gap-2">
-            <Button variant="outline" onClick={openForwardCreate}><ForwardIcon data-icon="inline-start" /> Add forwarding address</Button>
-            <Button onClick={openCreate}><PlusIcon data-icon="inline-start" /> Add address</Button>
-          </div>
+          <>
+            <div className="relative">
+              <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input aria-label="Search addresses" value={search} onChange={(event) => setSearch(event.target.value)} className="pl-8 sm:w-72" placeholder="Search addresses" />
+            </div>
+            <Button onClick={openAddChoice}><PlusIcon data-icon="inline-start" /> Add address</Button>
+          </>
         )}
       />
-      <Card>
-        <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <CardTitle>Lightning Addresses</CardTitle>
-            <CardDescription>{rows.length} address override{rows.length === 1 ? "" : "s"}</CardDescription>
-          </div>
-          <div className="relative">
-            <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-8 sm:w-72" placeholder="Search addresses" />
-          </div>
-        </CardHeader>
-        <CardContent>
-          {addresses.isLoading ? <LoadingRows /> : null}
-          {addresses.isError ? <PageError message="Unable to load LN addresses." onRetry={() => void addresses.refetch()} retrying={addresses.isFetching} /> : null}
-          {!addresses.isLoading && !addresses.isError && rows.length === 0 ? (
-            <EmptyPanel title={search ? "No matching addresses" : "No LN addresses yet"} description="Add a handle override to customize LNURL behavior for a local-part and domain." />
-          ) : null}
-          {rows.length ? (
-            <>
-              <div className="hidden overflow-hidden rounded-md border xl:block">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Handle</TableHead>
-                      <TableHead>Limits</TableHead>
-                      <TableHead>Templates</TableHead>
-                      <TableHead className="text-right">Actions</TableHead>
+      <div>
+        {addresses.isLoading ? <LoadingRows /> : null}
+        {addresses.isError ? <PageError message="Unable to load LN addresses." onRetry={() => void addresses.refetch()} retrying={addresses.isFetching} /> : null}
+        {!addresses.isLoading && !addresses.isError && rows.length === 0 ? (
+          <EmptyPanel title={search ? "No matching addresses" : "No LN addresses yet"} description="Add a handle override to customize LNURL behavior for a local-part and domain." />
+        ) : null}
+        {rows.length ? (
+          <>
+            <div className="hidden overflow-hidden rounded-md border xl:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Handle</TableHead>
+                    <TableHead>Limits</TableHead>
+                    <TableHead>Templates</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((item) => (
+                    <TableRow key={item.id}>
+                      <TableCell><AddressHandle item={item} hasIdentity={identitySet.has(`${item.local_part}@${item.domain}`)} /></TableCell>
+                      <TableCell><Limits item={item} /></TableCell>
+                      <TableCell><Templates item={item} /></TableCell>
+                      <TableCell className="text-right"><RowActions onEdit={() => openEdit(item)} onDelete={() => setDeleting(item)} /></TableCell>
                     </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {rows.map((item) => (
-                      <TableRow key={item.id}>
-                        <TableCell><AddressHandle item={item} hasIdentity={identitySet.has(`${item.local_part}@${item.domain}`)} /></TableCell>
-                        <TableCell><Limits item={item} /></TableCell>
-                        <TableCell><Templates item={item} /></TableCell>
-                        <TableCell className="text-right"><RowActions onEdit={() => openEdit(item)} onDelete={() => setDeleting(item)} /></TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-              <div className="grid gap-3 xl:hidden">
-                {rows.map((item) => (
-                  <Card key={item.id}>
-                    <CardHeader>
-                      <CardTitle className="text-base"><AddressHandle item={item} hasIdentity={identitySet.has(`${item.local_part}@${item.domain}`)} /></CardTitle>
-                    </CardHeader>
-                    <CardContent className="flex flex-col gap-3">
-                      <Limits item={item} />
-                      <Templates item={item} />
-                      <RowActions onEdit={() => openEdit(item)} onDelete={() => setDeleting(item)} />
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-            </>
-          ) : null}
-        </CardContent>
-      </Card>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <div className="grid gap-3 xl:hidden">
+              {rows.map((item) => (
+                <Card key={item.id}>
+                  <CardHeader>
+                    <CardTitle className="text-base"><AddressHandle item={item} hasIdentity={identitySet.has(`${item.local_part}@${item.domain}`)} /></CardTitle>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3">
+                    <Limits item={item} />
+                    <Templates item={item} />
+                    <RowActions onEdit={() => openEdit(item)} onDelete={() => setDeleting(item)} />
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </>
+        ) : null}
+      </div>
+      <Dialog open={addChoiceOpen} onOpenChange={setAddChoiceOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Add an address</DialogTitle>
+            <DialogDescription>Choose how this Lightning Address should route payments.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <Button type="button" variant="outline" className="h-auto justify-start whitespace-normal px-4 py-3 text-left" onClick={openCreate}>
+              Add an address connected to this node
+            </Button>
+            <Button type="button" variant="outline" className="h-auto justify-start whitespace-normal px-4 py-3 text-left" onClick={openForwardCreate}>
+              Add an address that forwards to another lightning address
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
         <DialogContent className="max-h-[calc(100vh-2rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-4xl">
           <DialogHeader>

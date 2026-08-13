@@ -9,7 +9,6 @@ import { Grid } from "@/components/dither-kit/grid"
 import { Tooltip } from "@/components/dither-kit/tooltip"
 import { XAxis } from "@/components/dither-kit/x-axis"
 import { YAxis } from "@/components/dither-kit/y-axis"
-import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { api, type SummaryStats } from "@/lib/api"
 import { formatNumber, formatSats } from "@/lib/format"
@@ -44,12 +43,11 @@ export function DashboardPage() {
             <MetricCard icon={<BadgeDollarSignIcon />} label="Sats routed" value={formatSats(summary.data.total_sats_routed)} note={`${formatSats(summary.data.sats_routed_7d)} in 7d`} />
           </div>
           <Card>
-            <CardHeader className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <CardHeader>
               <div>
                 <CardTitle>Invoice activity</CardTitle>
                 <CardDescription>Invoice states by creation day with sats received by settlement day over the last 14 days.</CardDescription>
               </div>
-              <Badge variant="secondary">{formatNumber(summary.data.invoices_total)} minted total</Badge>
             </CardHeader>
             <CardContent>
               {summary.data.invoice_activity.some((item) => item.sats > 0 || item.paid > 0 || item.created > 0) ? (

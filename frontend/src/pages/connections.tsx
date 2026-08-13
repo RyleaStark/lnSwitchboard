@@ -679,7 +679,7 @@ function TailscaleConnectionsPage() {
           <div className="shrink-0">
             {!available ? (
               <Badge variant="secondary">
-                Connector not installed
+                Tailscale unavailable
               </Badge>
             ) : connection ? (
               <ConnectionStatusBadge status={connection.status} />
@@ -734,7 +734,7 @@ function TailscaleConnectionsPage() {
                   onChange={(event) => setDeviceName(event.target.value)}
                 />
                 <FieldDescription>
-                  Suggested: lns. Use one DNS label with letters, numbers, or internal hyphens. Your public .ts.net hostname is discovered from Tailscale.
+                  Suggested: lns. Use letters, numbers, or hyphens. Tailscale will add this name to your public .ts.net address.
                 </FieldDescription>
                 {!validName ? (
                   <p id="tailscale-device-name-error" role="alert" className="text-sm text-destructive">
@@ -748,7 +748,7 @@ function TailscaleConnectionsPage() {
               </Button>
               {!available ? (
                 <p className="text-sm text-muted-foreground">
-                  Add the Tailscale sidecar to this deployment stack to enable onboarding.
+                  Ask the person who manages this lnSwitchboard to install the Tailscale connection service.
                 </p>
               ) : null}
             </FieldGroup>
@@ -782,7 +782,7 @@ function TailscaleLoginPrompt({
         <div>
           <h3 className="font-medium">Finish login in Tailscale</h3>
           <p className="mt-1 max-w-xl text-sm leading-normal text-pretty text-muted-foreground">
-            Open the one-time login page or scan the QR code, sign in, and approve this dedicated node. This page checks automatically.
+            Open the one-time login page or scan the QR code, sign in, and approve this lnSwitchboard device. This page checks automatically.
           </p>
         </div>
         <a
@@ -815,9 +815,9 @@ function TailscaleLoginPrompt({
 }
 
 const prerequisiteLabels: Record<string, string> = {
-  magic_dns: "Enable MagicDNS for the tailnet.",
-  https_certificates: "Enable HTTPS certificates for the reported node hostname.",
-  funnel_node_attribute: "Grant this node (or an operator-chosen tag) the Funnel node attribute.",
+  magic_dns: "Enable MagicDNS in Tailscale.",
+  https_certificates: "Enable HTTPS certificates for this device's Tailscale address.",
+  funnel_node_attribute: "Allow this device to use Tailscale Funnel.",
   funnel_port_443: "Allow Funnel on HTTPS port 443.",
 }
 
@@ -839,9 +839,9 @@ function TailscalePrerequisites({
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="font-medium">Tailnet setup required</h3>
+        <h3 className="font-medium">Finish setting up Tailscale</h3>
         <p className="mt-1 text-sm text-muted-foreground">
-          The node is signed in as <span className="font-medium text-foreground">{hostname}</span>. lnSwitchboard will not change tailnet policy automatically.
+          This lnSwitchboard is signed in as <span className="font-medium text-foreground">{hostname}</span>. lnSwitchboard will not change these Tailscale settings for you.
         </p>
       </div>
       <ul className="space-y-2 text-sm text-muted-foreground">
@@ -882,7 +882,7 @@ function ConnectedTailscale({
     <div className="flex flex-col gap-5">
       {managementDisabled ? (
         <p role="alert" className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
-          Restore the Tailscale connector to refresh or disconnect this connection.
+          Ask the person who manages this lnSwitchboard to restore the Tailscale connection service. Until then, you cannot check or disconnect this connection here.
         </p>
       ) : null}
       {keyExpiryEnabled ? (
@@ -927,7 +927,7 @@ function ConnectedTailscale({
             <AlertDialogHeader>
               <AlertDialogTitle>Disconnect Tailscale Funnel?</AlertDialogTitle>
               <AlertDialogDescription>
-                lnSwitchboard will disable public Funnel ingress before logging out and removing its dedicated node state.
+                Your public Tailscale web address will stop working, and this lnSwitchboard will sign out of Tailscale.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
@@ -1544,54 +1544,46 @@ function ZrokConnectionsPage() {
         <ZrokIcon className="size-11 shrink-0" />
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">zrok</h1>
-          <p className="text-sm text-muted-foreground">Publish the secretless Lightning endpoint through zrok Cloud or your own zrok instance.</p>
+          <p className="text-sm text-muted-foreground">Make your Lightning Addresses available online with zrok Cloud or your own zrok service.</p>
         </div>
       </div>
-      <Card>
-        <CardHeader>
-          <CardTitle>{connection ? "Public share" : "Connect zrok"}</CardTitle>
-          <CardDescription>
-            zrok receives traffic only from the public listener on port 21212. It cannot reach lnSwitchboard administration or LND.
-          </CardDescription>
-        </CardHeader>
-        <div className="space-y-5 px-6 pb-6">
-          {!available ? (
-            <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">The zrok connector is not installed in this deployment.</p>
-          ) : connection ? (
-            <>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {connection.domains.map((domain) => (
-                  <div key={domain.hostname} className="rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
-                    <div className="flex items-center justify-between gap-3"><span className="truncate font-medium">{domain.hostname}</span><Badge variant="outline">{domain.status}</Badge></div>
-                    <p className="mt-2 text-xs text-muted-foreground">Mode: {String(connection.public_metadata.mode ?? "cloud").replace("_", " ")}</p>
-                  </div>
-                ))}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" disabled={refresh.isPending || disconnect.isPending} onClick={() => refresh.mutate()}><RefreshCwIcon className={refresh.isPending ? "animate-spin" : undefined} />Refresh status</Button>
-                <Button variant="destructive" disabled={refresh.isPending || disconnect.isPending} onClick={() => disconnect.mutate()}><Trash2Icon />Disconnect</Button>
-              </div>
-            </>
-          ) : (
-            <FieldGroup className="max-w-2xl">
-              <Field>
-                <FieldLabel htmlFor="zrok-mode">Service</FieldLabel>
-                <select id="zrok-mode" value={mode} onChange={(event) => setMode(event.target.value as ZrokProvisionPayload["mode"])} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm">
-                  <option value="cloud">zrok Cloud</option>
-                  <option value="self_hosted">Self-hosted zrok</option>
-                </select>
-                <FieldDescription>{mode === "cloud" ? "Uses zrok.io to assign a public HTTPS hostname." : "Uses an HTTPS zrok controller operated by you or your organization."}</FieldDescription>
-              </Field>
-              {mode === "self_hosted" ? <Field><FieldLabel htmlFor="zrok-api-endpoint">zrok API endpoint</FieldLabel><Input id="zrok-api-endpoint" type="url" placeholder="https://zrok.example.com" value={apiEndpoint} onChange={(event) => setApiEndpoint(event.target.value)} /><FieldDescription>Controller origin only. The tunnel destination remains fixed to the public listener.</FieldDescription></Field> : null}
-              <Field><FieldLabel htmlFor="zrok-account-token">Account token</FieldLabel><Input id="zrok-account-token" type="password" autoComplete="off" value={accountToken} onChange={(event) => setAccountToken(event.target.value)} /><FieldDescription>Used once to enroll this isolated connector; never returned to the browser.</FieldDescription></Field>
-              <Field><FieldLabel htmlFor="zrok-namespace">Namespace</FieldLabel><Input id="zrok-namespace" value={namespace} onChange={(event) => setNamespace(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="zrok-name">Reserved name</FieldLabel><Input id="zrok-name" placeholder="pay-bones" value={name} onChange={(event) => setName(event.target.value)} /><FieldDescription>A stable name suitable for Lightning Addresses.</FieldDescription></Field>
-              {mode === "cloud" && setup.data?.cloud_interstitial_warning ? <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">zrok Cloud may show an anti-phishing interstitial until the account is verified. Verify the resulting URL before publishing Lightning Addresses.</p> : null}
-              <Button disabled={!accountToken || !name || (mode === "self_hosted" && !apiEndpoint) || provision.isPending} onClick={() => provision.mutate({ mode, account_token: accountToken, api_endpoint: mode === "self_hosted" ? apiEndpoint : undefined, namespace, name })}>{provision.isPending ? "Connecting…" : "Create public share"}</Button>
-            </FieldGroup>
-          )}
-        </div>
-      </Card>
+      <div className="space-y-5">
+        {!available ? (
+          <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">zrok is not available on this lnSwitchboard. Ask the person who manages it to install the zrok connection service.</p>
+        ) : connection ? (
+          <>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {connection.domains.map((domain) => (
+                <div key={domain.hostname} className="rounded-xl bg-muted/50 p-4 ring-1 ring-foreground/10">
+                  <div className="flex items-center justify-between gap-3"><span className="truncate font-medium">{domain.hostname}</span><Badge variant="outline">{domain.status}</Badge></div>
+                  <p className="mt-2 text-xs text-muted-foreground">Mode: {String(connection.public_metadata.mode ?? "cloud").replace("_", " ")}</p>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" disabled={refresh.isPending || disconnect.isPending} onClick={() => refresh.mutate()}><RefreshCwIcon className={refresh.isPending ? "animate-spin" : undefined} />Refresh status</Button>
+              <Button variant="destructive" disabled={refresh.isPending || disconnect.isPending} onClick={() => disconnect.mutate()}><Trash2Icon />Disconnect</Button>
+            </div>
+          </>
+        ) : (
+          <FieldGroup className="max-w-2xl">
+            <Field>
+              <FieldLabel htmlFor="zrok-mode">Service</FieldLabel>
+              <select id="zrok-mode" value={mode} onChange={(event) => setMode(event.target.value as ZrokProvisionPayload["mode"])} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm">
+                <option value="cloud">zrok Cloud</option>
+                <option value="self_hosted">Self-hosted zrok</option>
+              </select>
+              <FieldDescription>{mode === "cloud" ? "Use zrok.io to create a public web address." : "Connect to a zrok service run by you or your organization."}</FieldDescription>
+            </Field>
+            {mode === "self_hosted" ? <Field><FieldLabel htmlFor="zrok-api-endpoint">zrok API endpoint</FieldLabel><Input id="zrok-api-endpoint" type="url" placeholder="https://zrok.example.com" value={apiEndpoint} onChange={(event) => setApiEndpoint(event.target.value)} /><FieldDescription>Enter the web address for your zrok service. For your safety, zrok can reach only the public Lightning Address service.</FieldDescription></Field> : null}
+            <Field><FieldLabel htmlFor="zrok-account-token">Account token</FieldLabel><Input id="zrok-account-token" type="password" autoComplete="off" value={accountToken} onChange={(event) => setAccountToken(event.target.value)} /><FieldDescription>Used only to connect zrok. lnSwitchboard does not send this token back to your browser after setup.</FieldDescription></Field>
+            <Field><FieldLabel htmlFor="zrok-namespace">Namespace</FieldLabel><Input id="zrok-namespace" value={namespace} onChange={(event) => setNamespace(event.target.value)} /></Field>
+            <Field><FieldLabel htmlFor="zrok-name">Reserved name</FieldLabel><Input id="zrok-name" placeholder="pay-bones" value={name} onChange={(event) => setName(event.target.value)} /><FieldDescription>A stable name suitable for Lightning Addresses.</FieldDescription></Field>
+            {mode === "cloud" && setup.data?.cloud_interstitial_warning ? <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">zrok Cloud may show a safety check page until your account is verified. Open and check your new web address before sharing your Lightning Addresses.</p> : null}
+            <Button disabled={!accountToken || !name || (mode === "self_hosted" && !apiEndpoint) || provision.isPending} onClick={() => provision.mutate({ mode, account_token: accountToken, api_endpoint: mode === "self_hosted" ? apiEndpoint : undefined, namespace, name })}>{provision.isPending ? "Connecting…" : "Create public share"}</Button>
+          </FieldGroup>
+        )}
+      </div>
     </div>
   )
 }
