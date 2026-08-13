@@ -60,10 +60,18 @@ class ZrokConnector:
     def clear_refresh(self) -> None:
         (self.control_dir / "refresh").unlink(missing_ok=True)
 
-    def disconnect(self) -> str:
+    def disconnect(self, *, namespace: str, name: str) -> str:
         operation_id = uuid.uuid4().hex
         (self.status_dir / "status.json").unlink(missing_ok=True)
-        self._atomic_write(self.control_dir / "disconnect", operation_id.encode("ascii"))
+        payload = {
+            "operation_id": operation_id,
+            "namespace": namespace,
+            "name": name,
+        }
+        self._atomic_write(
+            self.control_dir / "disconnect.json",
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+        )
         return operation_id
 
     def read_status(self) -> dict[str, Any] | None:
