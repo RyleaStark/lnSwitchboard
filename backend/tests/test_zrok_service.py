@@ -36,6 +36,18 @@ def _service(tmp_path: Path, endpoint: str) -> ZrokService:
     )
 
 
+def test_setup_reports_deployment_supplied_public_origin(tmp_path: Path) -> None:
+    origin = "http://extended-umbrella-lnswitchboard_public_1:21212"
+    service = ZrokService(
+        connector=StubConnector("https://lns.shares.zrok.io"),  # type: ignore[arg-type]
+        store=ConnectionStore(tmp_path / "connections.db"),
+        connector_enabled=True,
+        public_origin=origin,
+    )
+
+    assert service.setup()["public_origin"] == origin
+
+
 def test_share_token_is_not_persisted_as_provider_or_domain_identity(tmp_path: Path) -> None:
     service = _service(tmp_path, "https://pay-bones.share.zrok.io")
     connection = asyncio.run(service.provision(

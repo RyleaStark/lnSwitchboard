@@ -114,6 +114,7 @@ def _get_tailscale_service() -> TailscaleService:
         ),
         store=_get_connection_store(),
         connector_enabled=settings.tailscale_connector_enabled,
+        public_origin=settings.tailscale_public_origin,
     )
 
 
@@ -128,6 +129,7 @@ def _get_zrok_service() -> ZrokService:
         store=_get_connection_store(),
         connector_enabled=settings.zrok_connector_enabled,
         cloud_api_endpoint=settings.zrok_cloud_api_endpoint,
+        public_origin=settings.zrok_public_origin,
     )
 
 

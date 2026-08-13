@@ -93,6 +93,7 @@ fi
             "TS_TEST_RUNNING_FILE": str(tmp_path / "node-running"),
             "TS_TEST_COMPLETE_LOGIN_FILE": str(tmp_path / "complete-login"),
             "TS_LOGIN_RETENTION_SECONDS": "2",
+            "TS_FUNNEL_TARGET": "http://test-public:21212",
         }
     )
     yield control_dir, status_dir, state_dir, command_log, env
@@ -240,7 +241,7 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
         commands = command_log.read_text(encoding="utf-8")
         assert (
             f"tailscale --socket={env['TS_SOCKET']} funnel --bg --yes "
-            "http://127.0.0.1:21212"
+            f"{env['TS_FUNNEL_TARGET']}"
         ) in commands
 
         (control_dir / "disable").touch()
