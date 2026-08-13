@@ -344,7 +344,7 @@ export type ZrokSetup = {
   modes: Array<"cloud" | "self_hosted">
   cloud_api_endpoint: string
   default_namespace: string
-  public_origin: "http://public:21212"
+  public_origin: string
   cloud_interstitial_warning: boolean
 }
 

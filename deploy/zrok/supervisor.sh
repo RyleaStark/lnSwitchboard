@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 CONTROL=${ZROK_CONTROL_DIR:-/run/lnswitchboard/control}
 STATUS=${ZROK_STATUS_DIR:-/run/lnswitchboard/status}
-TARGET=http://public:21212
+TARGET=${ZROK_TARGET:?ZROK_TARGET must be supplied by the deployment}
 ACTIVE=${ZROK_ACTIVE_FILE:-$HOME/.lnswitchboard-active.json}
 mkdir -p "$STATUS"
 share_pid=

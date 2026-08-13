@@ -44,12 +44,14 @@ class ZrokService:
         store: ConnectionStore,
         connector_enabled: bool,
         cloud_api_endpoint: str = CLOUD_API_ENDPOINT,
+        public_origin: str = "http://public:21212",
         operation_timeout_seconds: int = 30,
     ) -> None:
         self.connector = connector
         self.store = store
         self.connector_enabled = connector_enabled
         self.cloud_api_endpoint = cloud_api_endpoint
+        self.public_origin = public_origin
         self.operation_timeout_seconds = operation_timeout_seconds
         self._operation_lock = asyncio.Lock()
 
@@ -59,7 +61,7 @@ class ZrokService:
             "modes": ["cloud", "self_hosted"],
             "cloud_api_endpoint": self.cloud_api_endpoint,
             "default_namespace": "public",
-            "public_origin": "http://public:21212",
+            "public_origin": self.public_origin,
             "cloud_interstitial_warning": True,
         }
 

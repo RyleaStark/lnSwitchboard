@@ -171,7 +171,7 @@ def prerequisite_failures(status: Mapping[str, Any]) -> list[str]:
 
 
 _AUTH_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{6,256}$")
-_FIXED_ORIGIN = "http://127.0.0.1:21212"
+_DEFAULT_ORIGIN = "http://127.0.0.1:21212"
 
 
 def _validated_auth_url(value: object) -> str:
@@ -208,7 +208,9 @@ def _validated_auth_url(value: object) -> str:
     return value
 
 
-def funnel_status_matches(value: object, hostname: str) -> bool:
+def funnel_status_matches(
+    value: object, hostname: str, public_origin: str = _DEFAULT_ORIGIN
+) -> bool:
     if not isinstance(value, Mapping):
         return False
     tcp = value.get("TCP")
@@ -233,7 +235,7 @@ def funnel_status_matches(value: object, hostname: str) -> bool:
     root_handler = handlers.get("/")
     return (
         isinstance(root_handler, Mapping)
-        and root_handler.get("Proxy") == _FIXED_ORIGIN
+        and root_handler.get("Proxy") == public_origin
         and allow_funnel.get(host_port) is True
     )
 
@@ -247,6 +249,7 @@ class TailscaleService:
         connector: TailscaleConnector,
         store: ConnectionStore,
         connector_enabled: bool,
+        public_origin: str = _DEFAULT_ORIGIN,
         poll_interval_seconds: float = 0.1,
         operation_timeout_seconds: float = 30,
         login_ttl_seconds: float = 300,
@@ -254,6 +257,7 @@ class TailscaleService:
         self.connector = connector
         self.store = store
         self.connector_enabled = connector_enabled
+        self.public_origin = public_origin
         self.poll_interval_seconds = poll_interval_seconds
         self.operation_timeout_seconds = operation_timeout_seconds
         self.login_ttl_seconds = login_ttl_seconds
@@ -267,7 +271,7 @@ class TailscaleService:
             "authorization_method": "web_login",
             "default_device_name": DEFAULT_DEVICE_NAME,
             "device_name_max_length": 63,
-            "public_origin": _FIXED_ORIGIN,
+            "public_origin": self.public_origin,
             "public_port": FUNNEL_PORT,
             "prerequisites": [
                 "magic_dns",
@@ -570,7 +574,7 @@ class TailscaleService:
                     "Unable to read Tailscale Funnel status"
                 ) from exc
             if funnel_status is not None and funnel_status_matches(
-                funnel_status, hostname
+                funnel_status, hostname, self.public_origin
             ):
                 try:
                     connection = self._register_connection(
@@ -606,7 +610,7 @@ class TailscaleService:
             external_id=external_id,
             label="Tailscale Funnel",
             status="error",
-            public_metadata={"device_name": device_name, "origin": _FIXED_ORIGIN, **key_expiry_metadata(self_status)},
+            public_metadata={"device_name": device_name, "origin": self.public_origin, **key_expiry_metadata(self_status)},
             last_error="Missing Tailscale prerequisites: " + ", ".join(missing),
         )
         self.store.replace_domains(
@@ -638,7 +642,7 @@ class TailscaleService:
             external_id=external_id,
             label="Tailscale Funnel",
             status="connected",
-            public_metadata={"device_name": device_name, "origin": _FIXED_ORIGIN, **key_expiry_metadata(self_status)},
+            public_metadata={"device_name": device_name, "origin": self.public_origin, **key_expiry_metadata(self_status)},
         )
         self.store.replace_domains(
             connection.id,
@@ -683,7 +687,7 @@ class TailscaleService:
                 external_id=existing.external_id,
                 label=existing.label,
                 status="error",
-                public_metadata={"device_name": device_name, "origin": _FIXED_ORIGIN, **key_expiry_metadata(self_status)},
+                public_metadata={"device_name": device_name, "origin": self.public_origin, **key_expiry_metadata(self_status)},
                 last_error="Missing Tailscale prerequisites: " + ", ".join(missing),
             )
             self.store.replace_domains(
@@ -710,23 +714,14 @@ class TailscaleService:
         async with self._lock:
             try:
                 status = self.connector.read_node_status()
-            except TailscaleProtocolError:
-                await self._disconnect_authenticated_runtime()
-                raise
-            except OSError as exc:
-                if not has_artifact:
-                    return
-                await self._disconnect_authenticated_runtime()
-                raise TailscaleOperationError(
-                    "Unable to read Tailscale status during recovery"
-                ) from exc
+            except (TailscaleProtocolError, OSError):
+                # Startup may race the connector sidecar. Never convert a
+                # transiently unavailable/malformed status snapshot into a
+                # durable disconnect marker: the sidecar can consume that
+                # marker later and erase an otherwise valid node identity.
+                return
             if status is None:
-                if not has_artifact:
-                    return
-                await self._disconnect_authenticated_runtime()
-                raise TailscaleOperationError(
-                    "Tailscale status is unavailable during recovery"
-                )
+                return
             backend_state = status.get("BackendState")
             if backend_state == "NeedsLogin":
                 if has_artifact:

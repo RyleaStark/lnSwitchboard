@@ -602,16 +602,17 @@ def test_failed_authenticated_cleanup_retains_flow_guard(tmp_path: Path) -> None
         asyncio.run(service.begin_login("second"))
 
 
-def test_malformed_recovery_status_disconnects_fail_closed(tmp_path: Path) -> None:
+def test_malformed_recovery_status_never_queues_destructive_disconnect(
+    tmp_path: Path,
+) -> None:
     connector = FakeTailscaleConnector()
     connector.node_protocol_error = True
     service = _service(tmp_path, connector)
 
-    with pytest.raises(TailscaleProtocolError, match="malformed"):
-        asyncio.run(service.recover_incomplete_provisioning())
+    asyncio.run(service.recover_incomplete_provisioning())
 
-    assert ("disconnect", None) in connector.calls
-    assert connector.login_artifact is False
+    assert ("disconnect", None) not in connector.calls
+    assert connector.login_artifact is True
 
 
 def test_recovery_reconciles_running_daemon_without_login_artifact(
@@ -631,16 +632,36 @@ def test_recovery_reconciles_running_daemon_without_login_artifact(
     assert ("disconnect", None) not in connector.calls
 
 
-def test_missing_recovery_status_disconnects_fail_closed(tmp_path: Path) -> None:
+def test_deployment_supplied_public_origin_drives_setup_and_funnel_match(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    origin = "http://extended-umbrella-lnswitchboard_public_1:21212"
+    service = TailscaleService(
+        connector=connector,
+        store=ConnectionStore(tmp_path / "connections.db"),
+        connector_enabled=True,
+        public_origin=origin,
+    )
+
+    assert service.setup()["public_origin"] == origin
+    status = connector.funnel_status
+    status["Web"]["lns.example.ts.net:443"]["Handlers"]["/"]["Proxy"] = origin
+    assert funnel_status_matches(status, "lns.example.ts.net", origin)
+    assert not funnel_status_matches(status, "lns.example.ts.net")
+
+
+def test_missing_recovery_status_never_queues_destructive_disconnect(
+    tmp_path: Path,
+) -> None:
     connector = FakeTailscaleConnector()
     connector.node_status_missing = True
     service = _service(tmp_path, connector)
 
-    with pytest.raises(TailscaleOperationError, match="unavailable"):
-        asyncio.run(service.recover_incomplete_provisioning())
+    asyncio.run(service.recover_incomplete_provisioning())
 
-    assert ("disconnect", None) in connector.calls
-    assert connector.login_artifact is False
+    assert ("disconnect", None) not in connector.calls
+    assert connector.login_artifact is True
 
 
 def test_disconnect_keeps_registry_when_runtime_cannot_disable_funnel(

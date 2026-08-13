@@ -228,6 +228,9 @@ class Settings(BaseSettings):
     tailscale_status_dir: Path = _env_field(
         env="TAILSCALE_STATUS_DIR", default=Path("secrets/tailscale/status")
     )
+    tailscale_public_origin: str = _env_field(
+        env="TAILSCALE_PUBLIC_ORIGIN", default="http://127.0.0.1:21212"
+    )
     zrok_connector_enabled: bool = _env_field(
         env="ZROK_CONNECTOR_ENABLED", default=False
     )
@@ -239,6 +242,9 @@ class Settings(BaseSettings):
     )
     zrok_cloud_api_endpoint: str = _env_field(
         env="ZROK_CLOUD_API_ENDPOINT", default="https://api-v2.zrok.io"
+    )
+    zrok_public_origin: str = _env_field(
+        env="ZROK_PUBLIC_ORIGIN", default="http://public:21212"
     )
     rate_limit_per_min: int = _env_field(env="RATE_LIMIT_PER_MIN", default=30)
     trusted_proxy_cidrs: str = _env_field(env="TRUSTED_PROXY_CIDRS", default="")

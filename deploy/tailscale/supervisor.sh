@@ -11,7 +11,7 @@ CONTROL_DIR="${TS_CONTROL_DIR:-/run/lnswitchboard/control}"
 STATUS_DIR="${TS_STATUS_DIR:-/run/lnswitchboard/status}"
 POLL_INTERVAL="${TS_POLL_INTERVAL:-2}"
 LOGIN_RETENTION_SECONDS="${TS_LOGIN_RETENTION_SECONDS:-300}"
-FUNNEL_TARGET="http://127.0.0.1:21212"
+FUNNEL_TARGET="${TS_FUNNEL_TARGET:?TS_FUNNEL_TARGET must be supplied by the deployment}"
 
 case "$LOGIN_RETENTION_SECONDS" in
     "" | *[!0-9]*)
