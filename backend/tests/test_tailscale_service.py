@@ -230,6 +230,7 @@ class FakeTailscaleConnector:
         external_id: str,
         hostname: str,
         operation_id: str | None = None,
+        retry: bool = False,
     ) -> str:
         self.calls.append(("disconnect", None))
         generated_id = self._operation(
@@ -271,7 +272,9 @@ class FakeTailscaleConnector:
             return None
         return self.command_status
 
-    def consume_command_result(self, operation_id: str) -> None:
+    def consume_command_result(
+        self, operation_id: str, *, terminal: bool = True
+    ) -> None:
         self.consumed_operation_ids.append(operation_id)
         if self.command_status and self.command_status.get("operation_id") == operation_id:
             self.command_status = None
@@ -890,6 +893,7 @@ def test_stale_disconnect_ack_does_not_delete_registry(tmp_path: Path) -> None:
         external_id: str,
         hostname: str,
         operation_id: str | None = None,
+        retry: bool = False,
     ) -> str:
         generated_id = original_disconnect(
             external_id=external_id,

@@ -3,11 +3,14 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Iterator
 
 import pytest
+
+from backend.app.tailscale_connector import TailscaleConnector
 
 ROOT = Path(__file__).resolve().parents[2]
 SUPERVISOR = ROOT / "deploy" / "tailscale" / "supervisor.sh"
@@ -120,6 +123,9 @@ elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "reset" ]; then
 elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "status" ]; then
   if [ -f "$TS_TEST_FAIL_FUNNEL_STATUS_FILE" ]; then exit 1; fi
   printf '%s\\n' '{}'
+elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "--bg" ]; then
+  while [ -f "$TS_TEST_BLOCK_FUNNEL_FILE" ]; do sleep 0.02; done
+  exit 0
 fi
 """,
     )
@@ -139,6 +145,7 @@ fi
             "TS_TEST_FAIL_FUNNEL_RESET_FILE": str(tmp_path / "fail-funnel-reset"),
             "TS_TEST_RUNNING_FILE": str(tmp_path / "node-running"),
             "TS_TEST_COMPLETE_LOGIN_FILE": str(tmp_path / "complete-login"),
+            "TS_TEST_BLOCK_FUNNEL_FILE": str(tmp_path / "block-funnel"),
             "TS_LOGIN_RETENTION_SECONDS": "2",
             "DEP_ENV": "UMBREL_DEV",
         }
@@ -240,6 +247,46 @@ def test_supervisor_discards_queue_link_for_completed_operation(
         time.sleep(0.15)
         assert not _command_result(status_dir, operation_id).exists()
     finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_protocol_lock_prevents_ack_transition_during_claim_execution(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, _state_dir, command_log, env = supervisor_runtime
+    operation_id = "c" * 32
+    blocker = Path(env["TS_TEST_BLOCK_FUNNEL_FILE"])
+    blocker.touch()
+    Path(env["TS_TEST_RUNNING_FILE"]).touch()
+    _write_operation_record(control_dir, "enable", operation_id)
+    _write_command(
+        control_dir,
+        "enable",
+        operation_id,
+        external_id="node-123",
+        hostname="lns.tailnet.example.ts.net",
+    )
+    connector = TailscaleConnector(control_dir=control_dir, status_dir=status_dir)
+
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    acknowledgement = threading.Thread(
+        target=connector.consume_command_result, args=(operation_id,), daemon=True
+    )
+    try:
+        _wait_for(
+            lambda: command_log.exists()
+            and "funnel --bg" in command_log.read_text(encoding="utf-8")
+        )
+        acknowledgement.start()
+        time.sleep(0.15)
+        assert acknowledgement.is_alive()
+
+        blocker.unlink()
+        acknowledgement.join(timeout=3)
+        assert not acknowledgement.is_alive()
+    finally:
+        blocker.unlink(missing_ok=True)
         process.terminate()
         process.wait(timeout=3)
 
@@ -535,11 +582,14 @@ def test_supervisor_disconnect_stays_fail_closed_when_running_and_reset_fails(
     )
     try:
         _wait_for(lambda: (status_dir / "node.json").exists())
-        _write_command(
-            control_dir, "disconnect", "5" * 32,
-            external_id="node-123", hostname="lns.tailnet.example.ts.net",
-        )
-        command_status = _command_result(status_dir, "5" * 32)
+        operation_id = "5" * 32
+        connector = TailscaleConnector(control_dir=control_dir, status_dir=status_dir)
+        assert connector.disconnect(
+            external_id="node-123",
+            hostname="lns.tailnet.example.ts.net",
+            operation_id=operation_id,
+        ) == operation_id
+        command_status = _command_result(status_dir, operation_id)
         _wait_for(
             lambda: (
                 command_status.exists()
@@ -548,11 +598,23 @@ def test_supervisor_disconnect_stays_fail_closed_when_running_and_reset_fails(
             )
         )
 
-        assert owned_state.exists()
-        assert not any(
-            line.endswith(" logout")
-            for line in command_log.read_text(encoding="utf-8").splitlines()
+        assert not (control_dir / "completed" / f"{operation_id}.json").exists()
+        assert (control_dir / "operations" / f"{operation_id}.json").exists()
+        assert (state_dir / f".lnswitchboard-disconnect-{operation_id}.json").exists()
+        assert command_status.exists()
+
+        Path(env["TS_TEST_FAIL_FUNNEL_RESET_FILE"]).unlink()
+        connector.disconnect(
+            external_id="node-123",
+            hostname="lns.tailnet.example.ts.net",
+            operation_id=operation_id,
+            retry=True,
         )
+        _wait_for(
+            lambda: command_status.exists()
+            and '"state":"complete"' in command_status.read_text(encoding="utf-8")
+        )
+        assert not owned_state.exists()
     finally:
         process.terminate()
         process.wait(timeout=3)

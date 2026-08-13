@@ -293,3 +293,39 @@ def test_connector_consumes_only_the_requested_durable_result(tmp_path: Path) ->
     assert connector.read_command_status(first) is not None
     assert (tmp_path / "control" / "acks" / f"{first}.ack").exists()
     assert connector.read_command_status(second) is not None
+
+
+def test_connector_requeues_retryable_error_result_under_protocol_lock(
+    tmp_path: Path
+) -> None:
+    connector = _connector(tmp_path)
+    operation_id = "b" * 32
+    connector.disconnect(
+        external_id="node-a",
+        hostname="a.example.ts.net",
+        operation_id=operation_id,
+    )
+    queue = tmp_path / "control" / "queue" / f"{operation_id}.json"
+    queue.unlink()
+    result = tmp_path / "status" / "results" / f"{operation_id}.json"
+    result.write_text(
+        json.dumps(
+            {
+                "command": "disconnect",
+                "state": "error",
+                "error": "funnel_disable_failed",
+                "operation_id": operation_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    connector.disconnect(
+        external_id="node-a",
+        hostname="a.example.ts.net",
+        operation_id=operation_id,
+        retry=True,
+    )
+
+    assert not result.exists()
+    assert queue.exists()

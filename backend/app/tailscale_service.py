@@ -351,7 +351,6 @@ class TailscaleService:
                     phase="prepared",
                     last_error=error,
                 )
-                self.connector.consume_command_result(journal.operation_id)
                 raise TailscaleOperationError(error)
             if result.get("state") == "complete":
                 self.lifecycle.update(journal.operation_id, phase="provider_acknowledged")
@@ -379,13 +378,14 @@ class TailscaleService:
         return False
 
     async def _run_disconnect_journal(self, journal: TailscaleLifecycle) -> bool:
-        if await self._reconcile_disconnect_journal(journal):
+        if journal.last_error is None and await self._reconcile_disconnect_journal(journal):
             return True
         try:
             operation_id = self.connector.disconnect(
                 external_id=journal.external_id,
                 hostname=journal.hostname,
                 operation_id=journal.operation_id,
+                retry=journal.last_error is not None,
             )
             if operation_id != journal.operation_id:
                 raise TailscaleOperationError(

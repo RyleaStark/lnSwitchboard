@@ -15,6 +15,7 @@ PROCESSING_DIR="$CONTROL_DIR/processing"
 COMPLETED_DIR="$CONTROL_DIR/completed"
 ACK_DIR="$CONTROL_DIR/acks"
 RESULT_DIR="$STATUS_DIR/results"
+
 POLL_INTERVAL="${TS_POLL_INTERVAL:-2}"
 LOGIN_RETENTION_SECONDS="${TS_LOGIN_RETENTION_SECONDS:-300}"
 COMPLETED_RETENTION_SECONDS="${TS_COMPLETED_RETENTION_SECONDS:-2592000}"
@@ -48,6 +49,7 @@ LOGIN_COMPLETED_AT=""
 
 mkdir -p "$STATE_DIR" "$QUEUE_DIR" "$OPERATION_DIR" "$PROCESSING_DIR" "$COMPLETED_DIR" "$ACK_DIR" "$RESULT_DIR" "$(dirname "$SOCKET")"
 chmod 0700 "$CONTROL_DIR" "$STATUS_DIR" "$QUEUE_DIR" "$OPERATION_DIR" "$PROCESSING_DIR" "$COMPLETED_DIR" "$ACK_DIR" "$RESULT_DIR"
+exec 9<"$CONTROL_DIR"
 
 if [ -f "$STATUS_DIR/login.json" ]; then
     LOGIN_COMPLETED_AT=$(stat -c %Y "$STATUS_DIR/login.json" 2>/dev/null || date +%s)
@@ -477,8 +479,9 @@ consume_results() {
     for acknowledgement in "$ACK_DIR"/*.ack; do
         [ -f "$acknowledgement" ] || continue
         operation_id=$(basename "$acknowledgement" .ack)
+        acknowledgement_value=$(tr -d '\r\n' <"$acknowledgement")
         if valid_operation_id "$operation_id" \
-            && [ "$(tr -d '\r\n' <"$acknowledgement")" = "$operation_id" ]; then
+            && [ "$acknowledgement_value" = "$operation_id" ]; then
             if [ -f "$OPERATION_DIR/$operation_id.json" ] \
                 && [ ! -f "$COMPLETED_DIR/$operation_id.json" ]; then
                 atomic_text "$COMPLETED_DIR/$operation_id.json" \
@@ -538,8 +541,10 @@ expire_login_artifact() {
 }
 
 start_daemon
+flock -x 9
 recover_disconnect_journals
 recover_operation_records
+flock -u 9
 
 while :; do
     if ! kill -0 "$TAILSCALED_PID" 2>/dev/null; then
@@ -552,11 +557,13 @@ while :; do
         LOGIN_COMPLETED_AT=$(date +%s)
     fi
     expire_login_artifact
+    flock -x 9
     consume_results
     recover_disconnect_journals
     recover_operation_records
     cleanup_completed_operations
     claim_next_command
+    flock -u 9
     publish_node_status
     publish_command "$STATUS_DIR/funnel.json" \
         "$TAILSCALE_BIN" --socket="$SOCKET" funnel status --json

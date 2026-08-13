@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import fcntl
+import stat
 import uuid
+from contextlib import contextmanager
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 MAX_STATUS_BYTES = 64 * 1024
 
@@ -85,8 +88,43 @@ class TailscaleConnector:
         finally:
             temporary.unlink(missing_ok=True)
 
+    @contextmanager
+    def _protocol_lock(self) -> Iterator[None]:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(self.control_dir, flags)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise TailscaleProtocolError("Tailscale protocol lock is unsafe")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            current = os.stat(self.control_dir, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+                raise TailscaleProtocolError("Tailscale protocol lock changed")
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
     def _mark(
-        self, operation: str, *, operation_id: str | None = None, **parameters: str
+        self,
+        operation: str,
+        *,
+        operation_id: str | None = None,
+        retry: bool = False,
+        **parameters: str,
+    ) -> str:
+        with self._protocol_lock():
+            return self._mark_locked(
+                operation, operation_id=operation_id, retry=retry, **parameters
+            )
+
+    def _mark_locked(
+        self,
+        operation: str,
+        *,
+        operation_id: str | None = None,
+        retry: bool = False,
+        **parameters: str,
     ) -> str:
         if operation not in self.supported_operations:
             raise ValueError("unsupported Tailscale operation")
@@ -117,6 +155,19 @@ class TailscaleConnector:
         queue_path = self.command_dir / f"{operation_id}.json"
         result_path = self.result_dir / f"{operation_id}.json"
         ack_path = self.ack_dir / f"{operation_id}.ack"
+        if retry and result_path.exists():
+            result = self._read_object(f"results/{operation_id}.json")
+            if (
+                result is None
+                or result.get("command") != operation
+                or result.get("operation_id") != operation_id
+                or result.get("state") != "error"
+            ):
+                raise TailscaleProtocolError(
+                    "Tailscale retry result does not match the operation"
+                )
+            result_path.unlink()
+            self._sync_directory(self.result_dir)
         if (
             not processing_path.exists()
             and not queue_path.exists()
@@ -191,11 +242,17 @@ class TailscaleConnector:
         return self._mark("disable", external_id=external_id, hostname=hostname)
 
     def disconnect(
-        self, *, external_id: str, hostname: str, operation_id: str | None = None
+        self,
+        *,
+        external_id: str,
+        hostname: str,
+        operation_id: str | None = None,
+        retry: bool = False,
     ) -> str:
         return self._mark(
             "disconnect",
             operation_id=operation_id,
+            retry=retry,
             external_id=external_id,
             hostname=hostname,
         )
@@ -231,10 +288,11 @@ class TailscaleConnector:
         return self._read_object(f"results/{operation_id}.json")
 
     def consume_command_result(self, operation_id: str) -> None:
-        self._atomic_write(
-            self.ack_dir / f"{operation_id}.ack",
-            (operation_id + "\n").encode("ascii"),
-        )
+        with self._protocol_lock():
+            self._atomic_write(
+                self.ack_dir / f"{operation_id}.ack",
+                (operation_id + "\n").encode("ascii"),
+            )
 
     def has_login_artifact(self) -> bool:
         return (self.status_dir / "login.json").exists()
