@@ -133,10 +133,23 @@ class ZrokService:
 
     async def disconnect(self, connection_id: str) -> bool:
         async with self._operation_lock:
-            self._get(connection_id)
+            connection = self._get(connection_id)
             self._require_available()
-            operation_id = self.connector.disconnect()
-            await self._wait_for_state({"disconnected", "error"}, operation_id)
+            metadata = connection.public_metadata
+            expected_namespace = str(metadata.get("namespace", "public"))
+            expected_name = str(metadata.get("name", ""))
+            operation_id = self.connector.disconnect(
+                namespace=expected_namespace,
+                name=expected_name,
+            )
+            status = await self._wait_for_state({"disconnected", "error"}, operation_id)
+            if (
+                status.get("namespace") != expected_namespace
+                or status.get("name") != expected_name
+            ):
+                raise ZrokOperationError(
+                    "zrok connector reported a different reserved name"
+                )
             return self.store.delete_connection(connection_id)
 
     def _require_available(self) -> None:

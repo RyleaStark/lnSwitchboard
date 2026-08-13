@@ -30,6 +30,11 @@ class StubConnector:
         self.operation_id = "refresh-operation"
         return self.operation_id
 
+    def disconnect(self, *, namespace: str, name: str) -> str:
+        self.disconnect_identity = (namespace, name)
+        self.operation_id = "disconnect-operation"
+        return self.operation_id
+
     def clear_refresh(self) -> None:
         pass
 
@@ -179,3 +184,49 @@ def test_refresh_timeout_does_not_delete_the_healthy_stored_connection(tmp_path:
     assert retained is not None
     assert retained.status == "connected"
     assert retained.domains[0].hostname == "pay-bones.share.zrok.io"
+
+
+def test_disconnect_binds_sidecar_operation_to_stored_reserved_name(tmp_path: Path) -> None:
+    service = _service(tmp_path, "https://pay-bones.share.zrok.io")
+    connection = asyncio.run(service.provision(
+        mode="cloud",
+        account_token="account-token",
+        api_endpoint="https://api-v2.zrok.io",
+        namespace="public",
+        name="pay-bones",
+    ))
+    connector = service.connector
+
+    def disconnected_status() -> dict[str, object]:
+        return {
+            "state": "disconnected",
+            "operation_id": connector.operation_id,
+            "namespace": "public",
+            "name": "pay-bones",
+        }
+
+    connector.read_status = disconnected_status  # type: ignore[method-assign]
+    assert asyncio.run(service.disconnect(connection.id)) is True
+    assert connector.disconnect_identity == ("public", "pay-bones")
+
+
+def test_disconnect_rejects_mismatched_identity_without_deleting_local_record(tmp_path: Path) -> None:
+    service = _service(tmp_path, "https://pay-bones.share.zrok.io")
+    connection = asyncio.run(service.provision(
+        mode="cloud",
+        account_token="account-token",
+        api_endpoint="https://api-v2.zrok.io",
+        namespace="public",
+        name="pay-bones",
+    ))
+    connector = service.connector
+
+    connector.read_status = lambda: {  # type: ignore[method-assign]
+        "state": "disconnected",
+        "operation_id": connector.operation_id,
+        "namespace": "public",
+        "name": "someone-else",
+    }
+    with pytest.raises(ZrokOperationError, match="different reserved name"):
+        asyncio.run(service.disconnect(connection.id))
+    assert service.store.get_connection(connection.id) is not None

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import json
 import pytest
 
 from backend.app.zrok_connector import ZrokConnector, ZrokProtocolError
@@ -32,3 +33,17 @@ def test_read_status_rejects_partial_or_malformed_snapshots(
 
     with pytest.raises(ZrokProtocolError):
         connector.read_status()
+
+
+def test_disconnect_command_is_identity_bound(tmp_path: Path) -> None:
+    connector = ZrokConnector(
+        control_dir=tmp_path / "control",
+        status_dir=tmp_path / "status",
+    )
+    operation_id = connector.disconnect(namespace="public", name="pay-bones")
+    payload = json.loads((tmp_path / "control" / "disconnect.json").read_text())
+    assert payload == {
+        "operation_id": operation_id,
+        "namespace": "public",
+        "name": "pay-bones",
+    }
