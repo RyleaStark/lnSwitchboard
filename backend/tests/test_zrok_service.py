@@ -26,6 +26,13 @@ class StubConnector:
             "frontend_endpoints": [self.endpoint],
         }
 
+    def refresh(self) -> str:
+        self.operation_id = "refresh-operation"
+        return self.operation_id
+
+    def clear_refresh(self) -> None:
+        pass
+
 
 def _service(tmp_path: Path, endpoint: str) -> ZrokService:
     return ZrokService(
@@ -98,3 +105,77 @@ def test_self_hosted_endpoint_rejects_any_non_public_dns_answer(tmp_path: Path) 
                 namespace="public",
                 name="pay-bones",
             ))
+
+
+def test_refresh_rejects_status_for_a_different_reserved_name(tmp_path: Path) -> None:
+    service = _service(tmp_path, "https://pay-bones.share.zrok.io")
+    connection = asyncio.run(service.provision(
+        mode="cloud",
+        account_token="account-token",
+        api_endpoint="https://api-v2.zrok.io",
+        namespace="public",
+        name="pay-bones",
+    ))
+    connector = service.connector
+    original_read_status = connector.read_status
+
+    def mismatched_status() -> dict[str, object]:
+        status = original_read_status()
+        status["state"] = "refresh_complete"
+        status["namespace"] = "public"
+        status["name"] = "someone-else"
+        return status
+
+    connector.read_status = mismatched_status  # type: ignore[method-assign]
+    with pytest.raises(ZrokOperationError, match="different reserved name"):
+        asyncio.run(service.refresh(connection.id))
+
+
+def test_refresh_tolerates_one_transient_malformed_status_snapshot(tmp_path: Path) -> None:
+    service = _service(tmp_path, "https://pay-bones.share.zrok.io")
+    connection = asyncio.run(service.provision(
+        mode="cloud",
+        account_token="account-token",
+        api_endpoint="https://api-v2.zrok.io",
+        namespace="public",
+        name="pay-bones",
+    ))
+    connector = service.connector
+    original_read_status = connector.read_status
+    attempts = 0
+
+    def transient_status() -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("status snapshot changed during read")
+        status = original_read_status()
+        status.update({"state": "refresh_complete", "namespace": "public", "name": "pay-bones"})
+        return status
+
+    connector.read_status = transient_status  # type: ignore[method-assign]
+    refreshed = asyncio.run(service.refresh(connection.id))
+    assert refreshed.status == "connected"
+    assert attempts >= 2
+
+
+def test_refresh_timeout_does_not_delete_the_healthy_stored_connection(tmp_path: Path) -> None:
+    service = _service(tmp_path, "https://pay-bones.share.zrok.io")
+    connection = asyncio.run(service.provision(
+        mode="cloud",
+        account_token="account-token",
+        api_endpoint="https://api-v2.zrok.io",
+        namespace="public",
+        name="pay-bones",
+    ))
+    service.operation_timeout_seconds = 0
+    connector = service.connector
+    connector.read_status = lambda: None  # type: ignore[method-assign]
+
+    with pytest.raises(ZrokOperationError, match="timed out"):
+        asyncio.run(service.refresh(connection.id))
+
+    retained = service.store.get_connection(connection.id)
+    assert retained is not None
+    assert retained.status == "connected"
+    assert retained.domains[0].hostname == "pay-bones.share.zrok.io"
