@@ -121,32 +121,76 @@ start_daemon() {
     TAILSCALED_PID=$!
 }
 
+process_identity() {
+    process_pid=$1
+    [ -r "/proc/$process_pid/stat" ] || return 1
+    IFS= read -r process_stat <"/proc/$process_pid/stat" || return 1
+    process_stat=${process_stat##*) }
+    set -- $process_stat
+    [ "$#" -ge 20 ] || return 1
+    process_parent=$2
+    shift 19
+    printf '%s:%s\n' "$process_parent" "$1"
+}
+
+snapshot_children() {
+    for process_dir in /proc/[0-9]*; do
+        process_pid=${process_dir#/proc/}
+        identity=$(process_identity "$process_pid") || continue
+        [ "${identity%%:*}" = "$$" ] || continue
+        printf '%s\n' "$process_pid"
+    done
+}
+
 run_tailscale() {
+    process_snapshot=""
+    if [ "$$" = 1 ]; then
+        process_snapshot=$(snapshot_children)
+    fi
     PROVIDER_SEQUENCE=$((PROVIDER_SEQUENCE + 1))
     provider_token="lnswitchboard-provider-$$-$(date +%s)-$PROVIDER_SEQUENCE"
     exit_code=0
     LNS_PROVIDER_OPERATION="$provider_token" \
         timeout -k 5 "$COMMAND_TIMEOUT" "$TAILSCALE_BIN" "$@" || exit_code=$?
-    cleanup_provider_descendants "$provider_token"
+    cleanup_provider_descendants "$provider_token" "$process_snapshot"
     return "$exit_code"
 }
 
 cleanup_provider_descendants() {
     provider_token=$1
+    process_snapshot=$2
     attempts=0
     while [ "$attempts" -lt 10 ]; do
         found=false
-        for environment in /proc/[0-9]*/environ; do
-            [ -r "$environment" ] || continue
-            if tr '\000' '\n' <"$environment" 2>/dev/null \
+        for process_dir in /proc/[0-9]*; do
+            provider_pid=${process_dir#/proc/}
+            [ "$provider_pid" != "$$" ] || continue
+            identity=$(process_identity "$provider_pid") || continue
+            process_parent=${identity%%:*}
+            start_time=${identity#*:}
+            should_kill=false
+            if [ "$$" = 1 ]; then
+                [ "$process_parent" = "$$" ] || continue
+                case "
+$process_snapshot
+" in
+                    *"
+$provider_pid
+"*) ;;
+                    *) should_kill=true ;;
+                esac
+            elif [ -r "$process_dir/environ" ] && tr '\000' '\n' <"$process_dir/environ" 2>/dev/null \
                 | grep -Fxq "LNS_PROVIDER_OPERATION=$provider_token"; then
-                provider_pid=${environment#/proc/}
-                provider_pid=${provider_pid%/environ}
-                kill -KILL "$provider_pid" 2>/dev/null || true
-                found=true
+                should_kill=true
             fi
+            [ "$should_kill" = true ] || continue
+            [ "$(process_identity "$provider_pid" 2>/dev/null || true)" = "$process_parent:$start_time" ] || continue
+            kill -KILL "$provider_pid" 2>/dev/null || true
+            found=true
         done
-        [ "$found" = true ] || return 0
+        if [ "$$" != 1 ] && [ "$found" = false ]; then
+            return 0
+        fi
         attempts=$((attempts + 1))
         sleep 0.1
     done

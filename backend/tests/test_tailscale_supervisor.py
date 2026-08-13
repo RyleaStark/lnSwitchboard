@@ -135,7 +135,11 @@ elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "reset" ]; then
 elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "status" ]; then
   if [ -f "$TS_TEST_FAIL_FUNNEL_STATUS_FILE" ]; then exit 1; fi
   if [ -f "$TS_TEST_PROVIDER_DESCENDANT_PID_FILE" ]; then
-    setsid sh -c 'trap "" TERM INT; while :; do sleep 1; done' &
+    if [ -f "$TS_TEST_PROVIDER_UNSET_MARKER_FILE" ]; then
+      setsid sh -c 'unset LNS_PROVIDER_OPERATION; trap "" TERM INT; while :; do sleep 1; done' &
+    else
+      setsid sh -c 'trap "" TERM INT; while :; do sleep 1; done' &
+    fi
     printf '%s\n' "$!" > "$TS_TEST_PROVIDER_DESCENDANT_PID_FILE"
   fi
   printf '%s\\n' '{}'
@@ -167,6 +171,9 @@ fi
             "TS_TEST_PROVIDER_DESCENDANT_PID_FILE": str(
                 tmp_path / "provider-descendant-pid"
             ),
+            "TS_TEST_PROVIDER_UNSET_MARKER_FILE": str(
+                tmp_path / "provider-unset-marker"
+            ),
             "TS_TEST_BLOCK_FUNNEL_FILE": str(tmp_path / "block-funnel"),
             "TS_LOGIN_RETENTION_SECONDS": "2",
             "TS_LOGIN_STOP_TIMEOUT": "1",
@@ -188,12 +195,46 @@ def test_supervisor_default_shutdown_budget_fits_compose_grace_period() -> None:
     assert 'LOGIN_STOP_TIMEOUT="${TS_LOGIN_STOP_TIMEOUT:-2}"' in source
 
 
+def test_pid_one_provider_cleanup_uses_process_identity_not_environment_markers() -> None:
+    source = SUPERVISOR.read_text(encoding="utf-8")
+    assert "snapshot_children" in source
+    assert "process_identity" in source
+    assert '[ "$$" = 1 ]' in source
+    assert "process_snapshot" in source
+
+
 def test_synchronous_provider_cannot_leave_an_escaped_descendant(
     supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
 ) -> None:
     _control_dir, status_dir, _state_dir, _command_log, env = supervisor_runtime
     descendant_pid_file = Path(env["TS_TEST_PROVIDER_DESCENDANT_PID_FILE"])
     descendant_pid_file.touch()
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        _wait_for(lambda: descendant_pid_file.read_text(encoding="utf-8").strip() != "")
+        descendant_pid = int(descendant_pid_file.read_text(encoding="utf-8"))
+        _wait_for(lambda: (status_dir / "funnel.json").exists())
+
+        def descendant_stopped() -> bool:
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        _wait_for(descendant_stopped, timeout=3)
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_synchronous_provider_cannot_escape_by_unsetting_marker(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    _control_dir, status_dir, _state_dir, _command_log, env = supervisor_runtime
+    descendant_pid_file = Path(env["TS_TEST_PROVIDER_DESCENDANT_PID_FILE"])
+    descendant_pid_file.touch()
+    Path(env["TS_TEST_PROVIDER_UNSET_MARKER_FILE"]).touch()
     process = subprocess.Popen([str(SUPERVISOR)], env=env)
     try:
         _wait_for(lambda: descendant_pid_file.read_text(encoding="utf-8").strip() != "")
