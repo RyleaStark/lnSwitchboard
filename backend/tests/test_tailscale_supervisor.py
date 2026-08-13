@@ -624,6 +624,57 @@ def test_cancel_login_terminates_term_resistant_descendants(
         process.wait(timeout=3)
 
 
+def test_cancel_login_kills_resistant_descendant_when_leader_exits_on_term(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, status_dir, _state_dir, _command_log, env = supervisor_runtime
+    descendant_pid_file = Path(env["TS_TEST_LOGIN_DESCENDANT_PID_FILE"])
+    descendant_pid_file.touch()
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        begin_id = "c" * 32
+        cancel_id = "d" * 32
+        _write_command(control_dir, "begin-login", begin_id, device_name="lns")
+        _wait_for(lambda: descendant_pid_file.read_text(encoding="utf-8").strip() != "")
+        descendant_pid = int(descendant_pid_file.read_text(encoding="utf-8"))
+        _write_command(control_dir, "cancel-login", cancel_id)
+        _wait_for(lambda: _command_result(status_dir, cancel_id).exists(), timeout=3)
+
+        def descendant_stopped() -> bool:
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        _wait_for(descendant_stopped, timeout=3)
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_supervisor_shutdown_is_bounded_while_protocol_lock_is_contended(
+    supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
+) -> None:
+    control_dir, _status_dir, _state_dir, _command_log, env = supervisor_runtime
+    lock_holder = subprocess.Popen(
+        ["flock", "-x", str(control_dir.parent), "sleep", "10"]
+    )
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        time.sleep(0.2)
+        started = time.monotonic()
+        process.terminate()
+        process.wait(timeout=3)
+        assert time.monotonic() - started < 3
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+        lock_holder.terminate()
+        lock_holder.wait(timeout=3)
+
+
 def test_disconnect_force_kills_term_resistant_daemon_and_releases_protocol_lock(
     supervisor_runtime: tuple[Path, Path, Path, Path, dict[str, str]],
 ) -> None:

@@ -19,6 +19,7 @@ LOCK_ROOT=$(dirname "$CONTROL_DIR")
 POLL_INTERVAL="${TS_POLL_INTERVAL:-2}"
 COMMAND_TIMEOUT="${TS_COMMAND_TIMEOUT:-30}"
 LOGIN_STOP_TIMEOUT="${TS_LOGIN_STOP_TIMEOUT:-5}"
+LOCK_WAIT_TIMEOUT="${TS_LOCK_WAIT_TIMEOUT:-1}"
 LOGIN_RETENTION_SECONDS="${TS_LOGIN_RETENTION_SECONDS:-300}"
 COMPLETED_RETENTION_SECONDS="${TS_COMPLETED_RETENTION_SECONDS:-2592000}"
 COMPLETED_MAX_RECORDS="${TS_COMPLETED_MAX_RECORDS:-4096}"
@@ -56,6 +57,12 @@ case "$LOGIN_STOP_TIMEOUT" in
         exit 1
         ;;
 esac
+case "$LOCK_WAIT_TIMEOUT" in
+    "" | *[!0-9]* | 0)
+        printf '%s\n' "TS_LOCK_WAIT_TIMEOUT must be a positive integer" >&2
+        exit 1
+        ;;
+esac
 
 TAILSCALED_PID=""
 LOGIN_PID=""
@@ -74,11 +81,15 @@ stop_process() {
     [ -n "$process_pid" ] || return 0
     kill -TERM "-$process_pid" 2>/dev/null || kill "$process_pid" 2>/dev/null || true
     if ! timeout -k 1 "$LOGIN_STOP_TIMEOUT" sh -c '
-        while kill -0 "$1" 2>/dev/null; do sleep 0.1; done
+        while kill -0 "-$1" 2>/dev/null; do sleep 0.1; done
     ' sh "$process_pid"; then
         kill -KILL "-$process_pid" 2>/dev/null || kill -KILL "$process_pid" 2>/dev/null || true
     fi
     wait "$process_pid" 2>/dev/null || true
+}
+
+acquire_protocol_lock() {
+    while ! flock -x -w "$LOCK_WAIT_TIMEOUT" 9; do :; done
 }
 
 stop_login() {
@@ -568,7 +579,7 @@ expire_login_artifact() {
 }
 
 start_daemon
-flock -x 9
+acquire_protocol_lock
 recover_disconnect_journals
 recover_operation_records
 flock -u 9
@@ -584,7 +595,7 @@ while :; do
         LOGIN_COMPLETED_AT=$(date +%s)
     fi
     expire_login_artifact
-    flock -x 9
+    acquire_protocol_lock
     consume_results
     recover_disconnect_journals
     recover_operation_records
