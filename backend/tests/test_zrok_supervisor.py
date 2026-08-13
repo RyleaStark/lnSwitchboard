@@ -119,13 +119,65 @@ def test_supervisor_consumes_token_publishes_sanitized_status_and_exits_on_term(
         assert '"https://pay.example"' in payload
         assert not (control / "configure.json").exists()
         active = (_home / ".lnswitchboard-active.json").read_text(encoding="utf-8")
-        assert "do-not-persist" in active
+        assert "do-not-persist" not in active
         assert "sensitive-enrollment-token" not in active
+        assert '"namespace":"public"' in active
+        assert '"name":"pay"' in active
         process.send_signal(signal.SIGTERM)
         assert process.wait(timeout=5) == 0
     finally:
         if process.poll() is None:
             process.kill()
+
+
+def test_refresh_republishes_correlated_status_after_requester_clears_snapshot(runtime) -> None:
+    control, status, _home, _log, env = runtime
+    _configure(control)
+    process = subprocess.Popen([str(SUPERVISOR)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        _wait_for(lambda: (_read_status(status / "status.json") or {}).get("state") == "connected")
+        # Let start_share finish its own acknowledgement check before simulating
+        # the application-side snapshot removal that triggered the live race.
+        time.sleep(1.1)
+        (status / "status.json").unlink()
+        operation_id = "c" * 32
+        (control / "refresh").write_text(operation_id, encoding="ascii")
+
+        _wait_for(
+            lambda: (
+                (_read_status(status / "status.json") or {}).get("operation_id") == operation_id
+            )
+        )
+        refreshed = _read_status(status / "status.json")
+        assert refreshed is not None
+        assert refreshed["state"] == "refresh_complete"
+        assert refreshed["frontend_endpoints"] == ["https://pay.example"]
+        assert refreshed["namespace"] == "public"
+        assert refreshed["name"] == "pay"
+        assert process.poll() is None
+    finally:
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=5)
+
+
+def test_recovery_migrates_legacy_active_state_without_persisting_share_token(runtime) -> None:
+    _control, status, home, _log, env = runtime
+    home.joinpath("enabled").touch()
+    home.joinpath("name").touch()
+    home.joinpath(".lnswitchboard-active.json").write_text(
+        '{"phase":"active","namespace":"public","name":"pay","share_token":"legacy-secret","operation_id":"recovery"}',
+        encoding="utf-8",
+    )
+    process = subprocess.Popen([str(SUPERVISOR)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        _wait_for(lambda: (_read_status(status / "status.json") or {}).get("state") == "connected")
+        active = home.joinpath(".lnswitchboard-active.json").read_text(encoding="utf-8")
+        assert "legacy-secret" not in active
+        assert "share_token" not in active
+        assert '\"frontend_endpoints\":[\"https://pay.example\"]' in active
+    finally:
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=5)
 
 
 def test_supervisor_exits_nonzero_when_share_child_dies(runtime) -> None:

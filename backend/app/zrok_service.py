@@ -9,7 +9,7 @@ import socket
 from urllib.parse import urlsplit
 
 from .connection_store import ConnectionStore, ProviderConnection
-from .zrok_connector import ZrokConnector
+from .zrok_connector import ZrokConnector, ZrokProtocolError
 
 CLOUD_API_ENDPOINT = "https://api-v2.zrok.io"
 _NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -112,14 +112,23 @@ class ZrokService:
                 self.connector.clear_refresh()
                 raise
             status = dict(status)
-            status["state"] = "connected"
             metadata = connection.public_metadata
+            expected_namespace = str(metadata.get("namespace", "public"))
+            expected_name = str(metadata.get("name", ""))
+            if (
+                status.get("namespace") != expected_namespace
+                or status.get("name") != expected_name
+            ):
+                raise ZrokOperationError(
+                    "zrok connector reported a different reserved name"
+                )
+            status["state"] = "connected"
             return self._persist(
                 status,
                 mode=str(metadata.get("mode", "cloud")),
                 endpoint=str(metadata.get("api_endpoint", self.cloud_api_endpoint)),
-                namespace=str(metadata.get("namespace", "public")),
-                name=str(metadata.get("name", "")),
+                namespace=expected_namespace,
+                name=expected_name,
             )
 
     async def disconnect(self, connection_id: str) -> bool:
@@ -195,7 +204,10 @@ class ZrokService:
         self, states: set[str], operation_id: str
     ) -> dict[str, object]:
         deadline = asyncio.get_running_loop().time() + self.operation_timeout_seconds
-        status = self.connector.read_status()
+        try:
+            status = self.connector.read_status()
+        except (OSError, ZrokProtocolError):
+            status = None
         if (
             status is not None
             and status.get("operation_id") == operation_id
@@ -205,7 +217,10 @@ class ZrokService:
                 raise ZrokOperationError("zrok connector operation failed")
             return status
         while asyncio.get_running_loop().time() < deadline:
-            status = self.connector.read_status()
+            try:
+                status = self.connector.read_status()
+            except (OSError, ZrokProtocolError):
+                status = None
             if (
                 status is not None
                 and status.get("operation_id") == operation_id

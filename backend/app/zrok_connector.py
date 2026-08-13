@@ -54,7 +54,6 @@ class ZrokConnector:
 
     def refresh(self) -> str:
         operation_id = uuid.uuid4().hex
-        (self.status_dir / "status.json").unlink(missing_ok=True)
         self._atomic_write(self.control_dir / "refresh", operation_id.encode("ascii"))
         return operation_id
 
