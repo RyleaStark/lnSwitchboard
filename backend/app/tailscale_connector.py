@@ -53,6 +53,8 @@ class TailscaleConnector:
             raise ValueError("unsupported Tailscale operation")
         operation_id = uuid.uuid4().hex
         (self.status_dir / "command.json").unlink(missing_ok=True)
+        for pending_operation in self.supported_operations:
+            (self.control_dir / pending_operation).unlink(missing_ok=True)
         payload = {"operation_id": operation_id, **parameters}
         self._atomic_write(
             self.control_dir / operation,

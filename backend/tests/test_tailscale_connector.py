@@ -62,8 +62,9 @@ def test_connector_emits_only_fixed_atomic_marker_operations(tmp_path: Path) -> 
     connector.enable_funnel(
         external_id="node-123", hostname="lns.example.ts.net"
     )
-    connector.clear_login()
     assert (tmp_path / "control" / "enable").exists()
+    connector.clear_login()
+    assert not (tmp_path / "control" / "enable").exists()
     assert (tmp_path / "control" / "clear-login").exists()
     assert not list((tmp_path / "control").glob("*.tmp.*"))
 
