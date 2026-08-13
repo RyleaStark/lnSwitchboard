@@ -3,7 +3,14 @@ set -euo pipefail
 umask 077
 CONTROL=${ZROK_CONTROL_DIR:-/run/lnswitchboard/control}
 STATUS=${ZROK_STATUS_DIR:-/run/lnswitchboard/status}
-TARGET=${ZROK_TARGET:?ZROK_TARGET must be supplied by the deployment}
+DEP_ENV=$(printf '%s' "${DEP_ENV:-DOCKER}" | tr '[:lower:]' '[:upper:]')
+case "$DEP_ENV" in
+  DOCKER) PUBLIC_HOST=lnswitchboard-public ;;
+  UMBREL) PUBLIC_HOST=lnswitchboard_public ;;
+  UMBREL_DEV) PUBLIC_HOST=extended-umbrella-lnswitchboard_public ;;
+  *) printf '%s\n' "unsupported DEP_ENV" >&2; exit 1 ;;
+esac
+TARGET="http://${PUBLIC_HOST}:21212"
 ACTIVE=${ZROK_ACTIVE_FILE:-$HOME/.lnswitchboard-active.json}
 mkdir -p "$STATUS"
 share_pid=

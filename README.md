@@ -63,7 +63,7 @@ environment:
   LND_READONLY_MACAROON_PATH: /lnd/data/chain/bitcoin/${APP_BITCOIN_NETWORK:-mainnet}/readonly.macaroon
 ```
 
-`DEP_ENV` controls the upstream host shown in the in-app reverse proxy reference. Use `DOCKER` for standalone Compose, `UMBREL` for the Umbrel store app, or `UMBREL-DEV` for the extended Umbrel dev app name.
+`DEP_ENV` is the canonical deployment selector used by the application and connector supervisors. Use `DOCKER` for standalone Compose, `UMBREL` for the Umbrel store app, or `UMBREL_DEV` for Extended Umbrella. Unsupported future environments fail closed until their public service route is defined.
 
 The stack runs the application and Tailscale sidecar as UID/GID `1000:1000`. A network-isolated, capability-minimized one-shot initializer prepares existing `./secrets` and Tailscale volumes for that owner before the application starts; it rejects symlinks rather than traversing them. The application root filesystem is read-only and all durable writes stay under the mounted secrets directory.
 
@@ -81,7 +81,7 @@ The Compose stack also includes a dedicated Tailscale userspace sidecar, pinned 
 
 The runtime starts in Tailscale's `NeedsLogin` state and waits for lnSwitchboard's authenticated lifecycle controller. Authorization is intentionally absent from Compose: no OAuth client, API token, or reusable auth key is accepted through environment variables. Control is restricted to fixed marker operations, and the only user-derived runtime value is a separately validated single-label device name. Normal onboarding deletes authorization output immediately; a five-minute fallback removes it if the application exits before cleanup.
 
-Funnel is hard-coded to public HTTPS port `443` with the local destination `http://127.0.0.1:21212`. Because the sidecar shares only lnSwitchboard's network namespace, this reaches the public application listener and never exposes the administration listener on `22121`. A tailnet must have MagicDNS and HTTPS certificates enabled, and its policy must grant the node (or a tag chosen by the operator) the `funnel` node attribute. The runtime reports missing prerequisites but never modifies tailnet policy.
+Funnel is hard-coded to public HTTPS port `443`; its internal destination is derived only from `DEP_ENV` and always resolves to the secretless public listener on `21212`. It never exposes the administration listener on `22121`. A tailnet must have MagicDNS and HTTPS certificates enabled, and its policy must grant the node (or a tag chosen by the operator) the `funnel` node attribute. The runtime reports missing prerequisites but never modifies tailnet policy.
 
 Open **Connections → Tailscale** from the administration panel to onboard the node. lnSwitchboard supports HTTP or HTTPS administration; the operator is responsible for choosing and securing the administration path. The form then asks only for a device name and suggests `lns` by default; it does not ask for a public domain, OAuth credential, API token, or reusable auth key. Device names are normalized to lowercase and must be a single 1–63 character DNS label containing only letters, numbers, and internal hyphens.
 

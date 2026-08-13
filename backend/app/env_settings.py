@@ -33,7 +33,7 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "label": "Deployment Environment",
         "type": "text",
         "category": "System",
-        "description": "Deployment target used to generate in-app reverse proxy references. Supported values: DOCKER, UMBREL, UMBREL-DEV.",
+        "description": "Deployment target used to generate in-app reverse proxy references. Supported values: DOCKER, UMBREL, UMBREL_DEV.",
         "editable": False,
         "visible": False,
     },

@@ -73,7 +73,7 @@ esac
             "HOME": str(home),
             "ZROK_CONTROL_DIR": str(control),
             "ZROK_STATUS_DIR": str(status),
-            "ZROK_TARGET": "http://test-public:21212",
+            "DEP_ENV": "UMBREL_DEV",
             "ZROK_TEST_LOG": str(log),
             "ZROK_TEST_FAIL_DISABLE": str(tmp_path / "fail-disable"),
             "ZROK_TEST_FAIL_DELETE": str(tmp_path / "fail-delete"),

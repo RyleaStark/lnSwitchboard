@@ -960,7 +960,7 @@ def test_version_includes_deployment_environment(test_client: TestClient, monkey
     config.get_settings.cache_clear()
     response = test_client.get("/api/version")
     assert response.status_code == 200
-    assert response.json()["dep_env"] == "UMBREL-DEV"
+    assert response.json()["dep_env"] == "UMBREL_DEV"
 
 
 def test_env_settings_update(test_client: TestClient):

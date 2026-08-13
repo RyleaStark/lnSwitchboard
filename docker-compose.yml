@@ -1,6 +1,6 @@
 services:
   permissions-init:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc27}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc28}
     container_name: lnswitchboard-permissions-init
     user: "0:0"
     network_mode: none
@@ -24,7 +24,7 @@ services:
     restart: "no"
 
   lnswitchboard:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc27}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc28}
     container_name: lnswitchboard
     restart: unless-stopped
     depends_on:
@@ -61,11 +61,11 @@ services:
       CLOUDFLARE_OAUTH_REDIRECT_LOOPBACK: "${CLOUDFLARE_OAUTH_REDIRECT_LOOPBACK:-http://127.0.0.1:22121/api/cloudflare/oauth/callback}"
       CLOUDFLARE_OAUTH_REDIRECT_PAGE: "${CLOUDFLARE_OAUTH_REDIRECT_PAGE:-https://placeholder.invalid/oauth/callback}"
       TAILSCALE_CONNECTOR_ENABLED: "true"
-      TAILSCALE_PUBLIC_ORIGIN: http://127.0.0.1:21212
+
       TAILSCALE_CONTROL_DIR: /app/secrets/tailscale/control
       TAILSCALE_STATUS_DIR: /app/secrets/tailscale/status
       ZROK_CONNECTOR_ENABLED: "true"
-      ZROK_PUBLIC_ORIGIN: http://public:21212
+
       ZROK_CONTROL_DIR: /app/secrets/zrok/control
       ZROK_STATUS_DIR: /app/secrets/zrok/status
     volumes:
@@ -86,7 +86,7 @@ services:
       default: {}
 
   lnswitchboard-public:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc27}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc28}
     container_name: lnswitchboard-public
     restart: unless-stopped
     depends_on:
@@ -196,7 +196,7 @@ services:
       TS_STATUS_DIR: /run/lnswitchboard/status
       TS_LOGIN_RETENTION_SECONDS: "300"
       TS_NO_LOGS_NO_SUPPORT: "true"
-      TS_FUNNEL_TARGET: http://127.0.0.1:21212
+      DEP_ENV: DOCKER
     volumes:
       - tailscale-state:/var/lib/tailscale
       - tailscale-control:/run/lnswitchboard
@@ -230,7 +230,7 @@ services:
       - no-new-privileges:true
     environment:
       HOME: /var/lib/zrok
-      ZROK_TARGET: http://public:21212
+      DEP_ENV: DOCKER
       ZROK_CONTROL_DIR: /run/lnswitchboard/control
       ZROK_STATUS_DIR: /run/lnswitchboard/status
     volumes:

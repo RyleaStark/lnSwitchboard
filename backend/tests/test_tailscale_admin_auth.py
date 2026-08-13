@@ -47,7 +47,7 @@ def test_tailscale_onboarding_allows_direct_http_admin_access(
 def test_tailscale_onboarding_allows_authenticated_http_umbrel_proxy(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("DEP_ENV", "UMBREL-DEV")
+    monkeypatch.setenv("DEP_ENV", "UMBREL_DEV")
     monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.0.0.2/32")
     monkeypatch.setenv("TRUSTED_HOSTS", "admin.test")
     _reset_settings()

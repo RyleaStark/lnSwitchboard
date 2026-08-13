@@ -11,16 +11,16 @@ export type ProxyHelpItem = {
 }
 
 export function normalizeDeploymentEnv(value?: string | null): DeploymentEnv {
-  const normalized = value?.trim().toUpperCase().replace("_", "-")
-  if (normalized === "UMBREL" || normalized === "UMBREL-DEV") return normalized
+  const normalized = value?.trim().toUpperCase()
+  if (normalized === "UMBREL" || normalized === "UMBREL_DEV") return normalized
   return "DOCKER"
 }
 
 export function proxyHostForDeployment(value?: string | null): string {
   const depEnv = normalizeDeploymentEnv(value)
-  if (depEnv === "UMBREL") return "lnswitchboard_app_1"
-  if (depEnv === "UMBREL-DEV") return "extended-umbrella-lnswitchboard_app_1"
-  return "127.0.0.1"
+  if (depEnv === "UMBREL") return "lnswitchboard_public"
+  if (depEnv === "UMBREL_DEV") return "extended-umbrella-lnswitchboard_public"
+  return "lnswitchboard-public"
 }
 
 export function proxyUpstreamForDeployment(value?: string | null, port = "21212"): string {
