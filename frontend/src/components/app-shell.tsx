@@ -298,8 +298,8 @@ export function AppShell() {
             <ProductFooter versionLabel={versionLabel} compact />
           </SidebarFooter>
         </Sidebar>
-        <SidebarInset className="min-h-0 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
-          <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b bg-background/95 px-4 backdrop-blur md:hidden">
+        <SidebarInset className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <header className="sticky top-0 z-20 flex h-auto min-h-14 items-center justify-between border-b bg-background/95 px-4 pt-2 pb-3 backdrop-blur md:hidden">
             <div className="flex items-center gap-2">
               <SidebarTrigger aria-label="Open navigation">
                 <MenuIcon />

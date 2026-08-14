@@ -85,6 +85,15 @@ describe("AppShell mobile navigation", () => {
     })
   })
 
+  it("keeps bottom breathing room in the compact header and clips horizontal overflow", () => {
+    const { container } = renderAppShell()
+    const header = container.querySelector("header")
+    const inset = container.querySelector('[data-slot="sidebar-inset"]')
+
+    expect(header).toHaveClass("min-h-14", "h-auto", "pt-2", "pb-3")
+    expect(inset).toHaveClass("min-w-0", "overflow-x-hidden")
+  })
+
   it("closes the drawer after selecting a navigation destination", async () => {
     const user = userEvent.setup()
     renderAppShell()
