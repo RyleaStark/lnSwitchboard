@@ -567,6 +567,17 @@ class TailscaleService:
                         return
                     if time.monotonic() < flow.expires_at:
                         continue
+                    if flow.authenticated and any(
+                        connection.provider == "tailscale"
+                        for connection in self.store.list_connections()
+                    ):
+                        # Authentication is terminal once the runtime identity is
+                        # durably registered. Expiring the browser flow must not
+                        # call `tailscale logout`, which revokes the freshly
+                        # approved node key while the user finishes tailnet
+                        # prerequisites in the admin console.
+                        self._forget_flow(flow_id)
+                        return
                     try:
                         await self._cleanup_flow(flow_id, flow)
                         return
