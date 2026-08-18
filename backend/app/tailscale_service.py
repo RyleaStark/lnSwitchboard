@@ -25,6 +25,22 @@ _TAILNET_LOCKED_OUT_HEALTH = (
     "this node is locked out; it will not have connectivity until it is signed. "
     "For more info, see https://tailscale.com/s/locked-out"
 )
+_NONBLOCKING_HEALTH = {
+    "Some peers are advertising routes but --accept-routes is false",
+}
+
+
+def _blocking_health_warnings(status: Mapping[str, Any]) -> list[str]:
+    health = status.get("Health")
+    if not isinstance(health, list):
+        return []
+    return [
+        item
+        for item in health
+        if isinstance(item, str)
+        and item != _TAILNET_LOCKED_OUT_HEALTH
+        and item not in _NONBLOCKING_HEALTH
+    ]
 
 
 def tailscale_approval_requirement(
@@ -46,9 +62,25 @@ def tailscale_approval_requirement(
     messages = [item for item in health if isinstance(item, str)]
     if _TAILNET_LOCKED_OUT_HEALTH in messages:
         return "tailnet_lock"
-    if any("user" in item.casefold() and "approval" in item.casefold() for item in messages):
-        return "user"
     return None
+
+
+def _node_key_expired(self_status: Mapping[str, Any]) -> bool:
+    if self_status.get("Expired") is True:
+        return True
+    raw_expiry = self_status.get("KeyExpiry")
+    if not isinstance(raw_expiry, str) or not raw_expiry:
+        return False
+    try:
+        expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return expiry.year > 1 and expiry <= datetime.now(timezone.utc)
+
+
+def _status_key_expired(status: Mapping[str, Any]) -> bool:
+    self_status = status.get("Self")
+    return isinstance(self_status, Mapping) and _node_key_expired(self_status)
 
 
 def key_expiry_metadata(self_status: Mapping[str, Any]) -> dict[str, object]:
@@ -100,6 +132,8 @@ class _LoginFlow:
     expires_at: float
     auth_url: str | None = None
     authenticated: bool = False
+    external_id: str | None = None
+    hostname: str | None = None
 
 
 def normalize_device_name(value: str | None) -> str:
@@ -485,6 +519,20 @@ class TailscaleService:
             raise TailscaleOperationError("Tailscale status is missing node identity")
         return external_id, hostname
 
+    def _bind_flow_identity(
+        self, flow: _LoginFlow, status: Mapping[str, Any]
+    ) -> tuple[str, str]:
+        external_id, raw_hostname = self._runtime_identity(status)
+        hostname = validate_tailscale_hostname(raw_hostname)
+        if flow.external_id is None and flow.hostname is None:
+            flow.external_id = external_id
+            flow.hostname = hostname
+        elif (flow.external_id, flow.hostname) != (external_id, hostname):
+            raise TailscaleOperationError(
+                "Tailscale runtime identity changed during registration"
+            )
+        return external_id, hostname
+
     def _require_matching_runtime_identity(
         self,
         connection: ProviderConnection,
@@ -535,7 +583,13 @@ class TailscaleService:
 
     async def _cleanup_flow(self, flow_id: str, flow: _LoginFlow) -> None:
         if flow.authenticated:
-            external_id, hostname = self._runtime_identity()
+            status = self._node_status()
+            try:
+                external_id, hostname = self._bind_flow_identity(flow, status)
+            except (TailscaleValidationError, TailscaleOperationError) as exc:
+                raise TailscaleOperationError(
+                    "Unable to verify the exact Tailscale registration before cleanup"
+                ) from exc
             await self._disconnect_authenticated_runtime(
                 external_id=external_id, hostname=hostname
             )
@@ -734,7 +788,16 @@ class TailscaleService:
         approval_kind = self._approval_kind(status)
         if approval_kind is None:
             return None
-        return {
+        connection: ProviderConnection | None = None
+        if approval_kind in {"device", "tailnet_lock"}:
+            try:
+                connection = self._register_approval_connection(
+                    status, flow, approval_kind
+                )
+            except (TailscaleOperationError, TailscaleValidationError):
+                if flow.external_id is not None or flow.hostname is not None:
+                    raise
+        response: dict[str, object] = {
             "state": "approval_required",
             "approval_kind": approval_kind,
             "device_name": flow.device_name,
@@ -742,6 +805,9 @@ class TailscaleService:
                 0, int(flow.expires_at - time.monotonic())
             ),
         }
+        if connection is not None:
+            response["connection"] = asdict(connection)
+        return response
 
     async def _finalize_authenticated_state(
         self, flow: _LoginFlow, backend_state: str
@@ -887,12 +953,29 @@ class TailscaleService:
         if not isinstance(self_status, Mapping):
             raise TailscaleOperationError("Tailscale status is missing node identity")
         try:
-            hostname = validate_tailscale_hostname(self_status.get("DNSName"))
-        except TailscaleValidationError as exc:
-            raise TailscaleOperationError(
+            external_id, hostname = self._bind_flow_identity(flow, status)
+        except (TailscaleValidationError, TailscaleOperationError) as exc:
+            message = (
                 "Tailscale returned an invalid authoritative hostname"
-            ) from exc
+                if isinstance(exc, TailscaleValidationError)
+                else str(exc)
+            )
+            raise _TailscaleApprovalStatusError(message) from exc
+        existing_connections = [
+            item
+            for item in self.store.list_connections()
+            if item.provider == "tailscale"
+        ]
+        if any(
+            self._stored_identity(item) != (external_id, hostname)
+            for item in existing_connections
+        ):
+            raise _TailscaleApprovalStatusError(
+                "Tailscale runtime identity does not match pending registration"
+            )
         missing = prerequisite_failures(status)
+        if _status_key_expired(status) or _blocking_health_warnings(status):
+            missing.append("tailnet_review")
         if missing:
             if preserve_existing_on_prerequisite_failure:
                 raise TailscaleOperationError(
@@ -919,11 +1002,6 @@ class TailscaleService:
             }
 
         try:
-            external_id = str(
-                self_status.get("ID") or self_status.get("PublicKey") or ""
-            ).strip()
-            if not external_id:
-                raise TailscaleOperationError("Tailscale status is missing node identity")
             operation_id = self.connector.enable_funnel(
                 external_id=external_id, hostname=hostname
             )
@@ -967,6 +1045,38 @@ class TailscaleService:
             await self._sleep()
         raise TailscaleOperationError("Tailscale Funnel status did not reconcile")
 
+    def _register_approval_connection(
+        self,
+        status: Mapping[str, Any],
+        flow: _LoginFlow,
+        approval_kind: str,
+    ) -> ProviderConnection:
+        external_id, hostname = self._bind_flow_identity(flow, status)
+        messages = {
+            "device": "Waiting for Tailscale device approval",
+            "tailnet_lock": "Waiting for a Tailnet Lock signature",
+        }
+        connection = self.store.upsert_connection(
+            provider="tailscale",
+            external_id=external_id,
+            label="Tailscale Funnel",
+            status="authorizing",
+            public_metadata={
+                "device_name": flow.device_name,
+                "origin": self.public_origin,
+                "onboarding_state": approval_kind,
+            },
+            last_error=messages.get(approval_kind, "Waiting for Tailscale approval"),
+        )
+        self.store.replace_domains(
+            connection.id,
+            [{"hostname": hostname, "status": "pending"}],
+        )
+        registered = self.store.get_connection(connection.id)
+        if registered is None:
+            raise TailscaleOperationError("Tailscale approval registration failed")
+        return registered
+
     def _register_prerequisite_connection(
         self,
         status: Mapping[str, Any],
@@ -984,8 +1094,14 @@ class TailscaleService:
             provider="tailscale",
             external_id=external_id,
             label="Tailscale Funnel",
-            status="error",
-            public_metadata={"device_name": device_name, "origin": self.public_origin, **key_expiry_metadata(self_status)},
+            status="provisioning",
+            public_metadata={
+                "device_name": device_name,
+                "origin": self.public_origin,
+                "onboarding_state": "prerequisites",
+                "missing_prerequisites": missing,
+                **key_expiry_metadata(self_status),
+            },
             last_error="Missing Tailscale prerequisites: " + ", ".join(missing),
         )
         self.store.replace_domains(
@@ -993,7 +1109,7 @@ class TailscaleService:
             [
                 {
                     "hostname": hostname,
-                    "status": "error",
+                    "status": "pending",
                     "last_error": connection.last_error,
                 }
             ],
@@ -1040,9 +1156,9 @@ class TailscaleService:
             raise TailscaleOperationError("Tailscale device is waiting for administrator approval")
         if approval_kind == "tailnet_lock":
             raise TailscaleOperationError("Tailscale device is waiting for a Tailnet Lock signature")
-        if approval_kind == "user":
-            raise TailscaleOperationError("Tailscale user is waiting for administrator approval")
         missing = prerequisite_failures(status)
+        if _status_key_expired(status) or _blocking_health_warnings(status):
+            missing.append("tailnet_review")
         if missing:
             raise TailscaleOperationError(
                 "Tailscale status is missing required Funnel prerequisites"
@@ -1061,6 +1177,40 @@ class TailscaleService:
                 return connection
             await self._sleep()
         raise TailscaleOperationError("Tailscale Funnel status did not reconcile")
+
+    async def continue_setup(self, connection_id: str) -> dict[str, object]:
+        self._require_available()
+        async with self._lock:
+            existing = self.store.get_connection(connection_id)
+            if existing is None or existing.provider != "tailscale":
+                raise TailscaleNotFoundError("Tailscale connection was not found")
+            status = self.connector.read_node_status()
+            if status is None:
+                raise _TailscaleApprovalStatusError(
+                    "Tailscale approval status is temporarily unavailable"
+                )
+            backend_state = status.get("BackendState")
+            if backend_state not in {"Running", "NeedsMachineAuth"}:
+                raise TailscaleOperationError(
+                    "Tailscale registration is not ready to continue"
+                )
+            external_id, hostname = self._stored_identity(existing)
+            flow = _LoginFlow(
+                device_name=normalize_device_name(
+                    str(existing.public_metadata.get("device_name") or DEFAULT_DEVICE_NAME)
+                ),
+                expires_at=time.monotonic() + self.login_ttl_seconds,
+                authenticated=True,
+                external_id=external_id,
+                hostname=hostname,
+            )
+            result = await self._finalize_authenticated_state(flow, backend_state)
+            if result.get("state") == "connected":
+                return result
+            current = self.store.get_connection(connection_id)
+            if current is not None:
+                result["connection"] = asdict(current)
+            return result
 
     async def refresh(self, connection_id: str) -> ProviderConnection:
         self._require_available()
@@ -1105,7 +1255,7 @@ class TailscaleService:
                 if has_artifact:
                     await self._cancel_pending_login()
                 return
-            if backend_state != "Running":
+            if backend_state not in {"Running", "NeedsMachineAuth"}:
                 return
             self_status = status.get("Self")
             if not isinstance(self_status, Mapping):
@@ -1126,6 +1276,7 @@ class TailscaleService:
                 )
                 if existing is not None:
                     self._require_matching_runtime_identity(existing, status)
+                    flow.external_id, flow.hostname = self._stored_identity(existing)
                 stored_name = (
                     existing.public_metadata.get("device_name") if existing else None
                 )
@@ -1137,13 +1288,13 @@ class TailscaleService:
                         or dns_name.split(".", 1)[0]
                     )
                 )
-                if existing is not None:
+                if existing is not None and existing.status == "connected":
                     hostname = validate_tailscale_hostname(self_status.get("DNSName"))
                     await self._observe_existing_funnel(
                         existing, status, flow.device_name, hostname
                     )
                 else:
-                    await self._finalize_authenticated_state(flow, "Running")
+                    await self._finalize_authenticated_state(flow, backend_state)
             except (TailscaleServiceError, TailscaleProtocolError):
                 raise
             except Exception as exc:

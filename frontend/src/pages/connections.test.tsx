@@ -31,6 +31,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
     beginTailscaleLogin: vi.fn(),
     tailscaleLoginStatus: vi.fn(),
     cancelTailscaleLogin: vi.fn(),
+    continueTailscaleSetup: vi.fn(),
     refreshTailscaleStatus: vi.fn(),
     disconnectTailscale: vi.fn(),
     zrokSetup: vi.fn(),
@@ -616,7 +617,7 @@ test("opens the transient Tailscale login link and QR without query or browser s
     "src",
     expect.stringMatching(/^data:image\/svg\+xml/),
   )
-  expect(screen.getByText(/approve this lnSwitchboard device/)).toBeVisible()
+  expect(screen.getByText(/separate administrator approval or Tailnet Lock signing/)).toBeVisible()
   expect(document.body).not.toHaveTextContent(/dedicated node/i)
   expect(client.getMutationCache().getAll()).toHaveLength(0)
   expect(window.localStorage?.length ?? 0).toBe(0)
@@ -834,7 +835,6 @@ test("explains that Tailscale onboarding needs its connector", async () => {
 test.each([
   ["device", "Approve this Tailscale device", /Machines page.*approve the device/i],
   ["tailnet_lock", "Sign this Tailscale device", /trusted Tailnet Lock signing device/i],
-  ["user", "Approve the Tailscale user", /User management.*approve the user/i],
 ] as const)("shows the %s approval gate without offering self-approval", async (approvalKind, heading, guidance) => {
   const user = userEvent.setup()
   vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
@@ -853,6 +853,53 @@ test.each([
   expect(screen.getByRole("button", { name: "Check approval" })).toBeEnabled()
   expect(screen.queryByRole("button", { name: /approve|sign/i })).not.toBeInTheDocument()
   expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
+})
+
+
+test("restores and polls durable device approval after cookie or process loss", async () => {
+  const pending = {
+    id: "ts-pending",
+    provider: "tailscale",
+    label: "Tailscale Funnel",
+    status: "authorizing",
+    last_error: "Waiting for Tailscale device approval",
+    external_id: "node-123",
+    account_id: null,
+    public_metadata: {
+      device_name: "lns",
+      origin: "http://127.0.0.1:21212",
+      onboarding_state: "device",
+    },
+    domains: [{
+      hostname: "lns.example.ts.net",
+      status: "pending",
+      external_id: null,
+      zone_id: null,
+      last_error: null,
+    }],
+    created_at: "2026-08-18T00:00:00Z",
+    updated_at: "2026-08-18T00:00:00Z",
+  } satisfies ProviderConnection
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "tailscale", name: "Tailscale Funnel", capability: "available", reason: null },
+    ],
+    connections: [pending],
+  })
+  vi.mocked(api.continueTailscaleSetup).mockResolvedValue({
+    state: "approval_required",
+    approval_kind: "device",
+    device_name: "lns",
+    connection: pending,
+  })
+
+  renderPage("/connections/tailscale/")
+
+  expect(await screen.findByRole("heading", { name: "Approve this Tailscale device" })).toBeVisible()
+  expect(screen.queryByText(/login expired/i)).not.toBeInTheDocument()
+  await waitFor(() => expect(vi.mocked(api.continueTailscaleSetup).mock.calls[0]?.[0]).toBe("ts-pending"), {
+    timeout: 3_000,
+  })
 })
 
 

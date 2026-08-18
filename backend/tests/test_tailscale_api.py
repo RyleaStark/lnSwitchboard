@@ -57,6 +57,14 @@ class FakeTailscaleService:
         self.flow_ids.append(flow_id)
         return True
 
+    async def continue_setup(self, connection_id):
+        return {
+            "state": "approval_required",
+            "approval_kind": "device",
+            "device_name": "lns",
+            "connection": {"id": connection_id},
+        }
+
     async def disconnect(self, connection_id):
         self.disconnected.append(connection_id)
         return True
@@ -130,6 +138,26 @@ def test_tailscale_login_request_accepts_only_bounded_device_name(test_client) -
     assert extra.status_code == 422
     assert oversized.status_code == 422
     assert service.device_names == []
+
+
+def test_tailscale_continue_setup_uses_durable_connection_without_flow_cookie(
+    test_client,
+) -> None:
+    service = FakeTailscaleService()
+    admin_app.dependency_overrides[deps.get_tailscale_service_dep] = lambda: service
+    try:
+        response = test_client.post(
+            "/api/connections/tailscale/connection-123/continue"
+        )
+    finally:
+        admin_app.dependency_overrides.pop(deps.get_tailscale_service_dep, None)
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "approval_required"
+    assert response.json()["connection"] == {"id": "connection-123"}
+    assert response.headers["cache-control"] == "no-store, private"
+    assert "auth_url" not in response.text
+    assert "flow" not in response.text
 
 
 def test_tailscale_disconnect_deletes_only_after_service_success(test_client) -> None:

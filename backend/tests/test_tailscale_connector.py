@@ -67,6 +67,24 @@ def test_connector_reads_tailnet_lock_status_from_bounded_private_snapshot(
     }
 
 
+def test_connector_has_no_self_approval_or_tailnet_lock_signing_operation(
+    tmp_path: Path,
+) -> None:
+    connector = _connector(tmp_path)
+    assert set(connector.supported_operations) == {
+        "begin_login",
+        "cancel_login",
+        "clear_login",
+        "enable",
+        "disable",
+        "disconnect",
+    }
+    with pytest.raises(ValueError, match="unsupported"):
+        connector._mark("approve")
+    with pytest.raises(ValueError, match="unsupported"):
+        connector._mark("lock_sign")
+
+
 def test_connector_emits_immutable_operation_id_commands_without_overwrite(
     tmp_path: Path,
 ) -> None:

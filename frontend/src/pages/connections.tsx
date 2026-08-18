@@ -532,9 +532,11 @@ function TailscaleConnectionsPage() {
         return
       }
       setLogin(result)
-      if (result.state === "connected") {
+      if (result.state === "connected" || result.state === "approval_required" || result.state === "prerequisites_required") {
         setQrCode(null)
         await queryClient.invalidateQueries({ queryKey: ["connections"] })
+      }
+      if (result.state === "connected") {
         toast.success("Tailscale Funnel connected")
       }
     },
@@ -647,6 +649,10 @@ function TailscaleConnectionsPage() {
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["connections"] }),
     onError: (error) => handleManagementError(error, "Status refresh failed"),
   })
+  const continueSetup = useMutation({
+    mutationFn: api.continueTailscaleSetup,
+    onSuccess: applyLoginResult,
+  })
   const disconnect = useMutation({
     mutationFn: api.disconnectTailscale,
     onSuccess: async () => {
@@ -655,6 +661,20 @@ function TailscaleConnectionsPage() {
     },
     onError: (error) => handleManagementError(error, "Disconnect failed"),
   })
+
+  const onboardingState = connection?.public_metadata.onboarding_state
+  useEffect(() => {
+    if (
+      !connection ||
+      !available ||
+      continueSetup.isPending ||
+      (onboardingState !== "device" &&
+        onboardingState !== "tailnet_lock" &&
+        onboardingState !== "prerequisites")
+    ) return
+    const timeout = window.setTimeout(() => continueSetup.mutate(connection.id), 2_000)
+    return () => window.clearTimeout(timeout)
+  }, [available, connection, continueSetup, onboardingState])
 
   if (connections.isPending || (providerAvailable && setup.isPending)) {
     return <ConnectionsSkeleton />
@@ -694,8 +714,10 @@ function TailscaleConnectionsPage() {
               connection={connection}
               refreshing={refresh.isPending}
               disconnecting={disconnect.isPending}
+              continuing={continueSetup.isPending}
               managementDisabled={!available}
               onRefresh={() => refresh.mutate(connection.id)}
+              onContinue={() => continueSetup.mutate(connection.id)}
               onDisconnect={() => disconnect.mutate(connection.id)}
             />
           ) : login?.state === "needs_login" && login.auth_url ? (
@@ -788,7 +810,7 @@ function TailscaleLoginPrompt({
         <div>
           <h3 className="font-medium">Finish login in Tailscale</h3>
           <p className="mt-1 max-w-xl text-sm leading-normal text-pretty text-muted-foreground">
-            Open the one-time login page or scan the QR code, sign in, and approve this lnSwitchboard device. This page checks automatically.
+            Open the one-time login page or scan the QR code and sign in to Tailscale. Some tailnets require separate administrator approval or Tailnet Lock signing afterward. This page checks automatically.
           </p>
         </div>
         <a
@@ -829,10 +851,6 @@ const approvalContent = {
     title: "Sign this Tailscale device",
     description: "Use a trusted Tailnet Lock signing device to sign this new node from the Tailscale Machines page. lnSwitchboard cannot sign or approve itself.",
   },
-  user: {
-    title: "Approve the Tailscale user",
-    description: "Open Tailscale User management and have an Owner or Admin approve the user. lnSwitchboard will continue automatically after approval.",
-  },
 } as const
 
 function TailscaleApproval({
@@ -868,6 +886,7 @@ const prerequisiteLabels: Record<string, string> = {
   https_certificates: "Enable HTTPS certificates for this device's Tailscale address.",
   funnel_node_attribute: "Allow this device to use Tailscale Funnel.",
   funnel_port_443: "Allow Funnel on HTTPS port 443.",
+  tailnet_review: "Review Tailscale Machines and User management for a pending approval or health warning.",
 }
 
 function TailscalePrerequisites({
@@ -915,18 +934,47 @@ function ConnectedTailscale({
   connection,
   refreshing,
   disconnecting,
+  continuing,
   managementDisabled,
   onRefresh,
+  onContinue,
   onDisconnect,
 }: {
   connection: ProviderConnection
   refreshing: boolean
   disconnecting: boolean
+  continuing: boolean
   managementDisabled: boolean
   onRefresh: () => void
+  onContinue: () => void
   onDisconnect: () => void
 }) {
   const disabled = managementDisabled || refreshing || disconnecting
+  const onboardingState = connection.public_metadata.onboarding_state
+  if (onboardingState === "device" || onboardingState === "tailnet_lock") {
+    return (
+      <TailscaleApproval
+        kind={onboardingState}
+        checking={continuing}
+        onCheck={onContinue}
+      />
+    )
+  }
+  if (onboardingState === "prerequisites") {
+    const missing = Array.isArray(connection.public_metadata.missing_prerequisites)
+      ? connection.public_metadata.missing_prerequisites.filter((item): item is string => typeof item === "string")
+      : []
+    return (
+      <TailscalePrerequisites
+        hostname={connection.domains[0]?.hostname ?? "Tailscale hostname unavailable"}
+        missing={missing}
+        checking={continuing}
+        cancelling={disconnecting}
+        onCheck={onContinue}
+        onCancel={onDisconnect}
+      />
+    )
+  }
   const keyExpiryEnabled = connection.public_metadata.key_expiry_enabled === true
   const keyExpiryDays = connection.public_metadata.key_expiry_days_remaining
   const daysRemaining = typeof keyExpiryDays === "number" && Number.isFinite(keyExpiryDays) ? Math.max(0, Math.ceil(keyExpiryDays)) : null
