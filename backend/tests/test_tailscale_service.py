@@ -541,6 +541,38 @@ def test_cancel_prerequisite_flow_removes_persisted_error_connection(
     assert ("disconnect", None) in connector.calls
 
 
+def test_authenticated_expiry_finishes_registration_after_client_poll_disappears(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    connector.node_status["CurrentTailnet"]["MagicDNSEnabled"] = False
+    connector.node_status["Self"]["CapMap"] = {}
+    connector.node_status["CertDomains"] = []
+    service = TailscaleService(
+        connector=connector,
+        store=ConnectionStore(tmp_path / "connections.db"),
+        connector_enabled=True,
+        poll_interval_seconds=0,
+        operation_timeout_seconds=0.1,
+        login_ttl_seconds=0.01,
+    )
+
+    async def scenario() -> None:
+        flow_id, _ = await service.begin_login("lns")
+        connector.records.append({"BackendState": "Running"})
+        service._login_snapshot(service._flows[flow_id])
+        await asyncio.sleep(0.03)
+
+    asyncio.run(scenario())
+    assert ("disconnect", None) not in connector.calls
+    assert ("disable", None) in connector.calls
+    persisted = service.store.list_connections()
+    assert len(persisted) == 1
+    assert persisted[0].external_id == "node-123"
+    assert persisted[0].status == "error"
+
+
 def test_authenticated_prerequisite_flow_expiry_preserves_registered_node(
     tmp_path: Path,
 ) -> None:

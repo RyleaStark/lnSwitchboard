@@ -567,15 +567,27 @@ class TailscaleService:
                         return
                     if time.monotonic() < flow.expires_at:
                         continue
-                    if flow.authenticated and any(
-                        connection.provider == "tailscale"
-                        for connection in self.store.list_connections()
-                    ):
-                        # Authentication is terminal once the runtime identity is
-                        # durably registered. Expiring the browser flow must not
-                        # call `tailscale logout`, which revokes the freshly
-                        # approved node key while the user finishes tailnet
-                        # prerequisites in the admin console.
+                    if flow.authenticated:
+                        if any(
+                            connection.provider == "tailscale"
+                            for connection in self.store.list_connections()
+                        ):
+                            # The authenticated runtime already has durable
+                            # registry ownership. Expiring only the browser flow
+                            # must not revoke that node.
+                            self._forget_flow(flow_id)
+                            return
+                        try:
+                            # A client can disappear after status first reports
+                            # Running but before its request finishes registration.
+                            # Complete that transition from the background flow
+                            # instead of turning browser expiry into provider logout.
+                            await self._finalize_running(flow)
+                        except (TailscaleServiceError, TailscaleProtocolError):
+                            flow.expires_at = time.monotonic() + max(
+                                0.1, self.poll_interval_seconds
+                            )
+                            continue
                         self._forget_flow(flow_id)
                         return
                     try:
