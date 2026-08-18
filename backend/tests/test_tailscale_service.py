@@ -12,6 +12,7 @@ from backend.app.tailscale_service import (
     TailscaleOperationError,
     TailscaleService,
     TailscaleValidationError,
+    tailscale_approval_requirement,
     normalize_device_name,
     prerequisite_failures,
     validate_tailscale_hostname,
@@ -111,6 +112,32 @@ def test_prerequisites_accept_port_443_inside_capability_range() -> None:
     assert prerequisite_failures(status) == []
 
 
+def test_approval_requirement_distinguishes_device_tailnet_lock_and_user() -> None:
+    assert tailscale_approval_requirement(
+        {"BackendState": "NeedsMachineAuth"}, None
+    ) == "device"
+
+    status = _status(Health=[])
+    assert tailscale_approval_requirement(
+        status, {"Enabled": True, "NodeKeySigned": False, "NodeKeyPresent": True, "PublicKeyPresent": True}
+    ) == "tailnet_lock"
+    assert tailscale_approval_requirement(
+        status, {"Enabled": True, "NodeKeySigned": "unknown"}
+    ) is None
+    assert tailscale_approval_requirement(
+        _status(
+            Health=[
+                "this node is locked out; it will not have connectivity until it is signed. For more info, see https://tailscale.com/s/locked-out"
+            ]
+        ),
+        None,
+    ) == "tailnet_lock"
+    assert tailscale_approval_requirement(
+        _status(Health=[]), {"Enabled": True, "NodeKeySigned": True, "NodeKeyPresent": True, "PublicKeyPresent": True}
+    ) is None
+    assert tailscale_approval_requirement(_status(Health="invalid"), None) is None
+
+
 def test_funnel_status_requires_correlated_hostname_root_proxy_and_funnel() -> None:
     hostname = "lns.example.ts.net"
     host_port = f"{hostname}:443"
@@ -161,6 +188,7 @@ class FakeTailscaleConnector:
             },
             "AllowFunnel": {"lns.example.ts.net:443": True},
         }
+        self.lock_status: dict[str, object] | None = {"Enabled": False}
         self.command_status: dict[str, str] | None = None
         self.calls: list[tuple[str, str | None]] = []
         self.consumed_operation_ids: list[str] = []
@@ -171,6 +199,7 @@ class FakeTailscaleConnector:
         self.node_status_missing = False
         self.command_protocol_error = False
         self.funnel_status_error = False
+        self.lock_protocol_error = False
         self.begin_error = False
         self.login_artifact = True
 
@@ -263,6 +292,11 @@ class FakeTailscaleConnector:
             raise OSError("synthetic Funnel status failure")
         return self.funnel_status
 
+    def read_lock_status(self):
+        if self.lock_protocol_error:
+            raise TailscaleProtocolError("synthetic malformed lock status")
+        return self.lock_status
+
     def read_command_status(self, operation_id: str):
         if self.command_protocol_error:
             raise TailscaleProtocolError("synthetic malformed command acknowledgement")
@@ -296,6 +330,26 @@ def _service(tmp_path: Path, connector: FakeTailscaleConnector) -> TailscaleServ
         operation_timeout_seconds=0.1,
         login_ttl_seconds=300,
     )
+
+
+def test_unknown_health_warning_blocks_funnel_without_guessing_user_approval(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    connector.node_status["Health"] = ["provider-controlled warning"]
+    service = _service(tmp_path, connector)
+    flow_id, _ = asyncio.run(service.begin_login("lns"))
+    connector.records.append({"BackendState": "Running"})
+
+    response = asyncio.run(service.poll_login(flow_id))
+
+    assert response["state"] == "prerequisites_required"
+    assert "tailnet_review" in response["missing_prerequisites"]
+    assert ("enable", None) not in connector.calls
+    pending = service.store.list_connections()[0]
+    assert pending.status == "provisioning"
+    assert pending.public_metadata["onboarding_state"] == "prerequisites"
 
 
 def test_begin_login_defaults_to_lns_and_returns_only_valid_transient_url(
@@ -367,7 +421,7 @@ def test_failed_begin_does_not_leak_flow_or_expiry_task(tmp_path: Path) -> None:
     assert service._expiry_tasks == {}
 
 
-def test_provider_invalid_hostname_disconnects_and_forgets_flow(tmp_path: Path) -> None:
+def test_provider_invalid_hostname_preserves_authenticated_flow(tmp_path: Path) -> None:
     connector = FakeTailscaleConnector()
     connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
     service = _service(tmp_path, connector)
@@ -378,9 +432,9 @@ def test_provider_invalid_hostname_disconnects_and_forgets_flow(tmp_path: Path) 
     with pytest.raises(TailscaleOperationError, match="hostname"):
         asyncio.run(service.poll_login(flow_id))
 
-    assert flow_id not in service._flows
-    assert ("disconnect", None) in connector.calls
-    assert connector.login_artifact is False
+    assert flow_id in service._flows
+    assert ("disconnect", None) not in connector.calls
+    assert connector.login_artifact is True
 
 
 def test_poll_login_registers_only_authoritative_hostname_after_prerequisites(
@@ -410,6 +464,241 @@ def test_poll_login_registers_only_authoritative_hostname_after_prerequisites(
         ("clear_login", None)
     )
     assert "AuthURL" not in str(connection)
+
+
+def test_authenticated_flow_observes_provider_needs_login_without_logout(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    service = _service(tmp_path, connector)
+    flow_id, _ = asyncio.run(service.begin_login("lns"))
+    service._flows[flow_id].authenticated = True
+    service._flows[flow_id].auth_url = None
+    connector.records = []
+    connector.node_status = {"BackendState": "NeedsLogin", "Self": {"DNSName": ""}}
+
+    response = asyncio.run(service.poll_login(flow_id))
+
+    assert response["state"] == "expired"
+    assert flow_id not in service._flows
+    assert ("disconnect", None) not in connector.calls
+
+
+@pytest.mark.parametrize("failure", ["missing_node", "malformed_lock"])
+def test_authenticated_approval_status_failure_preserves_flow_and_node(
+    tmp_path: Path, failure: str
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    service = _service(tmp_path, connector)
+    flow_id, _ = asyncio.run(service.begin_login("lns"))
+    connector.records.append({"BackendState": "Running"})
+    if failure == "missing_node":
+        connector.node_status_missing = True
+    else:
+        connector.lock_protocol_error = True
+
+    with pytest.raises(TailscaleOperationError, match="approval status"):
+        asyncio.run(service.poll_login(flow_id))
+
+    assert flow_id in service._flows
+    assert ("enable", None) not in connector.calls
+    assert ("disable", None) not in connector.calls
+    assert ("disconnect", None) not in connector.calls
+
+
+def test_begin_login_resumes_existing_device_approval_after_restart(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"BackendState": "NeedsMachineAuth"}]
+    connector.node_status["BackendState"] = "NeedsMachineAuth"
+    service = _service(tmp_path, connector)
+
+    flow_id, response = asyncio.run(service.begin_login("lns"))
+
+    assert flow_id in service._flows
+    assert response["state"] == "approval_required"
+    assert response["approval_kind"] == "device"
+    assert ("disconnect", None) not in connector.calls
+
+
+def test_device_approval_waits_without_revoking_and_then_connects(tmp_path: Path) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    service = TailscaleService(
+        connector=connector,
+        store=ConnectionStore(tmp_path / "connections.db"),
+        connector_enabled=True,
+        poll_interval_seconds=0,
+        operation_timeout_seconds=0.1,
+        login_ttl_seconds=0.01,
+    )
+
+    async def scenario() -> None:
+        flow_id, _ = await service.begin_login("lns")
+        connector.records.append({"BackendState": "NeedsMachineAuth"})
+        waiting = await service.poll_login(flow_id)
+        assert waiting["state"] == "approval_required"
+        assert waiting["approval_kind"] == "device"
+        await asyncio.sleep(0.03)
+        assert flow_id in service._flows
+        assert ("disconnect", None) not in connector.calls
+
+        connector.records = []
+        connector.node_status["BackendState"] = "NeedsMachineAuth"
+        still_waiting = await service.poll_login(flow_id)
+        assert still_waiting["state"] == "approval_required"
+        assert still_waiting["approval_kind"] == "device"
+
+        connector.node_status["BackendState"] = "Running"
+        connector.records.append({"BackendState": "Running"})
+        connected = await service.poll_login(flow_id)
+        assert connected["state"] == "connected"
+
+    asyncio.run(scenario())
+    assert ("enable", None) in connector.calls
+    assert ("disconnect", None) not in connector.calls
+
+
+def test_pending_approval_rejects_runtime_identity_replacement(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    connector.node_status["BackendState"] = "NeedsMachineAuth"
+    service = _service(tmp_path, connector)
+    flow_id, _ = asyncio.run(service.begin_login("lns"))
+    connector.records.append({"BackendState": "NeedsMachineAuth"})
+    waiting = asyncio.run(service.poll_login(flow_id))
+    assert waiting["state"] == "approval_required"
+    assert len(service.store.list_connections()) == 1
+
+    connector.node_status = _status()
+    connector.node_status["Self"]["ID"] = "node-456"
+    connector.node_status["Self"]["DNSName"] = "other.example.ts.net."
+    connector.node_status["CertDomains"] = ["other.example.ts.net"]
+    connector.records.append({"BackendState": "Running"})
+
+    with pytest.raises(TailscaleOperationError, match="identity changed|does not match"):
+        asyncio.run(service.poll_login(flow_id))
+    with pytest.raises(TailscaleOperationError, match="exact Tailscale registration"):
+        asyncio.run(service.cancel_login(flow_id))
+
+    persisted = service.store.list_connections()
+    assert len(persisted) == 1
+    assert persisted[0].external_id == "node-123"
+    assert ("enable", None) not in connector.calls
+    assert ("disconnect", None) not in connector.calls
+
+
+def test_durable_device_approval_continues_after_flow_loss(tmp_path: Path) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    connector.node_status["BackendState"] = "NeedsMachineAuth"
+    service = _service(tmp_path, connector)
+    flow_id, _ = asyncio.run(service.begin_login("lns"))
+    connector.records.append({"BackendState": "NeedsMachineAuth"})
+    waiting = asyncio.run(service.poll_login(flow_id))
+    connection_id = waiting["connection"]["id"]
+
+    resumed = asyncio.run(service.continue_setup(connection_id))
+    assert resumed["state"] == "approval_required"
+    assert ("enable", None) not in connector.calls
+
+    connector.node_status = _status()
+    connector.records.append({"BackendState": "Running"})
+    connected = asyncio.run(service.continue_setup(connection_id))
+    assert connected["state"] == "connected"
+    assert service.store.get_connection(connection_id).status == "connected"
+
+
+def test_prerequisite_connection_continues_after_service_restart(tmp_path: Path) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [
+        {"AuthURL": _auth_url(), "BackendState": "NeedsLogin"},
+        {"BackendState": "Running"},
+    ]
+    connector.node_status["CurrentTailnet"]["MagicDNSEnabled"] = False
+    connector.node_status["Self"]["CapMap"] = {}
+    connector.node_status["CertDomains"] = []
+    service = _service(tmp_path, connector)
+    flow_id, _ = asyncio.run(service.begin_login("lns"))
+    pending = asyncio.run(service.poll_login(flow_id))
+    connection_id = service.store.list_connections()[0].id
+    assert pending["state"] == "prerequisites_required"
+
+    restarted = _service(tmp_path, connector)
+    connector.node_status = _status()
+    connector.funnel_status = {
+        "TCP": {"443": {"HTTPS": True}},
+        "Web": {
+            "lns.example.ts.net:443": {
+                "Handlers": {"/": {"Proxy": "http://127.0.0.1:21212"}}
+            }
+        },
+        "AllowFunnel": {"lns.example.ts.net:443": True},
+    }
+    connected = asyncio.run(restarted.continue_setup(connection_id))
+    assert connected["state"] == "connected"
+    assert restarted.store.get_connection(connection_id).status == "connected"
+
+
+def test_tailnet_lock_waits_for_signature_before_enabling_funnel(tmp_path: Path) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    connector.node_status["Health"] = [
+        "this node is locked out; it will not have connectivity until it is signed. For more info, see https://tailscale.com/s/locked-out"
+    ]
+    connector.lock_status = {"Enabled": True, "NodeKeySigned": False, "NodeKeyPresent": True, "PublicKeyPresent": True}
+    service = TailscaleService(
+        connector=connector,
+        store=ConnectionStore(tmp_path / "connections.db"),
+        connector_enabled=True,
+        poll_interval_seconds=0,
+        operation_timeout_seconds=0.1,
+        login_ttl_seconds=0.01,
+    )
+    async def scenario() -> None:
+        flow_id, _ = await service.begin_login("lns")
+        connector.records.append({"BackendState": "Running"})
+
+        waiting = await service.poll_login(flow_id)
+        assert waiting["state"] == "approval_required"
+        assert waiting["approval_kind"] == "tailnet_lock"
+        assert ("enable", None) not in connector.calls
+        assert ("disable", None) not in connector.calls
+        assert ("disconnect", None) not in connector.calls
+
+        await asyncio.sleep(0.03)
+        assert flow_id in service._flows
+        assert ("disconnect", None) not in connector.calls
+
+        connector.node_status["Health"] = []
+        connector.lock_status = {"Enabled": True, "NodeKeySigned": True, "NodeKeyPresent": True, "PublicKeyPresent": True}
+        connected = await service.poll_login(flow_id)
+        assert connected["state"] == "connected"
+
+    asyncio.run(scenario())
+    assert ("enable", None) in connector.calls
+
+
+def test_cancel_pending_device_approval_fails_closed_without_logout(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    connector.node_status["BackendState"] = "NeedsMachineAuth"
+    service = _service(tmp_path, connector)
+    flow_id, _ = asyncio.run(service.begin_login("lns"))
+    connector.records.append({"BackendState": "NeedsMachineAuth"})
+    assert asyncio.run(service.poll_login(flow_id))["state"] == "approval_required"
+
+    with pytest.raises(TailscaleOperationError, match="connected"):
+        asyncio.run(service.cancel_login(flow_id))
+    assert ("disconnect", None) not in connector.calls
+    assert flow_id in service._flows
 
 
 def test_poll_login_reports_prerequisites_without_enabling_or_policy_changes(
@@ -444,7 +733,7 @@ def test_poll_login_reports_prerequisites_without_enabling_or_policy_changes(
     assert ("clear_login", None) in connector.calls
     persisted = service.store.list_connections()
     assert len(persisted) == 1
-    assert persisted[0].status == "error"
+    assert persisted[0].status == "provisioning"
     assert "magic_dns" in (persisted[0].last_error or "")
 
     connector.node_status = _status()
@@ -539,6 +828,83 @@ def test_cancel_prerequisite_flow_removes_persisted_error_connection(
 
     assert service.store.list_connections() == []
     assert ("disconnect", None) in connector.calls
+
+
+def test_cancelled_poll_after_authentication_is_finalized_in_background(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    connector.node_status["CurrentTailnet"]["MagicDNSEnabled"] = False
+    connector.node_status["Self"]["CapMap"] = {}
+    connector.node_status["CertDomains"] = []
+    service = TailscaleService(
+        connector=connector,
+        store=ConnectionStore(tmp_path / "connections.db"),
+        connector_enabled=True,
+        poll_interval_seconds=0,
+        operation_timeout_seconds=0.1,
+        login_ttl_seconds=0.05,
+    )
+
+    async def scenario() -> None:
+        flow_id, _ = await service.begin_login("lns")
+        connector.records.append({"BackendState": "Running"})
+        original = service._finalize_authenticated_state
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def interrupted(flow, backend_state):
+            entered.set()
+            await release.wait()
+            return await original(flow, backend_state)
+
+        monkeypatch.setattr(service, "_finalize_authenticated_state", interrupted)
+        polling = asyncio.create_task(service.poll_login(flow_id))
+        await entered.wait()
+        polling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await polling
+        monkeypatch.setattr(service, "_finalize_authenticated_state", original)
+        await asyncio.sleep(0.08)
+
+    asyncio.run(scenario())
+    persisted = service.store.list_connections()
+    assert len(persisted) == 1
+    assert persisted[0].status == "provisioning"
+    assert ("disconnect", None) not in connector.calls
+
+
+def test_authenticated_expiry_finishes_registration_after_client_poll_disappears(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    connector.node_status["CurrentTailnet"]["MagicDNSEnabled"] = False
+    connector.node_status["Self"]["CapMap"] = {}
+    connector.node_status["CertDomains"] = []
+    service = TailscaleService(
+        connector=connector,
+        store=ConnectionStore(tmp_path / "connections.db"),
+        connector_enabled=True,
+        poll_interval_seconds=0,
+        operation_timeout_seconds=0.1,
+        login_ttl_seconds=0.01,
+    )
+
+    async def scenario() -> None:
+        flow_id, _ = await service.begin_login("lns")
+        connector.records.append({"BackendState": "Running"})
+        service._login_snapshot(service._flows[flow_id])
+        await asyncio.sleep(0.03)
+
+    asyncio.run(scenario())
+    assert ("disconnect", None) not in connector.calls
+    assert ("disable", None) in connector.calls
+    persisted = service.store.list_connections()
+    assert len(persisted) == 1
+    assert persisted[0].external_id == "node-123"
+    assert persisted[0].status == "provisioning"
 
 
 def test_authenticated_prerequisite_flow_expiry_preserves_registered_node(
@@ -663,13 +1029,52 @@ def test_failed_authenticated_cleanup_retains_flow_guard(tmp_path: Path) -> None
     connector.node_status["Self"]["DNSName"] = "attacker.invalid"
     connector.disconnect_error = True
 
-    with pytest.raises(TailscaleOperationError, match="disable Funnel"):
+    with pytest.raises(TailscaleOperationError, match="hostname"):
         asyncio.run(service.poll_login(flow_id))
 
+    assert ("disconnect", None) not in connector.calls
     assert flow_id in service._flows
     assert connector.login_artifact is True
     with pytest.raises(TailscaleOperationError, match="already in progress"):
         asyncio.run(service.begin_login("second"))
+
+
+def test_recovery_preserves_device_approval_without_destructive_cleanup(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.node_status["BackendState"] = "NeedsMachineAuth"
+    service = _service(tmp_path, connector)
+
+    asyncio.run(service.recover_incomplete_provisioning())
+
+    assert connector.login_artifact is True
+    pending = service.store.list_connections()
+    assert len(pending) == 1
+    assert pending[0].status == "authorizing"
+    assert pending[0].public_metadata["onboarding_state"] == "device"
+    assert ("cancel_login", None) not in connector.calls
+    assert ("disconnect", None) not in connector.calls
+
+
+def test_recovery_preserves_unsigned_tailnet_lock_node(tmp_path: Path) -> None:
+    connector = FakeTailscaleConnector()
+    connector.node_status["Health"] = [
+        "this node is locked out; it will not have connectivity until it is signed. For more info, see https://tailscale.com/s/locked-out"
+    ]
+    connector.lock_status = {"Enabled": True, "NodeKeySigned": False, "NodeKeyPresent": True, "PublicKeyPresent": True}
+    service = _service(tmp_path, connector)
+
+    asyncio.run(service.recover_incomplete_provisioning())
+
+    assert connector.login_artifact is True
+    pending = service.store.list_connections()
+    assert len(pending) == 1
+    assert pending[0].status == "authorizing"
+    assert pending[0].public_metadata["onboarding_state"] == "tailnet_lock"
+    assert ("enable", None) not in connector.calls
+    assert ("disable", None) not in connector.calls
+    assert ("disconnect", None) not in connector.calls
 
 
 def test_malformed_recovery_status_never_queues_destructive_disconnect(

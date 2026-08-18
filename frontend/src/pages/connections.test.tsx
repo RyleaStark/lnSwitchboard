@@ -31,6 +31,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
     beginTailscaleLogin: vi.fn(),
     tailscaleLoginStatus: vi.fn(),
     cancelTailscaleLogin: vi.fn(),
+    continueTailscaleSetup: vi.fn(),
     refreshTailscaleStatus: vi.fn(),
     disconnectTailscale: vi.fn(),
     zrokSetup: vi.fn(),
@@ -616,7 +617,7 @@ test("opens the transient Tailscale login link and QR without query or browser s
     "src",
     expect.stringMatching(/^data:image\/svg\+xml/),
   )
-  expect(screen.getByText(/approve this lnSwitchboard device/)).toBeVisible()
+  expect(screen.getByText(/separate administrator approval or Tailnet Lock signing/)).toBeVisible()
   expect(document.body).not.toHaveTextContent(/dedicated node/i)
   expect(client.getMutationCache().getAll()).toHaveLength(0)
   expect(window.localStorage?.length ?? 0).toBe(0)
@@ -831,6 +832,77 @@ test("explains that Tailscale onboarding needs its connector", async () => {
   expect(api.tailscaleLoginStatus).not.toHaveBeenCalled()
 })
 
+test.each([
+  ["device", "Approve this Tailscale device", /Machines page.*approve the device/i],
+  ["tailnet_lock", "Sign this Tailscale device", /trusted Tailnet Lock signing device/i],
+] as const)("shows the %s approval gate without offering self-approval", async (approvalKind, heading, guidance) => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
+    state: "approval_required",
+    approval_kind: approvalKind,
+    device_name: "lns",
+    expires_in_seconds: 300,
+  })
+
+  renderPage("/connections/tailscale/")
+  await waitFor(() => expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(1))
+  await user.click(await screen.findByRole("button", { name: "Connect Tailscale" }))
+
+  expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument()
+  expect(screen.getByText(guidance)).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Check approval" })).toBeEnabled()
+  expect(screen.queryByRole("button", { name: /approve|sign/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
+})
+
+
+test("restores and polls durable device approval after cookie or process loss", async () => {
+  const pending = {
+    id: "ts-pending",
+    provider: "tailscale",
+    label: "Tailscale Funnel",
+    status: "authorizing",
+    last_error: "Waiting for Tailscale device approval",
+    external_id: "node-123",
+    account_id: null,
+    public_metadata: {
+      device_name: "lns",
+      origin: "http://127.0.0.1:21212",
+      onboarding_state: "device",
+    },
+    domains: [{
+      hostname: "lns.example.ts.net",
+      status: "pending",
+      external_id: null,
+      zone_id: null,
+      last_error: null,
+    }],
+    created_at: "2026-08-18T00:00:00Z",
+    updated_at: "2026-08-18T00:00:00Z",
+  } satisfies ProviderConnection
+  vi.mocked(api.connections).mockResolvedValue({
+    providers: [
+      { id: "tailscale", name: "Tailscale Funnel", capability: "available", reason: null },
+    ],
+    connections: [pending],
+  })
+  vi.mocked(api.continueTailscaleSetup).mockResolvedValue({
+    state: "approval_required",
+    approval_kind: "device",
+    device_name: "lns",
+    connection: pending,
+  })
+
+  renderPage("/connections/tailscale/")
+
+  expect(await screen.findByRole("heading", { name: "Approve this Tailscale device" })).toBeVisible()
+  expect(screen.queryByText(/login expired/i)).not.toBeInTheDocument()
+  await waitFor(() => expect(vi.mocked(api.continueTailscaleSetup).mock.calls[0]?.[0]).toBe("ts-pending"), {
+    timeout: 3_000,
+  })
+})
+
+
 test("shows missing tailnet prerequisites without changing policy", async () => {
   const user = userEvent.setup()
   vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
@@ -848,6 +920,7 @@ test("shows missing tailnet prerequisites without changing policy", async () => 
   expect(screen.getByText(/Enable MagicDNS/)).toBeInTheDocument()
   expect(screen.getByText(/Allow Funnel on HTTPS port 443/)).toBeInTheDocument()
   expect(screen.getByText(/lnSwitchboard will not change these Tailscale settings for you/)).toBeInTheDocument()
+  expect(screen.getByText(/check Tailscale Machines and User management for a pending device or user approval/)).toBeInTheDocument()
   expect(document.body).not.toHaveTextContent(/tailnet policy|node attribute|reported node hostname/i)
 })
 

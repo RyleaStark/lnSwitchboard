@@ -287,6 +287,9 @@ class TailscaleConnector:
     def read_funnel_status(self) -> dict[str, Any] | None:
         return self._read_object("funnel.json")
 
+    def read_lock_status(self) -> dict[str, Any] | None:
+        return self._read_object("lock.json")
+
     def read_command_status(self, operation_id: str) -> dict[str, Any] | None:
         return self._read_object(f"results/{operation_id}.json")
 

@@ -342,15 +342,24 @@ async def begin_tailscale_login(
     flow_id, result = await _tailscale_call(
         lambda: service.begin_login(payload.device_name)
     )
-    response.set_cookie(
-        TAILSCALE_LOGIN_COOKIE,
-        flow_id,
-        max_age=service.login_ttl_seconds,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        path="/api/connections/tailscale",
-    )
+    if isinstance(result.get("connection"), dict):
+        response.delete_cookie(
+            TAILSCALE_LOGIN_COOKIE,
+            path="/api/connections/tailscale",
+            secure=False,
+            httponly=True,
+            samesite="lax",
+        )
+    else:
+        response.set_cookie(
+            TAILSCALE_LOGIN_COOKIE,
+            flow_id,
+            max_age=int(service.login_ttl_seconds),
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            path="/api/connections/tailscale",
+        )
     return result
 
 
@@ -369,13 +378,27 @@ async def tailscale_login_status(
             detail="Tailscale login flow was not found",
         )
     result = await _tailscale_call(lambda: service.poll_login(flow_id))
-    if result.get("state") in {"connected", "expired"}:
+    if result.get("state") in {"connected", "expired"} or isinstance(
+        result.get("connection"), dict
+    ):
         response.delete_cookie(
             TAILSCALE_LOGIN_COOKIE,
             path="/api/connections/tailscale",
             secure=False,
             httponly=True,
             samesite="lax",
+        )
+    else:
+        # Active polling renews the private flow cookie while device/user
+        # approval, Tailnet Lock signing, or Funnel prerequisites are pending.
+        response.set_cookie(
+            TAILSCALE_LOGIN_COOKIE,
+            flow_id,
+            max_age=int(service.login_ttl_seconds),
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            path="/api/connections/tailscale",
         )
     return result
 
@@ -403,6 +426,18 @@ async def cancel_tailscale_login(
         samesite="lax",
     )
     return {"cancelled": cancelled}
+
+
+@router.post(
+    "/tailscale/{connection_id}/continue",
+)
+async def continue_tailscale_setup(
+    connection_id: str,
+    response: Response,
+    service: TailscaleService = Depends(get_tailscale_service_dep),
+) -> dict[str, object]:
+    _set_private_no_store(response)
+    return await _tailscale_call(lambda: service.continue_setup(connection_id))
 
 
 @router.post(
