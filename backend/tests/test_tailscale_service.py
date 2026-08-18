@@ -830,6 +830,51 @@ def test_cancel_prerequisite_flow_removes_persisted_error_connection(
     assert ("disconnect", None) in connector.calls
 
 
+def test_cancelled_poll_after_authentication_is_finalized_in_background(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    connector.node_status["CurrentTailnet"]["MagicDNSEnabled"] = False
+    connector.node_status["Self"]["CapMap"] = {}
+    connector.node_status["CertDomains"] = []
+    service = TailscaleService(
+        connector=connector,
+        store=ConnectionStore(tmp_path / "connections.db"),
+        connector_enabled=True,
+        poll_interval_seconds=0,
+        operation_timeout_seconds=0.1,
+        login_ttl_seconds=0.05,
+    )
+
+    async def scenario() -> None:
+        flow_id, _ = await service.begin_login("lns")
+        connector.records.append({"BackendState": "Running"})
+        original = service._finalize_authenticated_state
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def interrupted(flow, backend_state):
+            entered.set()
+            await release.wait()
+            return await original(flow, backend_state)
+
+        monkeypatch.setattr(service, "_finalize_authenticated_state", interrupted)
+        polling = asyncio.create_task(service.poll_login(flow_id))
+        await entered.wait()
+        polling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await polling
+        monkeypatch.setattr(service, "_finalize_authenticated_state", original)
+        await asyncio.sleep(0.08)
+
+    asyncio.run(scenario())
+    persisted = service.store.list_connections()
+    assert len(persisted) == 1
+    assert persisted[0].status == "provisioning"
+    assert ("disconnect", None) not in connector.calls
+
+
 def test_authenticated_expiry_finishes_registration_after_client_poll_disappears(
     tmp_path: Path,
 ) -> None:
