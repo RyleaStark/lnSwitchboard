@@ -582,7 +582,7 @@ function TailscaleConnectionsPage() {
   }, [available, checkLogin])
 
   useEffect(() => {
-    if (login?.state !== "needs_login") return
+    if (login?.state !== "needs_login" && login?.state !== "approval_required") return
     const delay = Math.min(2_000 * 2 ** pollFailures, 30_000)
     const timeout = window.setTimeout(() => void checkLogin(false), delay)
     return () => window.clearTimeout(timeout)
@@ -708,6 +708,12 @@ function TailscaleConnectionsPage() {
               onCheck={() => void checkLogin()}
               onCancel={() => void cancel()}
             />
+          ) : login?.state === "approval_required" && login.approval_kind ? (
+            <TailscaleApproval
+              kind={login.approval_kind}
+              checking={checking || connecting}
+              onCheck={() => void checkLogin()}
+            />
           ) : login?.state === "prerequisites_required" ? (
             <TailscalePrerequisites
               hostname={login.hostname ?? "Tailscale hostname unavailable"}
@@ -814,6 +820,49 @@ function TailscaleLoginPrompt({
   )
 }
 
+const approvalContent = {
+  device: {
+    title: "Approve this Tailscale device",
+    description: "Open the Tailscale Machines page and have an Owner, Admin, or IT admin approve the device. lnSwitchboard will continue automatically after approval.",
+  },
+  tailnet_lock: {
+    title: "Sign this Tailscale device",
+    description: "Use a trusted Tailnet Lock signing device to sign this new node from the Tailscale Machines page. lnSwitchboard cannot sign or approve itself.",
+  },
+  user: {
+    title: "Approve the Tailscale user",
+    description: "Open Tailscale User management and have an Owner or Admin approve the user. lnSwitchboard will continue automatically after approval.",
+  },
+} as const
+
+function TailscaleApproval({
+  kind,
+  checking,
+  onCheck,
+}: {
+  kind: keyof typeof approvalContent
+  checking: boolean
+  onCheck: () => void
+}) {
+  const content = approvalContent[kind]
+  return (
+    <div className="max-w-2xl space-y-4">
+      <div>
+        <h3 className="font-medium">{content.title}</h3>
+        <p className="mt-1 text-sm leading-normal text-pretty text-muted-foreground">
+          {content.description}
+        </p>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Authentication is complete. Waiting here will not revoke the registered device.
+      </p>
+      <Button type="button" disabled={checking} onClick={onCheck}>
+        {checking ? "Checking…" : "Check approval"}
+      </Button>
+    </div>
+  )
+}
+
 const prerequisiteLabels: Record<string, string> = {
   magic_dns: "Enable MagicDNS in Tailscale.",
   https_certificates: "Enable HTTPS certificates for this device's Tailscale address.",
@@ -847,6 +896,9 @@ function TailscalePrerequisites({
       <ul className="space-y-2 text-sm text-muted-foreground">
         {missing.map((item) => <li key={item}>• {prerequisiteLabels[item] ?? item}</li>)}
       </ul>
+      <p className="text-xs text-muted-foreground">
+        If these settings are already enabled, check Tailscale Machines and User management for a pending device or user approval.
+      </p>
       <div className="flex flex-wrap gap-2">
         <Button type="button" disabled={checking || cancelling} onClick={onCheck}>
           {checking ? "Checking…" : "Check again"}

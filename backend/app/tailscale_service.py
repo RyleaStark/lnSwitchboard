@@ -21,6 +21,34 @@ FUNNEL_PORT = 443
 FUNNEL_PORT_CAPABILITY = "https://tailscale.com/cap/funnel-ports"
 _DEVICE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_TAILNET_LOCKED_OUT_HEALTH = (
+    "this node is locked out; it will not have connectivity until it is signed. "
+    "For more info, see https://tailscale.com/s/locked-out"
+)
+
+
+def tailscale_approval_requirement(
+    status: Mapping[str, Any], lock_status: Mapping[str, Any] | None
+) -> str | None:
+    """Return the provider approval gate visible through local Tailscale state."""
+    if status.get("BackendState") == "NeedsMachineAuth":
+        return "device"
+
+    if isinstance(lock_status, Mapping) and lock_status.get("Enabled") is True:
+        # Fail closed when the stable v1 lock snapshot does not positively report
+        # a signature. Missing/malformed NodeKeySigned is not authorization.
+        if lock_status.get("NodeKeySigned") is not True:
+            return "tailnet_lock"
+
+    health = status.get("Health")
+    if not isinstance(health, list):
+        return None
+    messages = [item for item in health if isinstance(item, str)]
+    if _TAILNET_LOCKED_OUT_HEALTH in messages:
+        return "tailnet_lock"
+    if any("user" in item.casefold() and "approval" in item.casefold() for item in messages):
+        return "user"
+    return None
 
 
 def key_expiry_metadata(self_status: Mapping[str, Any]) -> dict[str, object]:
@@ -60,6 +88,10 @@ class TailscaleNotFoundError(TailscaleServiceError):
 
 class TailscaleOperationError(TailscaleServiceError):
     """A fixed runtime operation failed."""
+
+
+class _TailscaleApprovalStatusError(TailscaleOperationError):
+    """Authenticated approval state is temporarily unavailable."""
 
 
 @dataclass
@@ -568,28 +600,52 @@ class TailscaleService:
                     if time.monotonic() < flow.expires_at:
                         continue
                     if flow.authenticated:
-                        if any(
-                            connection.provider == "tailscale"
-                            for connection in self.store.list_connections()
-                        ):
-                            # The authenticated runtime already has durable
-                            # registry ownership. Expiring only the browser flow
-                            # must not revoke that node.
+                        existing = next(
+                            (
+                                connection
+                                for connection in self.store.list_connections()
+                                if connection.provider == "tailscale"
+                            ),
+                            None,
+                        )
+                        if existing is not None and existing.status == "connected":
                             self._forget_flow(flow_id)
                             return
                         try:
-                            # A client can disappear after status first reports
-                            # Running but before its request finishes registration.
-                            # Complete that transition from the background flow
-                            # instead of turning browser expiry into provider logout.
-                            await self._finalize_running(flow)
-                        except (TailscaleServiceError, TailscaleProtocolError):
+                            # A client can disappear after provider authentication
+                            # but before registration or an approval/prerequisite
+                            # transition finishes. Reconcile from provider-native
+                            # state; browser expiry never authorizes logout here.
+                            backend_state, _ = self._login_snapshot(flow)
+                            if backend_state not in {"Running", "NeedsMachineAuth"}:
+                                status = self.connector.read_node_status()
+                                candidate = (
+                                    status.get("BackendState")
+                                    if isinstance(status, Mapping)
+                                    else None
+                                )
+                                backend_state = (
+                                    candidate if isinstance(candidate, str) else None
+                                )
+                            if backend_state not in {"Running", "NeedsMachineAuth"}:
+                                raise TailscaleOperationError(
+                                    "Authenticated Tailscale approval status is unavailable"
+                                )
+                            response = await self._finalize_authenticated_state(
+                                flow, backend_state
+                            )
+                        except (TailscaleServiceError, TailscaleProtocolError, OSError):
                             flow.expires_at = time.monotonic() + max(
                                 0.1, self.poll_interval_seconds
                             )
                             continue
-                        self._forget_flow(flow_id)
-                        return
+                        if response.get("state") == "connected":
+                            self._forget_flow(flow_id)
+                            return
+                        flow.expires_at = time.monotonic() + max(
+                            0.1, self.poll_interval_seconds
+                        )
+                        continue
                     try:
                         await self._cleanup_flow(flow_id, flow)
                         return
@@ -620,12 +676,73 @@ class TailscaleService:
                 backend_state = state
             if "AuthURL" in record and backend_state != "Running":
                 auth_url = _validated_auth_url(record.get("AuthURL"))
-        if backend_state == "Running":
+        if backend_state in {"Running", "NeedsMachineAuth"}:
             flow.authenticated = True
             flow.auth_url = None
         elif auth_url is not None:
             flow.auth_url = auth_url
         return backend_state, flow.auth_url
+
+    def _approval_kind(self, status: Mapping[str, Any]) -> str | None:
+        try:
+            lock_status = self.connector.read_lock_status()
+        except (OSError, TailscaleProtocolError) as exc:
+            # The regular Health field is an independent locked-out signal. If
+            # it is also silent, do not interpret a missing/malformed Tailnet
+            # Lock snapshot as authorization.
+            fallback = tailscale_approval_requirement(status, None)
+            if fallback is not None:
+                return fallback
+            raise _TailscaleApprovalStatusError(
+                "Tailscale approval status is temporarily unavailable"
+            ) from exc
+        if lock_status is None:
+            fallback = tailscale_approval_requirement(status, None)
+            if fallback is not None:
+                return fallback
+            raise _TailscaleApprovalStatusError(
+                "Tailscale approval status is temporarily unavailable"
+            )
+        return tailscale_approval_requirement(status, lock_status)
+
+    def _approval_response(
+        self, flow: _LoginFlow, backend_state: str
+    ) -> dict[str, object] | None:
+        try:
+            status = self.connector.read_node_status()
+        except OSError as exc:
+            raise TailscaleOperationError(
+                "Unable to read Tailscale approval status"
+            ) from exc
+        if status is None and backend_state == "Running":
+            raise _TailscaleApprovalStatusError(
+                "Tailscale approval status is temporarily unavailable"
+            )
+        status = dict(status) if isinstance(status, Mapping) else {}
+        status["BackendState"] = backend_state
+        approval_kind = self._approval_kind(status)
+        if approval_kind is None:
+            return None
+        return {
+            "state": "approval_required",
+            "approval_kind": approval_kind,
+            "device_name": flow.device_name,
+            "expires_in_seconds": max(
+                0, int(flow.expires_at - time.monotonic())
+            ),
+        }
+
+    async def _finalize_authenticated_state(
+        self, flow: _LoginFlow, backend_state: str
+    ) -> dict[str, object]:
+        approval = self._approval_response(flow, backend_state)
+        if approval is not None:
+            return approval
+        if backend_state != "Running":
+            raise TailscaleOperationError(
+                "Tailscale is waiting for an unrecognized approval state"
+            )
+        return await self._finalize_running(flow)
 
     async def begin_login(
         self, device_name: str | None
@@ -668,10 +785,18 @@ class TailscaleService:
                             "auth_url": auth_url,
                             "expires_in_seconds": self.login_ttl_seconds,
                         }
-                    if backend_state == "Running":
-                        return flow_id, await self._finalize_running(flow)
+                    if backend_state in {"Running", "NeedsMachineAuth"}:
+                        return flow_id, await self._finalize_authenticated_state(
+                            flow, backend_state
+                        )
                     await self._sleep()
+            except _TailscaleApprovalStatusError:
+                flow.expires_at = time.monotonic() + self.login_ttl_seconds
+                raise
             except (TailscaleProtocolError, TailscaleOperationError):
+                if flow.authenticated:
+                    flow.expires_at = time.monotonic() + self.login_ttl_seconds
+                    raise
                 await self._cleanup_flow(flow_id, flow)
                 raise
             await self._cleanup_flow(flow_id, flow)
@@ -682,16 +807,26 @@ class TailscaleService:
         async with self._lock:
             flow = self._flow(flow_id)
             if time.monotonic() >= flow.expires_at:
-                await self._cleanup_flow(flow_id, flow)
-                return {"state": "expired", "device_name": flow.device_name}
+                if not flow.authenticated:
+                    await self._cleanup_flow(flow_id, flow)
+                    return {"state": "expired", "device_name": flow.device_name}
+                flow.expires_at = time.monotonic() + self.login_ttl_seconds
             try:
                 backend_state, auth_url = self._login_snapshot(flow)
             except (TailscaleProtocolError, TailscaleOperationError):
+                if flow.authenticated:
+                    flow.expires_at = time.monotonic() + self.login_ttl_seconds
+                    raise
                 await self._cleanup_flow(flow_id, flow)
                 raise
-            if backend_state == "Running":
+            if backend_state in {"Running", "NeedsMachineAuth"}:
                 try:
-                    response = await self._finalize_running(flow)
+                    response = await self._finalize_authenticated_state(
+                        flow, backend_state
+                    )
+                except _TailscaleApprovalStatusError:
+                    flow.expires_at = time.monotonic() + self.login_ttl_seconds
+                    raise
                 except (TailscaleServiceError, TailscaleProtocolError):
                     await self._cleanup_flow(flow_id, flow)
                     raise
@@ -728,7 +863,12 @@ class TailscaleService:
         *,
         preserve_existing_on_prerequisite_failure: bool = False,
     ) -> dict[str, object]:
-        status = self._node_status()
+        try:
+            status = self._node_status()
+        except TailscaleOperationError as exc:
+            raise _TailscaleApprovalStatusError(
+                "Tailscale approval status is temporarily unavailable"
+            ) from exc
         self_status = status.get("Self")
         if not isinstance(self_status, Mapping):
             raise TailscaleOperationError("Tailscale status is missing node identity")
@@ -881,6 +1021,13 @@ class TailscaleService:
         device_name: str,
         hostname: str,
     ) -> ProviderConnection:
+        approval_kind = self._approval_kind(status)
+        if approval_kind == "device":
+            raise TailscaleOperationError("Tailscale device is waiting for administrator approval")
+        if approval_kind == "tailnet_lock":
+            raise TailscaleOperationError("Tailscale device is waiting for a Tailnet Lock signature")
+        if approval_kind == "user":
+            raise TailscaleOperationError("Tailscale user is waiting for administrator approval")
         missing = prerequisite_failures(status)
         if missing:
             raise TailscaleOperationError(
@@ -982,7 +1129,7 @@ class TailscaleService:
                         existing, status, flow.device_name, hostname
                     )
                 else:
-                    await self._finalize_running(flow)
+                    await self._finalize_authenticated_state(flow, "Running")
             except (TailscaleServiceError, TailscaleProtocolError):
                 raise
             except Exception as exc:

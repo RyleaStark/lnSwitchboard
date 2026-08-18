@@ -330,10 +330,11 @@ export type TailscaleSetup = {
 }
 
 export type TailscaleLogin = {
-  state: "needs_login" | "prerequisites_required" | "connected" | "expired"
+  state: "needs_login" | "approval_required" | "prerequisites_required" | "connected" | "expired"
   device_name: string
   auth_url?: string | null
   expires_in_seconds?: number
+  approval_kind?: "device" | "tailnet_lock" | "user"
   hostname?: string
   missing_prerequisites?: string[]
   connection?: ProviderConnection

@@ -831,6 +831,31 @@ test("explains that Tailscale onboarding needs its connector", async () => {
   expect(api.tailscaleLoginStatus).not.toHaveBeenCalled()
 })
 
+test.each([
+  ["device", "Approve this Tailscale device", /Machines page.*approve the device/i],
+  ["tailnet_lock", "Sign this Tailscale device", /trusted Tailnet Lock signing device/i],
+  ["user", "Approve the Tailscale user", /User management.*approve the user/i],
+] as const)("shows the %s approval gate without offering self-approval", async (approvalKind, heading, guidance) => {
+  const user = userEvent.setup()
+  vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
+    state: "approval_required",
+    approval_kind: approvalKind,
+    device_name: "lns",
+    expires_in_seconds: 300,
+  })
+
+  renderPage("/connections/tailscale/")
+  await waitFor(() => expect(api.tailscaleLoginStatus).toHaveBeenCalledTimes(1))
+  await user.click(await screen.findByRole("button", { name: "Connect Tailscale" }))
+
+  expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument()
+  expect(screen.getByText(guidance)).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Check approval" })).toBeEnabled()
+  expect(screen.queryByRole("button", { name: /approve|sign/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
+})
+
+
 test("shows missing tailnet prerequisites without changing policy", async () => {
   const user = userEvent.setup()
   vi.mocked(api.beginTailscaleLogin).mockResolvedValue({
@@ -848,6 +873,7 @@ test("shows missing tailnet prerequisites without changing policy", async () => 
   expect(screen.getByText(/Enable MagicDNS/)).toBeInTheDocument()
   expect(screen.getByText(/Allow Funnel on HTTPS port 443/)).toBeInTheDocument()
   expect(screen.getByText(/lnSwitchboard will not change these Tailscale settings for you/)).toBeInTheDocument()
+  expect(screen.getByText(/check Tailscale Machines and User management for a pending device or user approval/)).toBeInTheDocument()
   expect(document.body).not.toHaveTextContent(/tailnet policy|node attribute|reported node hostname/i)
 })
 

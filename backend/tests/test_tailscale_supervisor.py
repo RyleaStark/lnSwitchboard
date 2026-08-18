@@ -129,6 +129,12 @@ elif [ "${1:-}" = "up" ]; then
     printf '%s\n' "$!" > "$TS_TEST_LOGIN_DESCENDANT_PID_FILE"
   fi
   while :; do sleep 1; done
+elif [ "${1:-}" = "lock" ] && [ "${2:-}" = "status" ]; then
+  if [ -f "$TS_TEST_LOCKED_OUT_FILE" ]; then
+    printf '%s\\n' '{"SchemaVersion":"1","Enabled":true,"PublicKey":"tlpub:test-only","NodeKey":"nodekey:test-only","NodeKeySigned":false,"TrustedKeys":[{"Public":"tlpub:secret-peer"}]}'
+  else
+    printf '%s\\n' '{"SchemaVersion":"1","Enabled":false,"PublicKey":"tlpub:test-only","NodeKey":"nodekey:test-only"}'
+  fi
 elif [ "${1:-}" = "funnel" ] && [ "${2:-}" = "reset" ]; then
   if [ -f "$TS_TEST_FAIL_FUNNEL_RESET_FILE" ]; then exit 1; fi
   exit 0
@@ -175,6 +181,7 @@ fi
                 tmp_path / "provider-unset-marker"
             ),
             "TS_TEST_BLOCK_FUNNEL_FILE": str(tmp_path / "block-funnel"),
+            "TS_TEST_LOCKED_OUT_FILE": str(tmp_path / "tailnet-lock-unsigned"),
             "TS_LOGIN_RETENTION_SECONDS": "2",
             "TS_LOGIN_STOP_TIMEOUT": "1",
             "DEP_ENV": "UMBREL_DEV",
@@ -193,6 +200,48 @@ def test_supervisor_default_shutdown_budget_fits_compose_grace_period() -> None:
     source = SUPERVISOR.read_text(encoding="utf-8")
     assert 'COMMAND_TIMEOUT="${TS_COMMAND_TIMEOUT:-12}"' in source
     assert 'LOGIN_STOP_TIMEOUT="${TS_LOGIN_STOP_TIMEOUT:-2}"' in source
+
+
+def test_supervisor_publishes_stable_tailnet_lock_status(
+    supervisor_runtime,
+) -> None:
+    _, status_dir, _, _, env = supervisor_runtime
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        _wait_for(lambda: (status_dir / "lock.json").exists())
+        import json
+
+        assert json.loads((status_dir / "lock.json").read_text(encoding="utf-8")) == {
+            "SchemaVersion": "1",
+            "Enabled": False,
+        }
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_supervisor_publishes_only_tailnet_lock_authorization_booleans(
+    supervisor_runtime,
+) -> None:
+    _, status_dir, _, _, env = supervisor_runtime
+    Path(env["TS_TEST_LOCKED_OUT_FILE"]).touch()
+    process = subprocess.Popen([str(SUPERVISOR)], env=env)
+    try:
+        _wait_for(lambda: (status_dir / "lock.json").exists())
+        import json
+
+        raw = (status_dir / "lock.json").read_text(encoding="utf-8")
+        assert json.loads(raw) == {
+            "SchemaVersion": "1",
+            "Enabled": True,
+            "NodeKeySigned": False,
+        }
+        assert '"PublicKey"' not in raw
+        assert '"NodeKey"' not in raw
+        assert '"TrustedKeys"' not in raw
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
 
 
 def test_pid_one_provider_cleanup_uses_process_identity_not_environment_markers() -> None:

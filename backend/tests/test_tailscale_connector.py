@@ -50,6 +50,23 @@ def test_connector_rejects_unbounded_or_non_object_status(tmp_path: Path) -> Non
         connector.read_node_status()
 
 
+def test_connector_reads_tailnet_lock_status_from_bounded_private_snapshot(
+    tmp_path: Path,
+) -> None:
+    connector = _connector(tmp_path)
+    lock_path = tmp_path / "status" / "lock.json"
+    lock_path.write_text(
+        json.dumps({"SchemaVersion": "1", "Enabled": True, "NodeKeySigned": False}),
+        encoding="utf-8",
+    )
+
+    assert connector.read_lock_status() == {
+        "SchemaVersion": "1",
+        "Enabled": True,
+        "NodeKeySigned": False,
+    }
+
+
 def test_connector_emits_immutable_operation_id_commands_without_overwrite(
     tmp_path: Path,
 ) -> None:

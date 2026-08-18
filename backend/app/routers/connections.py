@@ -345,7 +345,7 @@ async def begin_tailscale_login(
     response.set_cookie(
         TAILSCALE_LOGIN_COOKIE,
         flow_id,
-        max_age=service.login_ttl_seconds,
+        max_age=int(service.login_ttl_seconds),
         httponly=True,
         secure=False,
         samesite="lax",
@@ -376,6 +376,18 @@ async def tailscale_login_status(
             secure=False,
             httponly=True,
             samesite="lax",
+        )
+    else:
+        # Active polling renews the private flow cookie while device/user
+        # approval, Tailnet Lock signing, or Funnel prerequisites are pending.
+        response.set_cookie(
+            TAILSCALE_LOGIN_COOKIE,
+            flow_id,
+            max_age=int(service.login_ttl_seconds),
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            path="/api/connections/tailscale",
         )
     return result
 

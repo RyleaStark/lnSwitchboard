@@ -108,6 +108,8 @@ def test_tailscale_login_status_requires_private_flow_cookie(test_client) -> Non
     assert found.status_code == 200
     assert found.json()["state"] == "needs_login"
     assert found.headers["cache-control"] == "no-store, private"
+    assert "Max-Age=300" in found.headers["set-cookie"]
+    assert "Path=/api/connections/tailscale" in found.headers["set-cookie"]
     assert service.flow_ids == ["private-flow-id"]
 
 
