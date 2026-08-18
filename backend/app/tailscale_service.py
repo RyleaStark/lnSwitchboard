@@ -639,14 +639,14 @@ class TailscaleService:
                             )
                         except (TailscaleServiceError, TailscaleProtocolError, OSError):
                             flow.expires_at = time.monotonic() + max(
-                                0.1, self.poll_interval_seconds
+                                2.0, self.poll_interval_seconds
                             )
                             continue
                         if response.get("state") == "connected":
                             self._forget_flow(flow_id)
                             return
                         flow.expires_at = time.monotonic() + max(
-                            0.1, self.poll_interval_seconds
+                            2.0, self.poll_interval_seconds
                         )
                         continue
                     try:
