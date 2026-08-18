@@ -1,6 +1,6 @@
 services:
   permissions-init:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc36}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc37}
     container_name: lnswitchboard-permissions-init
     user: "0:0"
     network_mode: none
@@ -24,7 +24,7 @@ services:
     restart: "no"
 
   lnswitchboard:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc36}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc37}
     container_name: lnswitchboard
     restart: unless-stopped
     depends_on:
@@ -86,7 +86,7 @@ services:
       default: {}
 
   lnswitchboard-public:
-    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc36}
+    image: ghcr.io/ryleastark/lnswitchboard:${LNSWITCHBOARD_VERSION:-0.4.0.rc37}
     container_name: lnswitchboard-public
     restart: unless-stopped
     depends_on:
