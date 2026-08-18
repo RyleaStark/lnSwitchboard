@@ -89,7 +89,12 @@ def required_directory_mode(relative: tuple[str, ...]) -> int:
     return DIR_MODE
 
 
-def harden_tree(directory_fd: int, relative: tuple[str, ...] = ()) -> None:
+def harden_tree(
+    directory_fd: int,
+    relative: tuple[str, ...] = (),
+    *,
+    excluded_root_names: frozenset[str] | set[str] = frozenset(),
+) -> None:
     try:
         names: Iterable[str] = os.listdir(directory_fd)
     except OSError:
@@ -102,6 +107,12 @@ def harden_tree(directory_fd: int, relative: tuple[str, ...] = ()) -> None:
         except OSError:
             fail()
         child_relative = (*relative, name)
+        if not relative and name in excluded_root_names:
+            if not stat.S_ISDIR(before.st_mode):
+                fail()
+            child = open_directory(name, parent_fd=directory_fd)
+            os.close(child)
+            continue
         if stat.S_ISDIR(before.st_mode):
             child = open_directory(name, parent_fd=directory_fd)
             try:
@@ -135,10 +146,21 @@ def harden_tree(directory_fd: int, relative: tuple[str, ...] = ()) -> None:
             os.close(descriptor)
 
 
-def validate_tree(directory_fd: int, relative: tuple[str, ...] = ()) -> None:
+def validate_tree(
+    directory_fd: int,
+    relative: tuple[str, ...] = (),
+    *,
+    excluded_root_names: frozenset[str] | set[str] = frozenset(),
+) -> None:
     for name in sorted(os.listdir(directory_fd)):
         info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         child_relative = (*relative, name)
+        if not relative and name in excluded_root_names:
+            if not stat.S_ISDIR(info.st_mode):
+                fail()
+            child = open_directory(name, parent_fd=directory_fd)
+            os.close(child)
+            continue
         if stat.S_ISDIR(info.st_mode):
             if (
                 (info.st_uid, info.st_gid) != (UID, GID)
@@ -204,11 +226,12 @@ def main() -> None:
                 finally:
                     for child in reversed(opened):
                         os.close(child)
-            harden_tree(descriptor)
+            excluded = {"tailscale", "zrok"} if root == "/app-secrets" else set()
+            harden_tree(descriptor, excluded_root_names=excluded)
             os.fchown(descriptor, UID, GID)
             os.fchmod(descriptor, DIR_MODE)
             os.fsync(descriptor)
-            validate_tree(descriptor)
+            validate_tree(descriptor, excluded_root_names=excluded)
         finally:
             os.close(descriptor)
 
