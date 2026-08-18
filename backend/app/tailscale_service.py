@@ -1008,6 +1008,20 @@ class TailscaleService:
             }
 
         try:
+            current_funnel = self.connector.read_funnel_status()
+        except OSError:
+            current_funnel = None
+        if existing_connections and current_funnel is not None and funnel_status_matches(
+            current_funnel, hostname, self.public_origin
+        ):
+            connection = self._register_connection(
+                status, flow.device_name, hostname
+            )
+            if self.connector.has_login_artifact():
+                await self._clear_login_artifact()
+            return {"state": "connected", "connection": asdict(connection)}
+
+        try:
             operation_id = self.connector.enable_funnel(
                 external_id=external_id, hostname=hostname
             )
