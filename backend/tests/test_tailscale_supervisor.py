@@ -235,6 +235,8 @@ def test_supervisor_publishes_only_tailnet_lock_authorization_booleans(
             "SchemaVersion": "1",
             "Enabled": True,
             "NodeKeySigned": False,
+            "NodeKeyPresent": True,
+            "PublicKeyPresent": True,
         }
         assert '"PublicKey"' not in raw
         assert '"NodeKey"' not in raw

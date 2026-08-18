@@ -51,9 +51,7 @@ def tailscale_approval_requirement(
         return "device"
 
     if isinstance(lock_status, Mapping) and lock_status.get("Enabled") is True:
-        # Fail closed when the stable v1 lock snapshot does not positively report
-        # a signature. Missing/malformed NodeKeySigned is not authorization.
-        if lock_status.get("NodeKeySigned") is not True:
+        if lock_status.get("NodeKeySigned") is False:
             return "tailnet_lock"
 
     health = status.get("Health")
@@ -767,6 +765,14 @@ class TailscaleService:
                 return fallback
             raise _TailscaleApprovalStatusError(
                 "Tailscale approval status is temporarily unavailable"
+            )
+        if lock_status.get("Enabled") is True and (
+            lock_status.get("NodeKeyPresent") is not True
+            or lock_status.get("PublicKeyPresent") is not True
+            or not isinstance(lock_status.get("NodeKeySigned"), bool)
+        ):
+            raise _TailscaleApprovalStatusError(
+                "Tailscale Tailnet Lock identity is temporarily unavailable"
             )
         return tailscale_approval_requirement(status, lock_status)
 

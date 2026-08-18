@@ -250,6 +250,8 @@ publish_lock_status() {
         schema=$(sed -n 's/.*"SchemaVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$raw" | head -n 1)
         enabled=$(sed -n 's/.*"Enabled"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$raw" | head -n 1)
         signed=$(sed -n 's/.*"NodeKeySigned"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$raw" | head -n 1)
+        node_key=$(sed -n 's/.*"NodeKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$raw" | head -n 1)
+        public_key=$(sed -n 's/.*"PublicKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$raw" | head -n 1)
         rm -f "$raw"
         if [ "$schema" = 1 ] && [ "$enabled" = false ]; then
             atomic_text "$destination" '{"SchemaVersion":"1","Enabled":false}'
@@ -257,8 +259,12 @@ publish_lock_status() {
         fi
         if [ "$schema" = 1 ] && [ "$enabled" = true ]; then
             case "$signed" in true | false) ;; *) signed=false ;; esac
+            node_key_present=false
+            public_key_present=false
+            [ -n "$node_key" ] && node_key_present=true
+            [ -n "$public_key" ] && public_key_present=true
             atomic_text "$destination" \
-                "{\"SchemaVersion\":\"1\",\"Enabled\":true,\"NodeKeySigned\":$signed}"
+                "{\"SchemaVersion\":\"1\",\"Enabled\":true,\"NodeKeySigned\":$signed,\"NodeKeyPresent\":$node_key_present,\"PublicKeyPresent\":$public_key_present}"
             return
         fi
     fi

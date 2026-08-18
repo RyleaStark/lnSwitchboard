@@ -119,11 +119,11 @@ def test_approval_requirement_distinguishes_device_tailnet_lock_and_user() -> No
 
     status = _status(Health=[])
     assert tailscale_approval_requirement(
-        status, {"Enabled": True, "NodeKeySigned": False}
+        status, {"Enabled": True, "NodeKeySigned": False, "NodeKeyPresent": True, "PublicKeyPresent": True}
     ) == "tailnet_lock"
     assert tailscale_approval_requirement(
         status, {"Enabled": True, "NodeKeySigned": "unknown"}
-    ) == "tailnet_lock"
+    ) is None
     assert tailscale_approval_requirement(
         _status(
             Health=[
@@ -133,7 +133,7 @@ def test_approval_requirement_distinguishes_device_tailnet_lock_and_user() -> No
         None,
     ) == "tailnet_lock"
     assert tailscale_approval_requirement(
-        _status(Health=[]), {"Enabled": True, "NodeKeySigned": True}
+        _status(Health=[]), {"Enabled": True, "NodeKeySigned": True, "NodeKeyPresent": True, "PublicKeyPresent": True}
     ) is None
     assert tailscale_approval_requirement(_status(Health="invalid"), None) is None
 
@@ -651,7 +651,7 @@ def test_tailnet_lock_waits_for_signature_before_enabling_funnel(tmp_path: Path)
     connector.node_status["Health"] = [
         "this node is locked out; it will not have connectivity until it is signed. For more info, see https://tailscale.com/s/locked-out"
     ]
-    connector.lock_status = {"Enabled": True, "NodeKeySigned": False}
+    connector.lock_status = {"Enabled": True, "NodeKeySigned": False, "NodeKeyPresent": True, "PublicKeyPresent": True}
     service = TailscaleService(
         connector=connector,
         store=ConnectionStore(tmp_path / "connections.db"),
@@ -676,7 +676,7 @@ def test_tailnet_lock_waits_for_signature_before_enabling_funnel(tmp_path: Path)
         assert ("disconnect", None) not in connector.calls
 
         connector.node_status["Health"] = []
-        connector.lock_status = {"Enabled": True, "NodeKeySigned": True}
+        connector.lock_status = {"Enabled": True, "NodeKeySigned": True, "NodeKeyPresent": True, "PublicKeyPresent": True}
         connected = await service.poll_login(flow_id)
         assert connected["state"] == "connected"
 
@@ -1017,7 +1017,7 @@ def test_recovery_preserves_unsigned_tailnet_lock_node(tmp_path: Path) -> None:
     connector.node_status["Health"] = [
         "this node is locked out; it will not have connectivity until it is signed. For more info, see https://tailscale.com/s/locked-out"
     ]
-    connector.lock_status = {"Enabled": True, "NodeKeySigned": False}
+    connector.lock_status = {"Enabled": True, "NodeKeySigned": False, "NodeKeyPresent": True, "PublicKeyPresent": True}
     service = _service(tmp_path, connector)
 
     asyncio.run(service.recover_incomplete_provisioning())
