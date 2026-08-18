@@ -55,7 +55,7 @@ case "${1:-}" in
     if [ -f "$ZROK_TEST_LIST_ERROR" ]; then exit 1; fi
     if [ "${2:-}" = shares ]; then
       if [ -f "$HOME/share-live" ]; then
-        printf '{"shares":[{"shareToken":"runtime-token","envZId":"local-env","frontendEndpoints":["Pay.Example"],"shareMode":"public","backendMode":"proxy","target":"http://lnswitchboard-public:21212"},{"shareToken":"foreign-token","envZId":"foreign-env","frontendEndpoints":["Pay.Example"],"shareMode":"public","backendMode":"proxy","target":"http://lnswitchboard-public:21212"}]}\\n'
+        printf '{"shares":[{"shareToken":"runtime-token","envZId":"local-env","frontendEndpoints":["Pay.Example"],"shareMode":"public","backendMode":"proxy","target":"http://extended-umbrella-lnswitchboard-public:21212"},{"shareToken":"foreign-token","envZId":"foreign-env","frontendEndpoints":["Pay.Example"],"shareMode":"public","backendMode":"proxy","target":"http://extended-umbrella-lnswitchboard-public:21212"}]}\\n'
       else printf '{"shares":[]}\\n'; fi
     elif [ -f "$HOME/name" ]; then printf '[{"namespaceToken":"public","name":"pay"}]\\n'
     else printf '[]\\n'; fi ;;

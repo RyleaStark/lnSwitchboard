@@ -555,7 +555,7 @@ def test_supervisor_uses_fixed_funnel_commands_and_disconnects_fail_closed(
         commands = command_log.read_text(encoding="utf-8")
         assert (
             f"tailscale --socket={env['TS_SOCKET']} funnel --bg --yes "
-            "http://lnswitchboard-public:21212"
+            "http://extended-umbrella-lnswitchboard-public:21212"
         ) in commands
 
         _write_command(

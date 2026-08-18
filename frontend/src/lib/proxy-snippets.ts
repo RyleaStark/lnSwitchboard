@@ -18,8 +18,8 @@ export function normalizeDeploymentEnv(value?: string | null): DeploymentEnv {
 
 export function proxyHostForDeployment(value?: string | null): string {
   const depEnv = normalizeDeploymentEnv(value)
-  if (depEnv === "UMBREL") return "lnswitchboard-public"
-  if (depEnv === "UMBREL_DEV") return "lnswitchboard-public"
+  if (depEnv === "UMBREL") return "lnswitchboard_public"
+  if (depEnv === "UMBREL_DEV") return "extended-umbrella-lnswitchboard_public"
   return "lnswitchboard-public"
 }
 
