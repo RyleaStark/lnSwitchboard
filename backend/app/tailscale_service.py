@@ -627,6 +627,9 @@ class TailscaleService:
                                 backend_state = (
                                     candidate if isinstance(candidate, str) else None
                                 )
+                            if backend_state == "NeedsLogin":
+                                self._forget_flow(flow_id)
+                                return
                             if backend_state not in {"Running", "NeedsMachineAuth"}:
                                 raise TailscaleOperationError(
                                     "Authenticated Tailscale approval status is unavailable"
@@ -670,12 +673,20 @@ class TailscaleService:
     def _login_snapshot(self, flow: _LoginFlow) -> tuple[str | None, str | None]:
         backend_state: str | None = "Running" if flow.authenticated else None
         auth_url: str | None = None
-        for record in self.connector.read_login_records():
+        records = self.connector.read_login_records()
+        for record in records:
             state = record.get("BackendState")
             if isinstance(state, str):
                 backend_state = state
             if "AuthURL" in record and backend_state != "Running":
                 auth_url = _validated_auth_url(record.get("AuthURL"))
+        if not records and flow.authenticated:
+            status = self.connector.read_node_status()
+            current_state = (
+                status.get("BackendState") if isinstance(status, Mapping) else None
+            )
+            if isinstance(current_state, str):
+                backend_state = current_state
         if backend_state in {"Running", "NeedsMachineAuth"}:
             flow.authenticated = True
             flow.auth_url = None
@@ -819,6 +830,9 @@ class TailscaleService:
                     raise
                 await self._cleanup_flow(flow_id, flow)
                 raise
+            if flow.authenticated and backend_state == "NeedsLogin" and not auth_url:
+                self._forget_flow(flow_id)
+                return {"state": "expired", "device_name": flow.device_name}
             if backend_state in {"Running", "NeedsMachineAuth"}:
                 try:
                     response = await self._finalize_authenticated_state(

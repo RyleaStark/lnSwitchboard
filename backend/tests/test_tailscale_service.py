@@ -449,6 +449,25 @@ def test_poll_login_registers_only_authoritative_hostname_after_prerequisites(
     assert "AuthURL" not in str(connection)
 
 
+def test_authenticated_flow_observes_provider_needs_login_without_logout(
+    tmp_path: Path,
+) -> None:
+    connector = FakeTailscaleConnector()
+    connector.records = [{"AuthURL": _auth_url(), "BackendState": "NeedsLogin"}]
+    service = _service(tmp_path, connector)
+    flow_id, _ = asyncio.run(service.begin_login("lns"))
+    service._flows[flow_id].authenticated = True
+    service._flows[flow_id].auth_url = None
+    connector.records = []
+    connector.node_status = {"BackendState": "NeedsLogin", "Self": {"DNSName": ""}}
+
+    response = asyncio.run(service.poll_login(flow_id))
+
+    assert response["state"] == "expired"
+    assert flow_id not in service._flows
+    assert ("disconnect", None) not in connector.calls
+
+
 @pytest.mark.parametrize("failure", ["missing_node", "malformed_lock"])
 def test_authenticated_approval_status_failure_preserves_flow_and_node(
     tmp_path: Path, failure: str
@@ -510,6 +529,13 @@ def test_device_approval_waits_without_revoking_and_then_connects(tmp_path: Path
         assert flow_id in service._flows
         assert ("disconnect", None) not in connector.calls
 
+        connector.records = []
+        connector.node_status["BackendState"] = "NeedsMachineAuth"
+        still_waiting = await service.poll_login(flow_id)
+        assert still_waiting["state"] == "approval_required"
+        assert still_waiting["approval_kind"] == "device"
+
+        connector.node_status["BackendState"] = "Running"
         connector.records.append({"BackendState": "Running"})
         connected = await service.poll_login(flow_id)
         assert connected["state"] == "connected"
