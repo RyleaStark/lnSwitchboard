@@ -13,20 +13,20 @@ describe("proxy deployment snippets", () => {
   })
 
   it("maps Umbrel deployment names to app container hosts", () => {
-    expect(proxyHostForDeployment("UMBREL")).toBe("lnswitchboard-public")
-    expect(proxyHostForDeployment("umbrel_dev")).toBe("lnswitchboard-public")
+    expect(proxyHostForDeployment("UMBREL")).toBe("lnswitchboard_public")
+    expect(proxyHostForDeployment("umbrel_dev")).toBe("extended-umbrella-lnswitchboard_public")
   })
 
   it("renders snippets using the selected deployment upstream", () => {
     const snippets = buildProxyHelpItems("UMBREL_DEV", "pay.example.com")
     expect(snippets.find((item) => item.label === "NGINX")?.snippet).toContain(
-      "http://lnswitchboard-public:21212",
+      "http://extended-umbrella-lnswitchboard_public:21212",
     )
     expect(snippets.find((item) => item.label === "Caddy")?.snippet).toContain(
       "pay.example.com",
     )
     expect(snippets.find((item) => item.label === "Custom")?.snippet).toContain(
-      "Upstream: http://lnswitchboard-public:21212",
+      "Upstream: http://extended-umbrella-lnswitchboard_public:21212",
     )
     expect(snippets.find((item) => item.label === "Cloudflare Tunnel")).toBeUndefined()
     const combined = snippets.map((item) => item.snippet).join("\n")

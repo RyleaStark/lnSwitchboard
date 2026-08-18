@@ -14,7 +14,7 @@ from backend.app.deployment import normalize_deployment_env, public_connector_or
         (
             "umbrel_dev",
             "UMBREL_DEV",
-            "http://lnswitchboard-public:21212",
+            "http://extended-umbrella-lnswitchboard-public:21212",
         ),
     ],
 )
