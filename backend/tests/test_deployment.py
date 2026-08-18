@@ -10,11 +10,11 @@ from backend.app.deployment import normalize_deployment_env, public_connector_or
     [
         (None, "DOCKER", "http://lnswitchboard-public:21212"),
         ("docker", "DOCKER", "http://lnswitchboard-public:21212"),
-        ("UMBREL", "UMBREL", "http://lnswitchboard_public:21212"),
+        ("UMBREL", "UMBREL", "http://lnswitchboard-public:21212"),
         (
             "umbrel_dev",
             "UMBREL_DEV",
-            "http://extended-umbrella-lnswitchboard_public:21212",
+            "http://lnswitchboard-public:21212",
         ),
     ],
 )
