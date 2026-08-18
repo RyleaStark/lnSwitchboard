@@ -4,8 +4,8 @@ from __future__ import annotations
 
 _DEPLOYMENT_PUBLIC_HOSTS = {
     "DOCKER": "lnswitchboard-public",
-    "UMBREL": "lnswitchboard_public",
-    "UMBREL_DEV": "extended-umbrella-lnswitchboard_public",
+    "UMBREL": "lnswitchboard-public",
+    "UMBREL_DEV": "lnswitchboard-public",
 }
 
 
