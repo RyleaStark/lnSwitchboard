@@ -43,6 +43,16 @@ def test_prepare_state_skips_separately_mounted_connector_protocol_hardlinks(
         module.validate_tree(descriptor, excluded_root_names={"tailscale", "zrok"})
     finally:
         os.close(descriptor)
+    tailscale_descriptor = os.open(app_secrets / "tailscale", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        module.harden_tree(
+            tailscale_descriptor, excluded_root_names={"control", "status"}
+        )
+        module.validate_tree(
+            tailscale_descriptor, excluded_root_names={"control", "status"}
+        )
+    finally:
+        os.close(tailscale_descriptor)
 
     assert operation.stat().st_nlink == 2
     assert database.stat().st_nlink == 1

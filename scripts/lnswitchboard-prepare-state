@@ -226,7 +226,11 @@ def main() -> None:
                 finally:
                     for child in reversed(opened):
                         os.close(child)
-            excluded = {"tailscale", "zrok"} if root == "/app-secrets" else set()
+            excluded = (
+                {"tailscale", "zrok"}
+                if root == "/app-secrets"
+                else ({"control", "status"} if root in {"/tailscale-control", "/zrok-control"} else set())
+            )
             harden_tree(descriptor, excluded_root_names=excluded)
             os.fchown(descriptor, UID, GID)
             os.fchmod(descriptor, DIR_MODE)
