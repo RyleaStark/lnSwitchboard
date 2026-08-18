@@ -201,6 +201,7 @@ class FakeTailscaleConnector:
         self.funnel_status_error = False
         self.lock_protocol_error = False
         self.begin_error = False
+        self.enable_applies = True
         self.login_artifact = True
 
     def _operation(self, command: str, state: str = "complete", error: str | None = None) -> str:
@@ -241,6 +242,17 @@ class FakeTailscaleConnector:
         self.calls.append(("enable", None))
         operation_id = self._operation("enable")
         self.command_status.update({"external_id": external_id, "hostname": hostname})
+        if self.enable_applies:
+            host_port = f"{hostname}:443"
+            self.funnel_status = {
+                "TCP": {"443": {"HTTPS": True}},
+                "Web": {
+                    host_port: {
+                        "Handlers": {"/": {"Proxy": "http://127.0.0.1:21212"}}
+                    }
+                },
+                "AllowFunnel": {host_port: True},
+            }
         return operation_id
 
     def disable_funnel(self, *, external_id: str, hostname: str) -> str:
@@ -251,6 +263,8 @@ class FakeTailscaleConnector:
             "funnel_disable_failed" if self.disable_error else None,
         )
         self.command_status.update({"external_id": external_id, "hostname": hostname})
+        if not self.disable_error:
+            self.funnel_status = {}
         return operation_id
 
     def disconnect(
@@ -558,7 +572,7 @@ def test_device_approval_waits_without_revoking_and_then_connects(tmp_path: Path
         assert connected["state"] == "connected"
 
     asyncio.run(scenario())
-    assert ("enable", None) in connector.calls
+    assert ("enable", None) not in connector.calls
     assert ("disconnect", None) not in connector.calls
 
 
@@ -609,9 +623,19 @@ def test_durable_device_approval_continues_after_flow_loss(tmp_path: Path) -> No
 
     connector.node_status = _status()
     connector.records.append({"BackendState": "Running"})
+    connector.funnel_status = {
+        "TCP": {"443": {"HTTPS": True}},
+        "Web": {
+            "lns.example.ts.net:443": {
+                "Handlers": {"/": {"Proxy": "http://127.0.0.1:21212"}}
+            }
+        },
+        "AllowFunnel": {"lns.example.ts.net:443": True},
+    }
     connected = asyncio.run(service.continue_setup(connection_id))
     assert connected["state"] == "connected"
     assert service.store.get_connection(connection_id).status == "connected"
+    assert ("enable", None) not in connector.calls
 
 
 def test_prerequisite_connection_continues_after_service_restart(tmp_path: Path) -> None:
@@ -681,7 +705,7 @@ def test_tailnet_lock_waits_for_signature_before_enabling_funnel(tmp_path: Path)
         assert connected["state"] == "connected"
 
     asyncio.run(scenario())
-    assert ("enable", None) in connector.calls
+    assert ("enable", None) not in connector.calls
 
 
 def test_cancel_pending_device_approval_fails_closed_without_logout(
@@ -1010,6 +1034,7 @@ def test_funnel_reconciliation_failure_disconnects_fail_closed(tmp_path: Path) -
     flow_id, _ = asyncio.run(service.begin_login("lns"))
     connector.records.append({"BackendState": "Running"})
     connector.funnel_status = {}
+    connector.enable_applies = False
 
     with pytest.raises(TailscaleOperationError, match="reconcile"):
         asyncio.run(service.poll_login(flow_id))
