@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { api, type AuthStatus, type EnvSetting } from "@/lib/api"
@@ -325,7 +326,7 @@ export function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")
 }
 
-function EnvField({
+export function EnvField({
   field,
   value,
   onChange,
@@ -334,19 +335,40 @@ function EnvField({
   value: string
   onChange: (value: string) => void
 }) {
-  const InputComponent = field.type === "textarea" ? Textarea : Input
+  const inputId = `env-${field.key}`
   return (
     <Field data-disabled={!field.editable}>
-      <FieldLabel htmlFor={`env-${field.key}`}>{field.label}</FieldLabel>
-      <InputComponent
-        id={`env-${field.key}`}
-        type={field.type === "number" ? "number" : undefined}
-        rows={field.type === "textarea" ? 4 : undefined}
-        value={value}
-        readOnly={!field.editable}
-        disabled={!field.editable}
-        onChange={(event) => onChange(event.target.value)}
-      />
+      <FieldLabel htmlFor={inputId}>{field.label}</FieldLabel>
+      {field.type === "select" ? (
+        <Select value={value} disabled={!field.editable} onValueChange={onChange}>
+          <SelectTrigger id={inputId} aria-label={field.label}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {(field.options ?? []).map((option) => (
+              <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : field.type === "textarea" ? (
+        <Textarea
+          id={inputId}
+          rows={4}
+          value={value}
+          readOnly={!field.editable}
+          disabled={!field.editable}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      ) : (
+        <Input
+          id={inputId}
+          type={field.type === "number" ? "number" : undefined}
+          value={value}
+          readOnly={!field.editable}
+          disabled={!field.editable}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      )}
       <FieldDescription>
         {field.description}
         {field.hint_link?.href ? (

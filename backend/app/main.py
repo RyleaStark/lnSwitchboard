@@ -17,7 +17,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -596,6 +596,31 @@ admin_app.include_router(nip05_router.api_router)
 
 public_app.include_router(nip05_router.public_router)
 public_app.include_router(lnurl_router.router)
+
+
+@public_app.api_route(
+    "/{path:path}",
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+)
+async def public_fallback(path: str) -> Response:
+    """Handle only paths not claimed by an explicit public application route."""
+
+    if path == ".well-known" or path.startswith(".well-known/"):
+        return PlainTextResponse("Not Found", status_code=status.HTTP_404_NOT_FOUND)
+    settings = get_settings()
+    if settings.public_fallback_mode == "redirect":
+        redirect_url = settings.public_fallback_redirect_url
+        if redirect_url is None:  # pragma: no cover - Settings validation invariant
+            raise RuntimeError("Public fallback redirect URL is not configured")
+        return RedirectResponse(
+            url=redirect_url,
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        )
+    return PlainTextResponse(
+        "Public path not served",
+        status_code=settings.public_fallback_status_code,
+    )
 
 
 def _register_client_redirect(path: str) -> None:

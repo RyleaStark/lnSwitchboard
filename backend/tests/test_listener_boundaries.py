@@ -439,6 +439,92 @@ def test_lightning_address_domain_allows_public_listener(
     assert response.json()["callback"].startswith("http://pay.example/")
 
 
+def test_public_listener_rejects_non_application_paths_with_configured_error(
+    listener_clients: tuple[AppClient, AppClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin, public = listener_clients
+    created = admin.post(
+        "/api/lnaddresses",
+        json={"local_part": "alice", "domain": "pay.example"},
+    )
+    assert created.status_code == 201, created.text
+    monkeypatch.setenv("PUBLIC_FALLBACK_MODE", "reject")
+    monkeypatch.setenv("PUBLIC_FALLBACK_STATUS_CODE", "410")
+    config.get_settings.cache_clear()
+
+    response = public.get("/pricing?source=wallet", headers={"Host": "pay.example"})
+
+    assert response.status_code == 410
+    assert response.text == "Public path not served"
+    assert "location" not in response.headers
+
+
+def test_public_listener_redirects_non_application_paths_to_fixed_destination(
+    listener_clients: tuple[AppClient, AppClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin, public = listener_clients
+    created = admin.post(
+        "/api/lnaddresses",
+        json={"local_part": "alice", "domain": "pay.example"},
+    )
+    assert created.status_code == 201, created.text
+    monkeypatch.setenv("PUBLIC_FALLBACK_MODE", "redirect")
+    monkeypatch.setenv("PUBLIC_FALLBACK_REDIRECT_URL", "https://example.com/payments")
+    config.get_settings.cache_clear()
+
+    response = public.get("/pricing?source=wallet", headers={"Host": "pay.example"})
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://example.com/payments"
+    assert "pricing" not in response.headers["location"]
+    assert "source" not in response.headers["location"]
+
+
+def test_public_listener_keeps_application_routes_in_redirect_mode(
+    listener_clients: tuple[AppClient, AppClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin, public = listener_clients
+    created = admin.post(
+        "/api/lnaddresses",
+        json={"local_part": "alice", "domain": "pay.example"},
+    )
+    assert created.status_code == 201, created.text
+    monkeypatch.setenv("PUBLIC_FALLBACK_MODE", "redirect")
+    monkeypatch.setenv("PUBLIC_FALLBACK_REDIRECT_URL", "https://example.com/payments")
+    config.get_settings.cache_clear()
+
+    response = public.get(
+        "/.well-known/lnurlp/alice",
+        headers={"Host": "pay.example"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["tag"] == "payRequest"
+
+
+def test_public_listener_does_not_redirect_unknown_well_known_paths(
+    listener_clients: tuple[AppClient, AppClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin, public = listener_clients
+    created = admin.post(
+        "/api/lnaddresses",
+        json={"local_part": "alice", "domain": "pay.example"},
+    )
+    assert created.status_code == 201, created.text
+    monkeypatch.setenv("PUBLIC_FALLBACK_MODE", "redirect")
+    monkeypatch.setenv("PUBLIC_FALLBACK_REDIRECT_URL", "https://example.com/payments")
+    config.get_settings.cache_clear()
+
+    response = public.get("/.well-known/unrelated", headers={"Host": "pay.example"})
+
+    assert response.status_code == 404
+    assert "location" not in response.headers
+
+
 def test_registered_provider_domain_serves_lnurl_and_nostr_public_endpoints(
     listener_clients: tuple[AppClient, AppClient],
     monkeypatch: pytest.MonkeyPatch,

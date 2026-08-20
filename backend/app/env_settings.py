@@ -13,7 +13,12 @@ from pydantic import ValidationError
 from . import config
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-ENV_FILE = Path(os.environ.get("LNSWITCHBOARD_ENV_FILE", BASE_DIR / ".env")).resolve()
+
+
+def _env_file() -> Path:
+    return Path(
+        os.environ.get("LNSWITCHBOARD_ENV_FILE", BASE_DIR / ".env")
+    ).expanduser()
 
 
 ENV_FIELDS: List[Dict[str, Any]] = [
@@ -195,6 +200,37 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "editable": True,
     },
     {
+        "key": "PUBLIC_FALLBACK_MODE",
+        "attr": "public_fallback_mode",
+        "label": "Other Public URLs",
+        "type": "select",
+        "options": [
+            {"value": "reject", "label": "Reject with an error"},
+            {"value": "redirect", "label": "Redirect to another site"},
+        ],
+        "category": "Public Listener",
+        "description": "Choose what port 21212 does with paths that are not registered lnSwitchboard public endpoints.",
+        "editable": True,
+    },
+    {
+        "key": "PUBLIC_FALLBACK_STATUS_CODE",
+        "attr": "public_fallback_status_code",
+        "label": "Rejection Status Code",
+        "type": "number",
+        "category": "Public Listener",
+        "description": "HTTP 4xx or 5xx status returned in rejection mode (default 404).",
+        "editable": True,
+    },
+    {
+        "key": "PUBLIC_FALLBACK_REDIRECT_URL",
+        "attr": "public_fallback_redirect_url",
+        "label": "Redirect Destination",
+        "type": "text",
+        "category": "Public Listener",
+        "description": "Fixed absolute HTTP(S) destination used in redirect mode. Incoming paths and query strings are never copied.",
+        "editable": True,
+    },
+    {
         "key": "UI_POLL_SECONDS",
         "attr": "ui_poll_seconds",
         "label": "UI Poll Interval (seconds)",
@@ -290,16 +326,18 @@ def list_env_settings() -> List[Dict[str, Any]]:
                 "editable": field["editable"],
                 "value": _serialize_value(raw_value),
                 "hint_link": field.get("hint_link"),
+                "options": field.get("options"),
             }
         )
     return results
 
 
 def _load_env_values() -> Dict[str, str]:
+    env_file = _env_file()
     values: Dict[str, str] = {}
-    if not ENV_FILE.exists():
+    if not env_file.exists():
         return values
-    with ENV_FILE.open("r", encoding="utf-8") as fh:
+    with env_file.open("r", encoding="utf-8") as fh:
         for raw in fh.readlines():
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -325,10 +363,11 @@ def _format_env_value(value: str) -> str:
 
 
 def _write_env_file(values: Dict[str, str]) -> None:
+    env_file = _env_file()
     lines: List[str] = []
     seen: set[str] = set()
-    if ENV_FILE.exists():
-        with ENV_FILE.open("r", encoding="utf-8") as fh:
+    if env_file.exists():
+        with env_file.open("r", encoding="utf-8") as fh:
             for raw in fh.readlines():
                 stripped = raw.strip()
                 if stripped and not stripped.startswith("#") and "=" in stripped:
@@ -343,8 +382,8 @@ def _write_env_file(values: Dict[str, str]) -> None:
     for key, value in values.items():
         if key not in seen:
             lines.append(f"{key}={_format_env_value(value)}")
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with ENV_FILE.open("w", encoding="utf-8") as fh:
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    with env_file.open("w", encoding="utf-8") as fh:
         fh.write("\n".join(lines).rstrip() + "\n")
 
 

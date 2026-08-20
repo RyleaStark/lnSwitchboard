@@ -945,6 +945,17 @@ def test_env_settings_get(test_client: TestClient):
     assert "RATE_LIMIT_PER_MIN" in keys
     assert "WEBHOOK_MAX_RETRIES" in keys
     assert "WEBHOOK_RETRY_WINDOW_SECONDS" in keys
+    assert "PUBLIC_FALLBACK_MODE" in keys
+    assert "PUBLIC_FALLBACK_STATUS_CODE" in keys
+    assert "PUBLIC_FALLBACK_REDIRECT_URL" in keys
+    fallback_mode = next(
+        item for item in payload["settings"] if item["key"] == "PUBLIC_FALLBACK_MODE"
+    )
+    assert fallback_mode["type"] == "select"
+    assert fallback_mode["options"] == [
+        {"value": "reject", "label": "Reject with an error"},
+        {"value": "redirect", "label": "Redirect to another site"},
+    ]
     assert "SERVICE_PORT" not in keys
     assert "DEP_ENV" not in keys
     assert "REQUEST_LOG_PATH" not in keys
@@ -996,6 +1007,59 @@ def test_env_settings_update(test_client: TestClient):
         },
     )
     assert reset.status_code == 200
+
+
+def test_env_settings_validate_public_fallback_policy(test_client: TestClient):
+    missing_destination = test_client.put(
+        "/api/settings/env",
+        json={"values": {"PUBLIC_FALLBACK_MODE": "redirect"}},
+    )
+    assert missing_destination.status_code == 400
+
+    invalid_destination = test_client.put(
+        "/api/settings/env",
+        json={
+            "values": {
+                "PUBLIC_FALLBACK_MODE": "redirect",
+                "PUBLIC_FALLBACK_REDIRECT_URL": "javascript:alert(1)",
+            }
+        },
+    )
+    assert invalid_destination.status_code == 400
+
+    malformed_hostname = test_client.put(
+        "/api/settings/env",
+        json={
+            "values": {
+                "PUBLIC_FALLBACK_MODE": "redirect",
+                "PUBLIC_FALLBACK_REDIRECT_URL": "https://.example.com/payments",
+            }
+        },
+    )
+    assert malformed_hostname.status_code == 400
+
+    invalid_status = test_client.put(
+        "/api/settings/env",
+        json={"values": {"PUBLIC_FALLBACK_STATUS_CODE": 302}},
+    )
+    assert invalid_status.status_code == 400
+
+    valid = test_client.put(
+        "/api/settings/env",
+        json={
+            "values": {
+                "PUBLIC_FALLBACK_MODE": "redirect",
+                "PUBLIC_FALLBACK_REDIRECT_URL": "https://example.com/payments",
+                "PUBLIC_FALLBACK_STATUS_CODE": 410,
+            }
+        },
+    )
+    assert valid.status_code == 200
+    assert set(valid.json()["updated"]) == {
+        "PUBLIC_FALLBACK_MODE",
+        "PUBLIC_FALLBACK_REDIRECT_URL",
+        "PUBLIC_FALLBACK_STATUS_CODE",
+    }
 
 
 def test_public_channels_endpoint(test_client: TestClient):

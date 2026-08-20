@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from .deployment import normalize_deployment_env
 
 import idna
-from pydantic import AliasChoices, Field, ValidationInfo, field_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticUndefined
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -90,6 +90,28 @@ def parse_trusted_hosts(value: str | Sequence[str]) -> tuple[str, ...]:
     return tuple(hosts)
 
 
+def _valid_redirect_hostname(hostname: str) -> bool:
+    """Accept canonical IP literals or conservative ASCII DNS labels."""
+
+    try:
+        ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+    return (
+        bool(hostname)
+        and hostname.isascii()
+        and len(hostname) <= 253
+        and all(
+            0 < len(label) <= 63
+            and label[0].isalnum()
+            and label[-1].isalnum()
+            and all(character.isalnum() or character == "-" for character in label)
+            for label in hostname.split(".")
+        )
+    )
+
+
 def _env_field(*, env: str | Sequence[str], default: Any = PydanticUndefined, **kwargs: Any) -> Any:
     """Helper to map settings fields to environment variables in Pydantic v2."""
 
@@ -132,6 +154,15 @@ class Settings(BaseSettings):
         default="127.0.0.1",
     )
     public_service_port: int = _env_field(env="PUBLIC_SERVICE_PORT", default=21212)
+    public_fallback_mode: Literal["reject", "redirect"] = _env_field(
+        env="PUBLIC_FALLBACK_MODE", default="reject"
+    )
+    public_fallback_status_code: int = _env_field(
+        env="PUBLIC_FALLBACK_STATUS_CODE", default=404, ge=400, le=599
+    )
+    public_fallback_redirect_url: Optional[str] = _env_field(
+        env="PUBLIC_FALLBACK_REDIRECT_URL", default=None
+    )
     public_backend_socket_path: Path = _env_field(
         env="PUBLIC_BACKEND_SOCKET_PATH",
         default=Path("/run/lnswitchboard-public/public.sock"),
@@ -324,6 +355,42 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_dep_env(cls, value: Optional[str]) -> str:
         return normalize_deployment_env(value)
+
+    @field_validator("public_fallback_redirect_url", mode="before")
+    @classmethod
+    def _validate_public_fallback_redirect_url(
+        cls, value: Optional[str]
+    ) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        normalized = str(value).strip()
+        try:
+            parsed = urlsplit(normalized)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("PUBLIC_FALLBACK_REDIRECT_URL must be a valid URL") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or not _valid_redirect_hostname(parsed.hostname)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or any(character.isspace() or ord(character) < 0x20 for character in normalized)
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            raise ValueError(
+                "PUBLIC_FALLBACK_REDIRECT_URL must be an absolute HTTP(S) URL without credentials or a fragment"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def _require_public_fallback_redirect_url(self) -> "Settings":
+        if self.public_fallback_mode == "redirect" and not self.public_fallback_redirect_url:
+            raise ValueError(
+                "PUBLIC_FALLBACK_REDIRECT_URL is required when PUBLIC_FALLBACK_MODE is redirect"
+            )
+        return self
 
     @field_validator("cloudflare_oauth_redirect_loopback")
     @classmethod
@@ -537,4 +604,7 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     """Return cached settings instance."""
-    return Settings()  # type: ignore[arg-type]
+    env_file = Path(
+        os.environ.get("LNSWITCHBOARD_ENV_FILE", Path.cwd() / ".env")
+    ).expanduser()
+    return Settings(_env_file=env_file)  # type: ignore[arg-type]
