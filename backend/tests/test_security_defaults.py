@@ -35,6 +35,26 @@ def _contains_raw_caught_exception(node: ast.AST) -> bool:
     return any(_contains_raw_caught_exception(child) for child in ast.iter_child_nodes(node))
 
 
+def test_cached_settings_load_the_configured_writable_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text(
+        "PUBLIC_FALLBACK_MODE=redirect\n"
+        "PUBLIC_FALLBACK_REDIRECT_URL=https://example.com/payments\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LNSWITCHBOARD_ENV_FILE", str(env_file))
+    monkeypatch.delenv("PUBLIC_FALLBACK_MODE", raising=False)
+    monkeypatch.delenv("PUBLIC_FALLBACK_REDIRECT_URL", raising=False)
+    get_settings.cache_clear()
+
+    settings = get_settings()
+
+    assert settings.public_fallback_mode == "redirect"
+    assert settings.public_fallback_redirect_url == "https://example.com/payments"
+
+
 def test_runtime_logging_never_interpolates_raw_caught_exceptions() -> None:
     app_root = Path(__file__).resolve().parents[1] / "app"
     violations: list[str] = []

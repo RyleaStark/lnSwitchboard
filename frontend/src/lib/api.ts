@@ -173,11 +173,12 @@ export type EnvSetting = {
   key: string
   label: string
   description: string
-  type: "text" | "number" | "textarea"
+  type: "text" | "number" | "textarea" | "select"
   category: string
   editable: boolean
   value: string
   hint_link?: { label?: string; href: string }
+  options?: Array<{ value: string; label: string }>
 }
 
 export type DeploymentEnv = "DOCKER" | "UMBREL" | "UMBREL_DEV"

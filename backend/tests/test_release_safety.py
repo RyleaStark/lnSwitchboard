@@ -184,6 +184,7 @@ def test_primary_application_container_is_least_privilege() -> None:
     )
     assert app.get("privileged") is not True
     assert app["environment"]["LISTENER_MODE"] == "admin"
+    assert app["environment"]["LNSWITCHBOARD_ENV_FILE"] == "/app/secrets/.env"
     assert app["environment"]["DATA_STORE_PATH"] == "/app/secrets/lnswitchboard.db"
     assert app["environment"]["PUBLIC_BACKEND_SOCKET_PATH"] == (
         "/run/lnswitchboard-public/public.sock"
