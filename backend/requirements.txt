@@ -1,10 +1,10 @@
 fastapi==0.141.1
-uvicorn[standard]==0.52.3
+uvicorn[standard]==0.52.4
 grpcio==1.83.0
-protobuf==7.35.1
+protobuf==7.36.0
 httpx==0.28.1
-idna==3.18
+idna==3.19
 cryptography==50.0.0
-python-dotenv==1.2.2
+python-dotenv==1.2.3
 pydantic-settings==2.15.0
 websockets==17.0.1
