@@ -85,6 +85,71 @@ def test_cloudflare_onboarding_uses_oauth_configuration() -> None:
     assert "cloudflare_oauth_token_url" in config
 
 
+def test_mesh_entrypoint_waits_in_place_until_token_is_provisioned(
+    tmp_path: Path,
+) -> None:
+    source = (ROOT / "scripts" / "mesh-entrypoint.sh").read_text(
+        encoding="utf-8"
+    )
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    token_file = tmp_path / "node.env"
+    fake_entrypoint = tmp_path / "entrypoint"
+    wrapper = tmp_path / "mesh-entrypoint.sh"
+    started = tmp_path / "started"
+
+    fake_entrypoint.write_text(
+        "#!/bin/sh\n"
+        "touch \"$START_FILE\"\n"
+        "trap 'exit 0' TERM INT HUP\n"
+        "while :; do sleep 1; done\n",
+        encoding="utf-8",
+    )
+    fake_entrypoint.chmod(0o755)
+    state_path = str(state_dir)
+    rewritten = source.replace(
+        'STATE_DIR="/var/lib/cloudflare-warp"', f'STATE_DIR="{state_path}"'
+    ).replace(
+        '[ "$STATE_DIR" = "/var/lib/cloudflare-warp" ]',
+        f'[ "$STATE_DIR" = "{state_path}" ]',
+    )
+    rewritten = rewritten.replace('/entrypoint "$@" &', '"$FAKE_ENTRYPOINT" "$@" &')
+    wrapper.write_text(rewritten, encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    environment = {
+        **os.environ,
+        "MESH_NODE_TOKEN_FILE": str(token_file),
+        "MESH_TOKEN_POLL_INTERVAL": "0.05",
+        "FAKE_ENTRYPOINT": str(fake_entrypoint),
+        "START_FILE": str(started),
+    }
+    process = subprocess.Popen(
+        ["sh", str(wrapper)],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        time.sleep(0.25)
+        assert process.poll() is None
+        assert not started.exists()
+
+        token_file.write_text(
+            "MESH_NODE_ID=node-one\nMESH_NODE_TOKEN=token-one\n",
+            encoding="utf-8",
+        )
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not started.exists():
+            time.sleep(0.05)
+        assert started.exists()
+        assert process.poll() is None
+    finally:
+        process.send_signal(signal.SIGTERM)
+        process.communicate(timeout=5)
+
+
 def test_mesh_entrypoint_stops_connector_and_clears_stale_identity() -> None:
     script = (ROOT / "scripts" / "mesh-entrypoint.sh").read_text(encoding="utf-8")
 
