@@ -38,6 +38,21 @@ def test_forwarding_discovery_payload_validation():
         validate_discovery_payload({"status": "ERROR", "reason": "Unable to find valid user wallet."})
 
 
+@pytest.mark.parametrize("field", ["minSendable", "maxSendable"])
+def test_forwarding_discovery_rejects_boolean_limits(field):
+    payload = {
+        "callback": "https://example.com/lnurl/callback",
+        "maxSendable": 10_000,
+        "minSendable": 1_000,
+        "metadata": '[["text/plain","Pay forwarded target"]]',
+        "tag": "payRequest",
+    }
+    payload[field] = False
+
+    with pytest.raises(ForwardingTargetError, match="valid sendable limits"):
+        validate_discovery_payload(payload)
+
+
 def test_forwarding_validation_and_create(monkeypatch, test_client):
     async def fake_fetch(forward_to):
         assert forward_to == "Bones@WalletOfSatoshi.com"

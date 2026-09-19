@@ -175,7 +175,13 @@ _REQUEST_HISTORY_SECRET_FRAGMENTS = (
 
 def _safe_request_history_details(event: str, details: Any) -> Dict[str, Any] | None:
     normalized = _normalize_details(details)
-    if normalized is None or event not in {"discovery", "forward", "invoice", "verify"}:
+    if normalized is None or event not in {
+        "discovery",
+        "forward",
+        "invoice",
+        "rate_limit",
+        "verify",
+    }:
         return normalized
 
     def scrub(value: Any) -> Any:
@@ -216,21 +222,24 @@ _INVOICE_OPERATIONAL_DROP_KEYS = {
     "callback",
     "callback_http",
     "callback_lnurl",
+    "comment",
     "forwarding_target",
     "ln_client_response",
     "metadata_for_hash",
     "message",
     "memo",
+    "oauth_code",
+    "payerdata",
+    "payerdata_raw",
     "payment_request_preview",
     "preimage",
-    "r_preimage",
+    "pr",
     "proxy",
     "query",
+    "r_preimage",
     "remote_callback",
     "response",
-    "oauth_code",
     "state",
-    "pr",
 }
 
 _INVOICE_OPERATIONAL_DROP_FRAGMENTS = (
@@ -575,7 +584,7 @@ class RequestLogStorage:
             """
             SELECT id, event, status, message, details
             FROM request_logs
-            WHERE event IN ('discovery', 'forward', 'invoice', 'verify')
+            WHERE event IN ('discovery', 'forward', 'invoice', 'rate_limit', 'verify')
             """
         ).fetchall()
         failure_messages = {
@@ -935,7 +944,7 @@ class RequestLogStorage:
     async def append(self, entry: LogEntry) -> Optional[int]:
         payload = asdict(entry)
         event = str(payload.get("event") or "")
-        if event in {"discovery", "forward", "invoice", "verify"}:
+        if event in {"discovery", "forward", "invoice", "rate_limit", "verify"}:
             payload["ip"] = "redacted"
         payload["details"] = _safe_request_history_details(event, payload.get("details"))
         if str(payload.get("status") or "") == "error" and payload.get("message"):

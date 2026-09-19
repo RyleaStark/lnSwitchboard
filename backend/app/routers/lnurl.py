@@ -327,6 +327,7 @@ async def _forward_lnurl_pay(
     domain: str,
     ln_address: str,
     override: Dict[str, Any],
+    settings: Settings,
     storage: RequestLogStorage,
 ) -> Dict[str, Any]:
     forward_to = override.get("forward_to")
@@ -387,8 +388,33 @@ async def _forward_lnurl_pay(
     if tag:
         base_details["tag"] = tag
 
+    remote_min_sendable = target.payload.get("minSendable")
+    remote_max_sendable = target.payload.get("maxSendable")
+    if (
+        isinstance(remote_min_sendable, bool)
+        or not isinstance(remote_min_sendable, int)
+        or isinstance(remote_max_sendable, bool)
+        or not isinstance(remote_max_sendable, int)
+    ):
+        return _lnurl_error("Forwarding target returned invalid limits")
+
+    override_min_sat = override.get("min_sendable_sat")
+    override_max_sat = override.get("max_sendable_sat")
+    local_min_sat = settings.min_sendable_sat
+    if override_min_sat is not None:
+        local_min_sat = max(local_min_sat, override_min_sat)
+    local_max_sat = settings.max_sendable_sat
+    if override_max_sat is not None:
+        local_max_sat = min(local_max_sat, override_max_sat)
+    effective_min_sendable = max(remote_min_sendable, max(1, local_min_sat) * 1000)
+    effective_max_sendable = min(remote_max_sendable, local_max_sat * 1000)
+    if effective_max_sendable < effective_min_sendable:
+        return _lnurl_error("Forwarding target has no allowed amount range")
+
     discovery_response = dict(target.payload)
     discovery_response["callback"] = callback_http_url
+    discovery_response["minSendable"] = effective_min_sendable
+    discovery_response["maxSendable"] = effective_max_sendable
     if amount is None:
         details = dict(base_details)
         details["response"] = discovery_response
@@ -406,11 +432,8 @@ async def _forward_lnurl_pay(
 
     if amount <= 0:
         return _lnurl_error("Amount must be positive")
-    min_sendable = target.payload.get("minSendable")
-    max_sendable = target.payload.get("maxSendable")
-    if isinstance(min_sendable, int) and isinstance(max_sendable, int):
-        if amount < min_sendable or amount > max_sendable:
-            return _lnurl_error("Amount outside allowed range")
+    if amount < effective_min_sendable or amount > effective_max_sendable:
+        return _lnurl_error("Amount outside allowed range")
 
     try:
         invoice_response = await fetch_forwarding_invoice(
@@ -532,6 +555,8 @@ async def lnurl_pay(
         username=raw_username,
         domain=domain,
     )
+    if settings.require_configured_ln_address and override is None:
+        return _lnurl_error("Lightning address not configured")
     override_min_sat = override.get("min_sendable_sat") if override else None
     override_max_sat = override.get("max_sendable_sat") if override else None
     override_metadata = override.get("metadata_description") if override else None
@@ -567,22 +592,24 @@ async def lnurl_pay(
             domain=domain,
             ln_address=ln_address,
             override=override,
+            settings=settings,
             storage=storage,
         )
 
     channel_max_sendable_sat = await _channel_max_sendable_sat(ln_client)
     if channel_max_sendable_sat <= 0:
         return _lnurl_error("No inbound liquidity available")
-    min_sendable_sat = override_min_sat if override_min_sat is not None else settings.min_sendable_sat
-    min_sendable_sat = max(1, min_sendable_sat)
+    min_sendable_sat = settings.min_sendable_sat
+    if override_min_sat is not None:
+        min_sendable_sat = max(min_sendable_sat, override_min_sat)
     if channel_max_sendable_sat < min_sendable_sat:
         return _lnurl_error("Inbound liquidity below configured minimum send amount")
 
-    max_sendable_sat = channel_max_sendable_sat
+    max_sendable_sat = min(channel_max_sendable_sat, settings.max_sendable_sat)
     if override_max_sat is not None:
-        max_sendable_sat = min(channel_max_sendable_sat, override_max_sat)
+        max_sendable_sat = min(max_sendable_sat, override_max_sat)
     if max_sendable_sat < min_sendable_sat:
-        max_sendable_sat = min_sendable_sat
+        return _lnurl_error("Configured maximum below address minimum send amount")
 
     memo_context = _build_template_context(
         raw_username=raw_username,
