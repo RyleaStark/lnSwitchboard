@@ -99,7 +99,12 @@ def validate_discovery_payload(payload: Any) -> dict[str, Any]:
         raise ForwardingTargetError("Forwarding target did not return a valid callback")
     min_sendable = payload.get("minSendable")
     max_sendable = payload.get("maxSendable")
-    if not isinstance(min_sendable, int) or not isinstance(max_sendable, int):
+    if (
+        isinstance(min_sendable, bool)
+        or not isinstance(min_sendable, int)
+        or isinstance(max_sendable, bool)
+        or not isinstance(max_sendable, int)
+    ):
         raise ForwardingTargetError("Forwarding target did not return valid sendable limits")
     if min_sendable < 0 or max_sendable < min_sendable:
         raise ForwardingTargetError("Forwarding target returned invalid sendable limits")

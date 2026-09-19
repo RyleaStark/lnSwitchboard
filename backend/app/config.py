@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from .deployment import normalize_deployment_env
 
 import idna
-from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_core import PydanticUndefined
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -172,8 +172,11 @@ class Settings(BaseSettings):
     lnd_grpc_port: int = _env_field(env="LND_GRPC_PORT", default=10009)
     lnd_tls_path: Path = _env_field(env="LND_TLS_PATH", default=Path("secrets/tls.cert"))
     lnd_tls_server_name: Optional[str] = _env_field(env="LND_TLS_SERVER_NAME", default=None)
-    max_sendable_sat: int = _env_field(env="MAX_SENDABLE_SAT", default=1_000_000)
-    min_sendable_sat: int = _env_field(env="MIN_SENDABLE_SAT", default=1)
+    max_sendable_sat: int = _env_field(env="MAX_SENDABLE_SAT", default=1_000_000, ge=1)
+    min_sendable_sat: int = _env_field(env="MIN_SENDABLE_SAT", default=1, ge=1)
+    require_configured_ln_address: bool = _env_field(
+        env="LNURL_REQUIRE_CONFIGURED_ADDRESS", default=False
+    )
     metadata_description: str = _env_field(env="LNURL_METADATA_DESCRIPTION", default="Pay {ln_address}")
     success_message: str = _env_field(
         env="LNURL_SUCCESS_MESSAGE",
@@ -558,13 +561,11 @@ class Settings(BaseSettings):
             ) from exc
         return value
 
-    @field_validator("max_sendable_sat")
-    @classmethod
-    def _validate_max_sendable(cls, value: int, info: ValidationInfo) -> int:
-        min_value = info.data.get("min_sendable_sat", 1)
-        if value < min_value:
+    @model_validator(mode="after")
+    def _validate_sendable_range(self) -> "Settings":
+        if self.max_sendable_sat < self.min_sendable_sat:
             raise ValueError("MAX_SENDABLE_SAT must be >= MIN_SENDABLE_SAT")
-        return value
+        return self
 
     @field_validator("comment_max_length")
     @classmethod

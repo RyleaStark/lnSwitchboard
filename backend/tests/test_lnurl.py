@@ -10,6 +10,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ..app import config, deps
@@ -66,6 +67,102 @@ def test_lnurl_metadata(test_client: TestClient):
     assert data["minSendable"] > 0
     assert data["maxSendable"] >= data["minSendable"]
     assert data["commentAllowed"] == config.get_settings().comment_max_length
+
+
+def test_lnurl_enforces_configured_global_maximum(test_client: TestClient, monkeypatch):
+    monkeypatch.setenv("MAX_SENDABLE_SAT", "500")
+    config.get_settings.cache_clear()
+
+    response = test_client.get("/.well-known/lnurlp/bones")
+
+    assert response.status_code == 200
+    assert response.json()["maxSendable"] == 500_000
+
+
+def test_lnurl_rejects_address_minimum_above_global_maximum(
+    test_client: TestClient,
+    monkeypatch,
+):
+    created = test_client.post(
+        "/api/lnaddresses",
+        json={
+            "local_part": "large",
+            "domain": "testserver",
+            "min_sats": 600,
+        },
+    )
+    assert created.status_code == 201
+    monkeypatch.setenv("MAX_SENDABLE_SAT", "500")
+    config.get_settings.cache_clear()
+
+    response = test_client.get("/.well-known/lnurlp/large")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ERROR",
+        "reason": "Configured maximum below address minimum send amount",
+    }
+
+
+def test_lnurl_global_minimum_cannot_be_lowered_by_address_override(
+    test_client: TestClient,
+    monkeypatch,
+):
+    created = test_client.post(
+        "/api/lnaddresses",
+        json={
+            "local_part": "small",
+            "domain": "testserver",
+            "min_sats": 2,
+        },
+    )
+    assert created.status_code == 201
+    monkeypatch.setenv("MIN_SENDABLE_SAT", "10")
+    config.get_settings.cache_clear()
+
+    response = test_client.get("/.well-known/lnurlp/small")
+
+    assert response.status_code == 200
+    assert response.json()["minSendable"] == 10_000
+
+
+def test_lnurl_can_require_an_explicitly_configured_address(
+    test_client: TestClient,
+    monkeypatch,
+):
+    monkeypatch.setenv("LNURL_REQUIRE_CONFIGURED_ADDRESS", "true")
+    config.get_settings.cache_clear()
+    calls_before = len(test_client.app.state.test_invoice_calls)
+
+    missing = test_client.get(
+        "/.well-known/lnurlp/bones",
+        params={"amount": 1000},
+    )
+
+    assert missing.status_code == 200
+    assert missing.json() == {
+        "status": "ERROR",
+        "reason": "Lightning address not configured",
+    }
+    assert len(test_client.app.state.test_invoice_calls) == calls_before
+
+    created = test_client.post(
+        "/api/lnaddresses",
+        json={"local_part": "tips", "domain": "testserver"},
+    )
+    assert created.status_code == 201
+
+    tagged = test_client.get("/.well-known/lnurlp/tips+coffee")
+    assert tagged.status_code == 200
+    assert tagged.json()["tag"] == "payRequest"
+
+    allowed = test_client.get(
+        "/.well-known/lnurlp/tips",
+        params={"amount": 1000},
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["pr"].startswith("lnbc")
+    assert len(test_client.app.state.test_invoice_calls) == calls_before + 1
 
 
 def test_untrusted_forwarding_headers_cannot_spoof_public_urls(test_client: TestClient):
@@ -943,11 +1040,24 @@ def test_env_settings_get(test_client: TestClient):
     keys = {item["key"] for item in payload["settings"]}
     assert "LNURL_METADATA_DESCRIPTION" in keys
     assert "RATE_LIMIT_PER_MIN" in keys
+    assert "LNURL_REQUIRE_CONFIGURED_ADDRESS" in keys
     assert "WEBHOOK_MAX_RETRIES" in keys
     assert "WEBHOOK_RETRY_WINDOW_SECONDS" in keys
     assert "PUBLIC_FALLBACK_MODE" in keys
     assert "PUBLIC_FALLBACK_STATUS_CODE" in keys
     assert "PUBLIC_FALLBACK_REDIRECT_URL" in keys
+    strict_addresses = next(
+        item
+        for item in payload["settings"]
+        if item["key"] == "LNURL_REQUIRE_CONFIGURED_ADDRESS"
+    )
+    assert strict_addresses["type"] == "select"
+    assert strict_addresses["editable"] is True
+    assert strict_addresses["value"] == "false"
+    maximum = next(
+        item for item in payload["settings"] if item["key"] == "MAX_SENDABLE_SAT"
+    )
+    assert maximum["editable"] is True
     fallback_mode = next(
         item for item in payload["settings"] if item["key"] == "PUBLIC_FALLBACK_MODE"
     )
@@ -972,6 +1082,46 @@ def test_version_includes_deployment_environment(test_client: TestClient, monkey
     response = test_client.get("/api/version")
     assert response.status_code == 200
     assert response.json()["dep_env"] == "UMBREL_DEV"
+
+
+def test_env_settings_rejects_global_maximum_below_minimum(test_client: TestClient):
+    response = test_client.put(
+        "/api/settings/env",
+        json={
+            "values": {
+                "MIN_SENDABLE_SAT": 10,
+                "MAX_SENDABLE_SAT": 5,
+            }
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_sendable_limits_must_be_positive(
+    test_client: TestClient,
+    monkeypatch,
+):
+    monkeypatch.setenv("LND_HOST", "127.0.0.1")
+    monkeypatch.setenv("MIN_SENDABLE_SAT", "0")
+    monkeypatch.setenv("MAX_SENDABLE_SAT", "0")
+    config.get_settings.cache_clear()
+    with pytest.raises(ValueError):
+        config.get_settings()
+    monkeypatch.setenv("MIN_SENDABLE_SAT", "1")
+    monkeypatch.setenv("MAX_SENDABLE_SAT", "1000000")
+    config.get_settings.cache_clear()
+
+    response = test_client.put(
+        "/api/settings/env",
+        json={
+            "values": {
+                "MIN_SENDABLE_SAT": 0,
+                "MAX_SENDABLE_SAT": 0,
+            }
+        },
+    )
+    assert response.status_code == 400
 
 
 def test_env_settings_update(test_client: TestClient):
@@ -1404,6 +1554,69 @@ def test_forwarded_lnurl_discovery_and_invoice(monkeypatch, test_client: TestCli
     invoices = invoices_resp.json()["items"]
     assert invoices
     assert invoices[0]["status"] == "forwarded"
+
+
+def test_forwarded_lnurl_intersects_remote_and_local_limits(
+    monkeypatch,
+    test_client: TestClient,
+):
+    target = forwarding_target()
+
+    async def fake_discovery(forward_to):
+        assert forward_to == "bones@walletofsatoshi.com"
+        return target
+
+    invoice_calls = 0
+
+    async def fake_forwarding_invoice(callback_url, params):
+        nonlocal invoice_calls
+        invoice_calls += 1
+        return {"pr": "lnbc1forward", "routes": []}
+
+    monkeypatch.setattr(
+        "backend.app.routers.ln_addresses.fetch_forwarding_discovery",
+        fake_discovery,
+    )
+    created = test_client.post(
+        "/api/lnaddresses",
+        json={
+            "local_part": "capped",
+            "domain": "testserver",
+            "routing_mode": "forward",
+            "forward_to": "bones@walletofsatoshi.com",
+            "min_sats": 2,
+            "max_sats": 30,
+        },
+    )
+    assert created.status_code == 201
+    monkeypatch.setattr(
+        "backend.app.routers.lnurl.fetch_forwarding_discovery",
+        fake_discovery,
+    )
+    monkeypatch.setattr(
+        "backend.app.routers.lnurl.fetch_forwarding_invoice",
+        fake_forwarding_invoice,
+    )
+    monkeypatch.setenv("MIN_SENDABLE_SAT", "10")
+    monkeypatch.setenv("MAX_SENDABLE_SAT", "50")
+    config.get_settings.cache_clear()
+
+    discovery = test_client.get("/.well-known/lnurlp/capped")
+    assert discovery.status_code == 200
+    assert discovery.json()["minSendable"] == 10_000
+    assert discovery.json()["maxSendable"] == 30_000
+
+    below = test_client.get(
+        "/.well-known/lnurlp/capped",
+        params={"amount": 5_000},
+    )
+    above = test_client.get(
+        "/.well-known/lnurlp/capped",
+        params={"amount": 40_000},
+    )
+    assert below.json() == {"status": "ERROR", "reason": "Amount outside allowed range"}
+    assert above.json() == {"status": "ERROR", "reason": "Amount outside allowed range"}
+    assert invoice_calls == 0
 
 
 def test_forwarded_lnurl_unavailable_target_uses_lnurl_shape(monkeypatch, test_client: TestClient):

@@ -117,12 +117,21 @@ ENV_FIELDS: List[Dict[str, Any]] = [
         "label": "Maximum Receivable (sats)",
         "type": "number",
         "category": "LNURL",
-        "description": "Automatically matches the largest receivable channel.",
-        "hint_link": {
-            "label": "Review your channel capacity here",
-            "href": "/liquidity/",
-        },
-        "editable": False,
+        "description": "Largest LNURL invoice amount allowed, capped further by live receiving capacity and any per-address maximum.",
+        "editable": True,
+    },
+    {
+        "key": "LNURL_REQUIRE_CONFIGURED_ADDRESS",
+        "attr": "require_configured_ln_address",
+        "label": "Require Configured Addresses",
+        "type": "select",
+        "options": [
+            {"value": "false", "label": "Allow any valid local part"},
+            {"value": "true", "label": "Only configured addresses"},
+        ],
+        "category": "Security",
+        "description": "Reject public LNURL discovery and invoice requests unless the exact Lightning Address is configured.",
+        "editable": True,
     },
     {
         "key": "LNURL_METADATA_DESCRIPTION",
@@ -297,6 +306,8 @@ def _serialize_value(value: Any) -> str:
         return ""
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, dict):

@@ -12,10 +12,57 @@ import pytest
 from fastapi import HTTPException
 
 from backend.app.ln_address_store import LNAddressStore
-from backend.app.log_storage import InvoiceEvent, RequestLogStorage
+from backend.app.log_storage import (
+    InvoiceEvent,
+    LogEntry,
+    RequestLogStorage,
+    _safe_invoice_event_details,
+)
 from backend.app.routers.webhooks import replay_delivery as replay_delivery_route
 from ..app.outbound_security import OutboundHTTPStatusError, UnsafeOutboundTarget
 from backend.app.webhook_dispatcher import WebhookDispatcher
+
+
+def test_invoice_operational_history_drops_nonessential_payer_content():
+    details = _safe_invoice_event_details(
+        {
+            "domain": "example.com",
+            "comment": "private payer comment",
+            "payerdata": {"name": "Private Payer"},
+            "payerdata_raw": '{"name":"Private Payer"}',
+            # Required until settlement so the worker can publish a Nostr zap receipt.
+            "zap_request": {"content": "private zap note"},
+        }
+    )
+
+    assert details == {
+        "domain": "example.com",
+        "zap_request": {"content": "private zap note"},
+    }
+
+
+def test_rate_limit_history_redacts_client_ip(tmp_path):
+    db_path = tmp_path / "rate-limit-redaction.db"
+    storage = RequestLogStorage(db_path)
+
+    asyncio.run(
+        storage.append(
+            LogEntry.create(
+                username="bones",
+                ip="198.51.100.23",
+                event="rate_limit",
+                domain="example.com",
+                status="blocked",
+                message="rate limit exceeded",
+                details={},
+            )
+        )
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT ip FROM request_logs WHERE event = 'rate_limit'"
+        ).fetchone()[0] == "redacted"
 
 
 async def _create_address(tmp_path):
