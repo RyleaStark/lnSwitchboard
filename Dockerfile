@@ -11,7 +11,7 @@ COPY backend/requirements.txt .
 RUN python -m pip install --no-cache-dir "pip==${PIP_VERSION}" && \
     python -m pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-FROM node:26.7.0-slim@sha256:4ebb5ace66f15a24c14c492e01a8beeed4fddf970a856109f5126e703e5fe503 AS frontend-builder
+FROM node:26.8.2-slim@sha256:f7bb8247fdb16250dbec7fd0e24f091c6f5f0a29d256f3aef5816a7a369166b2 AS frontend-builder
 
 WORKDIR /build/frontend
 
