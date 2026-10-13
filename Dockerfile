@@ -1,4 +1,4 @@
-FROM python:3.14.7-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS builder
+FROM python:3.15.0rc3-slim@sha256:a3af3d230522dd52f7f2191b39e1892912dbcb0c8dee22afdec3dc83baf0f549 AS builder
 
 ARG PIP_VERSION=26.2
 
@@ -11,7 +11,7 @@ COPY backend/requirements.txt .
 RUN python -m pip install --no-cache-dir "pip==${PIP_VERSION}" && \
     python -m pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-FROM node:26.7.0-slim@sha256:4ebb5ace66f15a24c14c492e01a8beeed4fddf970a856109f5126e703e5fe503 AS frontend-builder
+FROM node:26.11.1-slim@sha256:193fe51b64e77981119c98c2002c9e32a70e2f006fb4d25068ce0558998917f0 AS frontend-builder
 
 WORKDIR /build/frontend
 
@@ -20,7 +20,7 @@ RUN npm ci
 COPY frontend ./
 RUN npm run build
 
-FROM python:3.14.7-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS runtime
+FROM python:3.15.0rc3-slim@sha256:a3af3d230522dd52f7f2191b39e1892912dbcb0c8dee22afdec3dc83baf0f549 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
