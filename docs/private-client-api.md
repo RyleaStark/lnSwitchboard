@@ -16,7 +16,13 @@ The domain must already be routed/configured by the operator for public LNURL us
 
 The 201 response contains `client_id`, `token`, `domain`, `scopes`. Save the token securely immediately; it is returned once and stored only as a SHA-256 hash. The fixed bridge configuration is encrypted by the existing connection-secret store. `GET /api/client-credentials` returns safe client metadata, never keys or bridge secrets. `DELETE /api/client-credentials/{client_id}` returns 204 and revokes the credential. Revocation blocks future requests but cannot cancel an RPC already accepted by LND, invalidate an issued invoice or undo a payment. Address/webhook records remain to track outstanding payments.
 
-These are explicit operator endpoints, not client scopes. Operator provisioning is currently API-only. Never place keys in URLs, logs or screenshots. Client responses, validation errors and administration responses use `Cache-Control: no-store, private`.
+These are explicit operator endpoints, not client scopes. Open **Settings → Machine clients** in the authenticated dashboard to provision, list and revoke clients. The token is shown once, held only in component memory and cleared when dismissed or when leaving the tab; signing-secret inputs clear on submission (including failure) and cancellation. Save tokens in a secret manager; copying uses the system clipboard, which you must clear separately. Never place keys in URLs, logs or screenshots. Client responses, validation errors and administration responses use `Cache-Control: no-store, private`.
+
+### Operator listener status (additive)
+
+`GET /api/client-credentials/status` is administration-only and no-store. It returns exactly `enabled` (boolean), `listening` (boolean), `host` (string), `port` (integer), and `allow_private_webhooks` (boolean). Listening is based on the in-process Uvicorn server being started and its task still running, not configuration alone; it does not establish Docker host publication, firewall admission or remote reachability. Unknown/unavailable status must not be treated as ready. All existing credential and client request/response schemas and webhook contracts remain unchanged.
+
+The existing optional `ALLOW_PRIVATE_WEBHOOKS` opt-in is now available under **Settings → Environment → Security → Allow private webhooks**. It remains disabled by default and applies to all webhook delivery. Enabling it permits HTTP/private destinations; restart to apply. Do not enable it for ordinary public HTTPS receivers. Settlement proof is automatic; no new proof toggle or global fixed-invoice expiry setting is introduced. Authorized clients still choose amount and 14/30-day expiry per request.
 
 ## Client requests
 

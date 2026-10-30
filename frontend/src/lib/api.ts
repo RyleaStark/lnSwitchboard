@@ -411,7 +411,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T
 }
 
+export type ClientScope = "addresses:create" | "addresses:read_own" | "invoices:create"
+export type MachineClient = { client_id: string; domain: string; scopes: ClientScope[]; revoked: boolean }
+export type ClientListenerStatus = { enabled: boolean; listening: boolean; host: string; port: number; allow_private_webhooks: boolean }
+export type ClientProvision = { domain: string; webhook_url: string; webhook_secret: string; scopes: ClientScope[] }
+
 export const api = {
+  revokeClient: (id: string) => request<void>(`api/client-credentials/${encodeURIComponent(id)}`, { method: "DELETE", cache: "no-store" }),
+  provisionClient: (payload: ClientProvision) => request<{ client_id: string; token: string; domain: string; scopes: ClientScope[] }>("api/client-credentials", { method: "POST", cache: "no-store", body: JSON.stringify(payload) }),
+  machineClients: () => request<{ clients: MachineClient[] }>("api/client-credentials", { cache: "no-store" }),
+  clientListenerStatus: () => request<ClientListenerStatus>("api/client-credentials/status", { cache: "no-store" }),
   health: () => request<{ status: string }>("api/health"),
   version: () => request<VersionInfo>("api/version"),
   lndStatus: () => request<LndStatus>("api/lnd/status"),

@@ -23,6 +23,19 @@ def _env_file() -> Path:
 
 ENV_FIELDS: List[Dict[str, Any]] = [
     {
+        "key": "ALLOW_PRIVATE_WEBHOOKS",
+        "attr": "allow_private_webhooks",
+        "label": "Allow private webhooks",
+        "type": "select",
+        "options": [
+            {"value": "false", "label": "HTTPS public destinations only"},
+            {"value": "true", "label": "Allow HTTP and private destinations"},
+        ],
+        "category": "Security",
+        "description": "Optional opt-in for trusted webhook receivers on your private network. Allows HTTP and private destinations for all webhook deliveries; HTTP is unencrypted. Enable only when required, then restart lnSwitchboard.",
+        "editable": True,
+    },
+    {
         "key": "SERVICE_PORT",
         "attr": "service_port",
         "label": "Service Port",
