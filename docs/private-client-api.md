@@ -1,6 +1,8 @@
 # Private scoped integration API
 
-This API is mounted **only on the private administration listener**, not the public listener, public gateway or Cloudflare route allowlist. Restrict that listener to trusted operators and integration hosts. Use a private VPN or TLS-protected transport: a bearer token does not encrypt HTTP. Existing administration endpoints retain their network-trusted operator security model; do not publicly expose them.
+This API is mounted on the private administration listener and, when enabled, an additional **client-only LAN listener**. It is not on the public listener, public gateway or Cloudflare route allowlist. Restrict both private listeners to trusted hosts. Use a private VPN or TLS-protected transport: a bearer token does not encrypt HTTP. Existing administration endpoints retain their network-trusted operator security model; do not publicly expose them.
+
+For machine clients that cannot use the dashboard login proxy, set `CLIENT_API_ENABLED=true`, `CLIENT_API_HOST` to the intended bind address (default `127.0.0.1`), and `CLIENT_API_PORT` (default `22122`). This listener serves only `/api/client/v1/`; credential provisioning, settings, dashboard, health and public LNURL routes return 404. It retains the private-client IP guard and mandatory bearer checks and disables Uvicorn proxy-header trust. The Umbrel package binds it inside the app container and publishes port 22122; the dashboard remains behind Umbrel login on 22121. Do not forward 22122 to the Internet. HTTP on a trusted LAN is unencrypted; use private encrypted transport when that is insufficient.
 
 ## Operator provisioning
 

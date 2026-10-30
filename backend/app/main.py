@@ -252,6 +252,39 @@ async def _start_public_backend(
     raise RuntimeError("Public backend socket did not become ready")
 
 
+class _ClientOnlySurface:
+    """Do not route operator/public endpoints through the integration port."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path", "").startswith("/api/client/v1/"):
+            await admin_app(scope, receive, send)
+        elif scope["type"] == "http":
+            await JSONResponse(status_code=404, content={"detail": "Not Found"})(scope, receive, send)
+        elif scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+
+
+client_only_app = _ClientOnlySurface()
+
+
+async def _start_client_backend(*, host: str, port: int) -> tuple[uvicorn.Server, asyncio.Task[None]]:
+    server = uvicorn.Server(uvicorn.Config(
+        app=client_only_app, host=host, port=port, proxy_headers=False,
+        access_log=False, lifespan="off",
+    ))
+    task = asyncio.create_task(server.serve())
+    for _ in range(500):
+        if server.started:
+            return server, task
+        if task.done():
+            await task
+            raise RuntimeError("Client API listener stopped before readiness")
+        await asyncio.sleep(0.01)
+    server.should_exit = True
+    await task
+    raise RuntimeError("Client API listener did not become ready")
+
+
 def _get_admin_proxy_client(request: Request, cidrs: str) -> str | None:
     """Resolve X-Forwarded-For from right to left across local trusted proxies."""
 
@@ -362,6 +395,12 @@ async def lifespan(app: FastAPI):
         public_backend_server, public_backend_task = await _start_public_backend(
             settings.public_backend_socket_path
         )
+    client_backend_server: uvicorn.Server | None = None
+    client_backend_task: asyncio.Task[None] | None = None
+    if settings.client_api_enabled:
+        client_backend_server, client_backend_task = await _start_client_backend(
+            host=settings.client_api_host, port=settings.client_api_port,
+        )
     log_cleanup_task = asyncio.create_task(_periodic_log_cleanup(storage))
     yield
     log_cleanup_task.cancel()
@@ -375,6 +414,10 @@ async def lifespan(app: FastAPI):
         public_backend_server.should_exit = True
         with suppress(asyncio.CancelledError):
             await public_backend_task
+    if client_backend_server is not None and client_backend_task is not None:
+        client_backend_server.should_exit = True
+        with suppress(asyncio.CancelledError):
+            await client_backend_task
     await invoice_full_refresh_worker.stop()
     await invoice_subscription_worker.stop()
     await ln_client.close()
