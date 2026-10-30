@@ -111,3 +111,41 @@ def test_client_start_failure_rolls_back_public_backend_and_workers(monkeypatch)
         assert lnd.close.await_count == 1
 
     asyncio.run(exercise())
+
+
+def test_client_start_cancellation_cleans_up_unreturned_server(monkeypatch):
+    from backend.app import main
+    import pytest
+
+    async def exercise():
+        bound = asyncio.Event()
+        closed = asyncio.Event()
+
+        class DelayedServer:
+            started = False
+            should_exit = False
+
+            def __init__(self, config):
+                pass
+
+            async def serve(self):
+                # Hold the helper in readiness while a real socket is already bound.
+                listener = await asyncio.start_server(lambda r, w: w.close(), '127.0.0.1', 0)
+                bound.set()
+                try:
+                    while not self.should_exit:
+                        await asyncio.sleep(0.01)
+                finally:
+                    listener.close()
+                    await listener.wait_closed()
+                    closed.set()
+
+        monkeypatch.setattr(main.uvicorn, 'Server', DelayedServer)
+        startup = asyncio.create_task(main._start_client_backend(host='127.0.0.1', port=0))
+        await asyncio.wait_for(bound.wait(), 2)
+        startup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await startup
+        assert closed.is_set()
+
+    asyncio.run(exercise())

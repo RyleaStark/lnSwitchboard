@@ -258,16 +258,22 @@ async def _start_client_backend(*, host: str, port: int) -> tuple[uvicorn.Server
         access_log=False, lifespan="off", timeout_graceful_shutdown=2,
     ))
     task = asyncio.create_task(server.serve())
-    for _ in range(500):
-        if server.started:
-            return server, task
-        if task.done():
+    try:
+        for _ in range(500):
+            if server.started:
+                return server, task
+            if task.done():
+                await task
+                raise RuntimeError("Client API listener stopped before readiness")
+            await asyncio.sleep(0.01)
+        raise RuntimeError("Client API listener did not become ready")
+    except BaseException:
+        # Ownership transfers only on successful return. Cancellation during
+        # readiness must not leave a listener serving closed dependencies.
+        server.should_exit = True
+        with suppress(asyncio.CancelledError):
             await task
-            raise RuntimeError("Client API listener stopped before readiness")
-        await asyncio.sleep(0.01)
-    server.should_exit = True
-    await task
-    raise RuntimeError("Client API listener did not become ready")
+        raise
 
 
 def _get_admin_proxy_client(request: Request, cidrs: str) -> str | None:
