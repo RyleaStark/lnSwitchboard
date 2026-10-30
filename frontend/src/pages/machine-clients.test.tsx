@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event"
 import { vi } from "vitest"
 import { MachineClients } from "./machine-clients"
 
+afterEach(() => vi.unstubAllGlobals())
+
 it("clears signing secrets immediately on a failed in-flight provision and prevents duplicate submits", async () => {
   const user = userEvent.setup()
   let finish!: (r: Response) => void
@@ -46,6 +48,9 @@ it("does not imply revocation succeeded on error", async () => {
 it("provisions with fixed routing and clears the one-time secret without query-cache persistence", async () => {
   const user = userEvent.setup()
   const token = "synthetic-one-time-value"
+  const persist = vi.fn()
+  vi.stubGlobal("localStorage", { setItem: persist, getItem: () => null })
+  vi.stubGlobal("sessionStorage", { setItem: persist, getItem: () => null })
   const requests: RequestInit[] = []
   vi.stubGlobal("fetch", vi.fn(async (_input: string, init?: RequestInit) => {
     if (init?.method === "POST") { requests.push(init); return new Response(JSON.stringify({ client_id: "new-client", token, domain: "pay.example.com", scopes: ["addresses:create"] }), { status: 201 }) }
@@ -70,8 +75,7 @@ it("provisions with fixed routing and clears the one-time secret without query-c
   view.unmount()
   render(<QueryClientProvider client={cache}><MachineClients /></QueryClientProvider>)
   expect(screen.queryByDisplayValue(token)).not.toBeInTheDocument()
-  expect(localStorage.length).toBe(0)
-  expect(sessionStorage.length).toBe(0)
+  expect(persist).not.toHaveBeenCalled()
 })
 
 it("requires confirmation before revoking and refreshes authoritative state", async () => {
