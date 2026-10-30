@@ -204,6 +204,16 @@ def test_proof_projection_is_allowlisted_and_historical_fields_cannot_fabricate_
     assert payload["settlement_proof"] == PROOF
 
 
+def test_real_lnd_protobuf_snapshot_preserves_authoritative_fields():
+    from backend.app.ln_client import LNClient
+    from backend.app.lnrpc import Invoice
+    from backend.app.settlement_evidence import proof_from_snapshot
+    invoice = Invoice(state=1, settled=True, amt_paid_msat=2200, settle_date=1790000000,
+                      creation_date=1789999900, expiry=3600, r_hash=b"a" * 32)
+    snapshot = LNClient._build_invoice_snapshot(None, invoice)
+    assert proof_from_snapshot(snapshot) == PROOF
+
+
 def test_proof_numeric_upper_bounds_are_json_safe():
     from backend.app.settlement_evidence import proof_from_snapshot
     assert proof_from_snapshot({"state": "SETTLED", "settled": True,
