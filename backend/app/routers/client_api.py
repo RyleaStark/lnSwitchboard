@@ -10,7 +10,7 @@ from uuid import uuid4
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..client_store import ClientStore, digest
@@ -82,6 +82,16 @@ def idempotency_key(value: str | None) -> str:
 
 def address_result(record: dict) -> dict:
     return {"address_id": record["id"], "ln_address": f'{record["local_part"]}@{record["domain"]}'}
+
+
+@router.get("/api/client-credentials/status")
+async def client_status(request: Request):
+    settings = get_settings()
+    listener = getattr(request.app.state, "client_listener", None)
+    listening = bool(listener and listener[0].started and not listener[1].done())
+    return {"enabled": settings.client_api_enabled, "listening": listening,
+            "host": settings.client_api_host, "port": settings.client_api_port,
+            "allow_private_webhooks": settings.allow_private_webhooks}
 
 
 @router.post("/api/client-credentials", status_code=201)

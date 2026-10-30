@@ -14,9 +14,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { api, type AuthStatus, type EnvSetting } from "@/lib/api"
+import { MachineClients } from "@/pages/machine-clients"
 import { shortHash } from "@/lib/format"
 
 const settingsTabs = [
+  { value: "clients", label: "Machine clients", icon: KeyRoundIcon },
   { value: "auth", label: "Macaroon", icon: KeyRoundIcon },
   { value: "nostr", label: "Zap signer", icon: RadioTowerIcon },
   { value: "env", label: "Environment", icon: ServerCogIcon },
@@ -121,6 +123,7 @@ export function SettingsPage() {
             ))}
           </TabsList>
         </div>
+        <TabsContent value="clients"><MachineClients /></TabsContent>
         <TabsContent value="auth">
           <Card>
             <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">

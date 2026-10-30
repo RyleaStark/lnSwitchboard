@@ -394,9 +394,11 @@ async def lifespan(app: FastAPI):
             client_backend_server, client_backend_task = await _start_client_backend(
                 host=settings.client_api_host, port=settings.client_api_port,
             )
+        app.state.client_listener = (client_backend_server, client_backend_task) if client_backend_server else None
         log_cleanup_task = asyncio.create_task(_periodic_log_cleanup(storage))
         yield
     finally:
+        app.state.client_listener = None
         if log_cleanup_task is not None:
             log_cleanup_task.cancel()
             with suppress(asyncio.CancelledError):

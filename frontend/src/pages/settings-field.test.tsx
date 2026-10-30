@@ -1,6 +1,15 @@
 import { render, screen } from "@testing-library/react"
 
-import { EnvField } from "@/pages/settings"
+import { SettingsPage, EnvField } from "@/pages/settings"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import userEvent from "@testing-library/user-event"
+
+it("makes machine client provisioning discoverable in Settings", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ settings: [], clients: [], manual_entry_allowed: true }))))
+  render(<QueryClientProvider client={new QueryClient()}><SettingsPage /></QueryClientProvider>)
+  await userEvent.click(screen.getByRole("tab", { name: "Machine clients" }))
+  expect(screen.getByRole("button", { name: "Add client" })).toBeInTheDocument()
+})
 
 
 describe("environment setting fields", () => {
