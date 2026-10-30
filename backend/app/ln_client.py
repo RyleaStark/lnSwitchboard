@@ -131,7 +131,15 @@ class LNClient:
         memo: str,
         description_hash: bytes | None = None,
         private: bool | None = None,
+        expiry_seconds: int | None = None,
+        r_preimage: bytes | None = None,
     ) -> Dict[str, Any]:
+        if expiry_seconds is not None and (
+            type(expiry_seconds) is not int or not 0 < expiry_seconds <= 365 * 86400
+        ):
+            raise ValueError("Invalid invoice expiry")
+        if r_preimage is not None and (type(r_preimage) is not bytes or len(r_preimage) != 32):
+            raise ValueError("Invalid invoice recovery material")
         stub = await self._load_stub()
         metadata = await self._metadata()
         invoice_kwargs: Dict[str, Any] = {"memo": memo}
@@ -143,6 +151,10 @@ class LNClient:
             invoice_kwargs["description_hash"] = description_hash
         if private is not None:
             invoice_kwargs["private"] = private
+        if expiry_seconds is not None:
+            invoice_kwargs["expiry"] = expiry_seconds
+        if r_preimage is not None:
+            invoice_kwargs["r_preimage"] = r_preimage
         invoice = Invoice(**invoice_kwargs)
         response = await stub.AddInvoice(invoice, metadata=metadata)
         result: Dict[str, Any] = {"payment_request": response.payment_request}

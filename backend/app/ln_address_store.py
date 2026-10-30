@@ -345,6 +345,7 @@ class LNAddressStore:
     async def add_address(
         self,
         *,
+        record_id: Optional[str] = None,
         local_part: str,
         domain: str,
         min_sendable_sat: Optional[int],
@@ -366,7 +367,7 @@ class LNAddressStore:
             encoded_webhooks = _encode_webhook_endpoints(webhook_endpoints, webhook_urls)
             public_endpoints = [_public_endpoint(endpoint) for endpoint in _decode_webhook_endpoints(encoded_webhooks)]
             record = {
-                "id": str(uuid4()),
+                "id": record_id or str(uuid4()),
                 "local_part": normalized_local,
                 "domain": normalized_domain,
                 "routing_mode": normalized_mode,

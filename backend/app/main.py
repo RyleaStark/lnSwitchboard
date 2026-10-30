@@ -44,6 +44,7 @@ from .public_proxy import (
     sanitize_hop_by_hop_headers,
 )
 from .request_utils import get_public_domain, get_public_host
+from .routers import client_api as client_api_router
 from .routers import connections as connections_router
 from .routers import cloudflare_oauth as cloudflare_oauth_router
 from .routers import ln_addresses as ln_addresses_router
@@ -505,6 +506,8 @@ def _add_provider_response_privacy(target_app: FastAPI) -> None:
                 "/api/connections/cloudflare",
                 "/api/cloudflare/oauth",
                 "/api/connections/zrok",
+                "/api/client/",
+                "/api/client-credentials",
             )
         )
         try:
@@ -514,7 +517,9 @@ def _add_provider_response_privacy(target_app: FastAPI) -> None:
                 raise
             LOGGER.error("Unhandled provider administration request failure")
             detail = (
-                "Cloudflare operation failed"
+                "Client operation failed"
+                if request.url.path.startswith(("/api/client/", "/api/client-credentials"))
+                else "Cloudflare operation failed"
                 if request.url.path.startswith(
                     ("/api/connections/cloudflare", "/api/cloudflare/oauth")
                 )
@@ -579,6 +584,8 @@ async def sanitize_provider_validation(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"detail": "Invalid zrok request"},
         )
+    if request.url.path.startswith(("/api/client/", "/api/client-credentials")):
+        return JSONResponse(status_code=422, content={"detail": "Invalid client request"})
     return await request_validation_exception_handler(request, exc)
 
 
@@ -587,6 +594,7 @@ _add_request_security(admin_app)
 _add_provider_response_privacy(admin_app)
 _add_request_security(public_app)
 
+admin_app.include_router(client_api_router.router)
 admin_app.include_router(ui_router.router)
 admin_app.include_router(cloudflare_oauth_router.router)
 admin_app.include_router(connections_router.router)

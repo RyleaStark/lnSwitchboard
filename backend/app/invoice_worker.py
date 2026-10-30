@@ -322,6 +322,17 @@ async def refresh_invoice_statuses(
         try:
             snapshot = await ln_client.lookup_invoice(payment_hash_bytes)
         except LookupError:
+            binding = (event.details or {}).get("client_invoice")
+            if isinstance(binding, dict) and binding.get("creation_pending") is True:
+                # The hash is registered before AddInvoice so a subscription
+                # cannot miss immediate settlement. A racing poll must not
+                # retire that planned event before LND has seen its invoice.
+                await storage.apply_invoice_event_update(
+                    event=event, details=event.details, settled=False, expired=False,
+                    next_check=now + quick_interval, expires_at=_parse_iso8601(event.expires_at),
+                    interval_seconds=int(quick_interval.total_seconds()), settled_at=None,
+                )
+                continue
             logger.info("Invoice lookup returned not found for invoice event %s", event.id)
             await storage.apply_invoice_event_update(
                 event=event,

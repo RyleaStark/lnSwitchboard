@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -176,6 +177,7 @@ class WebhookDispatcher:
         # rather than creating an unreplayable payload-less history row.
         test_payload = dict(test_payload)
         test_payload.pop("settlement_proof", None)
+        test_payload.pop("invoice_binding", None)
         delivery_id = 0
         headers = self._build_headers(address_id=None, delivery_id=delivery_id, endpoint=endpoint, payload=test_payload)
         return await self._attempt_delivery(
@@ -476,6 +478,19 @@ class WebhookDispatcher:
                 })
                 if proof is not None:
                     payload["settlement_proof"] = proof
+        binding = details.get("client_invoice")
+        if (
+            "settlement_proof" in payload and isinstance(binding, dict)
+            and type(binding.get("version")) is int and binding["version"] == 1
+            and binding.get("address_id") == address.get("id")
+            and isinstance(binding.get("client_id"), str)
+            and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", binding["client_id"])
+            and isinstance(binding.get("quote_id"), str)
+            and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", binding["quote_id"])
+        ):
+            payload["invoice_binding"] = {key: binding[key] for key in (
+                "version", "client_id", "address_id", "quote_id",
+            )}
         if details.get("forwarded") is not None:
             payload["forwarded"] = bool(details.get("forwarded"))
         if details.get("forward_to"):

@@ -506,6 +506,11 @@ class RequestLogStorage:
             f"""
             DELETE FROM invoice_events
             WHERE created_at < ?
+              AND NOT (
+                  settled = 0 AND expired = 0 AND COALESCE(expires_at > ?, 0)
+                  AND COALESCE(CASE WHEN json_valid(details)
+                      THEN json_type(details, '$.client_invoice') END, '') = 'object'
+              )
               AND NOT EXISTS (
                   SELECT 1
                   FROM webhook_deliveries
@@ -513,7 +518,7 @@ class RequestLogStorage:
                     AND webhook_deliveries.status NOT IN ({terminal_statuses})
               )
             """,
-            (cutoff_iso,),
+            (cutoff_iso, datetime.now(tz=timezone.utc).isoformat()),
         )
 
     def _redact_legacy_webhook_history(self, conn: sqlite3.Connection) -> None:
