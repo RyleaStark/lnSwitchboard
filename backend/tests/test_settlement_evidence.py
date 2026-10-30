@@ -168,3 +168,47 @@ def test_remote_routes_cannot_relabel_local_evidence(routing):
     dispatcher = WebhookDispatcher(address_store=None)
     payload = dispatcher._build_payload(event=event, details=details, address={}, settled_at=None)
     assert "settlement_proof" not in payload
+
+
+@pytest.mark.parametrize("mutation", [
+    {"version": True}, {"version": "1"}, {"version": 2},
+    {"amount_paid_msat": True}, {"amount_paid_msat": "2200"},
+    {"amount_paid_msat": 0}, {"amount_paid_msat": 9007199254740992},
+    {"settle_date": True}, {"settle_date": "1790000000"},
+    {"settlement_source": "remote_verify"},
+])
+def test_corrupt_persisted_evidence_is_not_signed_as_paid(mutation):
+    from backend.tests.test_webhook_dispatcher import _make_event
+    from backend.app.webhook_dispatcher import WebhookDispatcher
+    event, details = _make_event({"id": "address", "local_part": "pay", "domain": "testserver"})
+    details["invoice"].update({"state": "SETTLED", "settlement_proof": {**PROOF, **mutation}})
+    payload = WebhookDispatcher(address_store=None)._build_payload(
+        event=event, details=details, address={}, settled_at=None,
+    )
+    assert "settlement_proof" not in payload
+
+
+def test_proof_projection_is_allowlisted_and_historical_fields_cannot_fabricate_it():
+    from backend.tests.test_webhook_dispatcher import _make_event
+    from backend.app.webhook_dispatcher import WebhookDispatcher
+    event, details = _make_event({"id": "address", "local_part": "pay", "domain": "testserver"})
+    dispatcher = WebhookDispatcher(address_store=None)
+    invoice = details["invoice"]
+    invoice.update({"state": "SETTLED", "amt_paid_msat": 2200, "settle_date": 1790000000})
+    assert "settlement_proof" not in dispatcher._build_payload(
+        event=event, details=details, address={}, settled_at=None,
+    )
+    invoice["settlement_proof"] = {**PROOF, "r_preimage": "private", "htlcs": ["private"],
+                                   "payer_data": {"name": "private"}}
+    payload = dispatcher._build_payload(event=event, details=details, address={}, settled_at=None)
+    assert payload["settlement_proof"] == PROOF
+
+
+def test_proof_numeric_upper_bounds_are_json_safe():
+    from backend.app.settlement_evidence import proof_from_snapshot
+    assert proof_from_snapshot({"state": "SETTLED", "settled": True,
+                                "amt_paid_msat": 9007199254740991,
+                                "settle_date": 253402300799}) == {
+        "version": 1, "settlement_source": "local_lnd",
+        "amount_paid_msat": 9007199254740991, "settle_date": 253402300799,
+    }
