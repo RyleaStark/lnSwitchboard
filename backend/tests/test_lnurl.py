@@ -439,6 +439,16 @@ def test_lnurl_verify_flow(test_client: TestClient):
         assert key not in latest["details"]
 
 
+def test_verify_never_discloses_open_preimage_or_unbound_invoice(test_client: TestClient):
+    invoice = test_client.get('/.well-known/lnurlp/bones', params={'amount': 2000}).json()
+    payment_hash = invoice['verify'].rsplit('/', 1)[-1]
+    test_client.app.state.invoice_store[payment_hash]['r_preimage'] = bytes.fromhex('02' * 32)
+    response = test_client.get(https_to_http(invoice['verify']))
+    assert response.json()['preimage'] is None
+    wrong = test_client.get(f'/.well-known/lnurlp/unrelated/verify/{payment_hash}')
+    assert wrong.json() == {'status': 'ERROR', 'reason': 'Not found'}
+
+
 def test_lnurl_verify_invalid_hash(test_client: TestClient):
     response = test_client.get("/.well-known/lnurlp/bones/verify/not-a-hex")
     assert response.status_code == 200

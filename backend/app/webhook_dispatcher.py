@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -17,6 +18,7 @@ from .ln_address_store import AddressNotFoundError, LNAddressStore
 from .log_storage import InvoiceEvent, RequestLogStorage
 from .nostr_zaps import NostrZapPublisher
 from .outbound_security import OutboundHTTPStatusError, ensure_public_endpoint, post_to_pinned_endpoint
+from .settlement_evidence import proof_from_snapshot
 from .version import get_version
 
 Sender = Callable[[str, Dict[str, Any], Dict[str, str]], Awaitable[None]]
@@ -67,7 +69,46 @@ class WebhookDispatcher:
         self._retry_tasks_by_delivery: Dict[int, Set[asyncio.Task[Any]]] = {}
         self._delivery_locks: Dict[int, asyncio.Lock] = {}
 
-    async def dispatch_payment_settled(
+    async def dispatch_payment_settled(self, *, event: InvoiceEvent, details: Dict[str, Any],
+                                       settled_at: Optional[datetime]) -> bool:
+        if self._delivery_storage is not None:
+            committed = await self._delivery_storage.get_invoice_event_by_id(event.id)
+            if committed is not None and committed.settled:
+                live_invoice = details.get("invoice") or {}
+                live_preimage = live_invoice.get("r_preimage") if isinstance(live_invoice, dict) else None
+                event = committed
+                details = dict(committed.details or {})
+                if live_preimage and isinstance(details.get("invoice"), dict):
+                    # Nostr receipt generation may use this live-only field;
+                    # never persist it or include it in the HTTP proof projection.
+                    details["invoice"] = {**details["invoice"], "r_preimage": live_preimage}
+                settled_at = datetime.fromisoformat(committed.settled_at) if committed.settled_at else settled_at
+        result = await self._dispatch_payment_settled(event=event, details=details, settled_at=settled_at)
+        if self._delivery_storage is not None:
+            await self._delivery_storage.complete_settlement_notification(event.id)
+        return result
+
+    async def recover_pending_settlements(self) -> int:
+        if self._delivery_storage is None:
+            return 0
+        last_id = 0
+        recovered = 0
+        while True:
+            events = await self._delivery_storage.get_pending_settlement_events(min_id=last_id)
+            if not events:
+                break
+            for event in events:
+                last_id = event.id
+                try:
+                    settled_at = datetime.fromisoformat(event.settled_at) if event.settled_at else None
+                    await self.dispatch_payment_settled(event=event, details=event.details or {}, settled_at=settled_at)
+                    recovered += 1
+                except Exception as exc:
+                    self._logger.warning("Settlement outbox recovery failed for invoice event %s (error_type=%s)",
+                                         event.id, type(exc).__name__)
+        return recovered
+
+    async def _dispatch_payment_settled(
         self,
         *,
         event: InvoiceEvent,
@@ -111,6 +152,8 @@ class WebhookDispatcher:
                 event=event,
                 address_id=record.get("id"),
             )
+            if self._delivery_storage is not None and delivery_id <= 0:
+                raise RuntimeError("Settlement delivery could not be persisted")
             headers = self._build_headers(
                 address_id=record.get("id"),
                 delivery_id=delivery_id,
@@ -173,6 +216,9 @@ class WebhookDispatcher:
         # Test payloads have no authoritative invoice/address record from which
         # they can be safely reconstructed after restart. Keep them transient
         # rather than creating an unreplayable payload-less history row.
+        test_payload = dict(test_payload)
+        test_payload.pop("settlement_proof", None)
+        test_payload.pop("invoice_binding", None)
         delivery_id = 0
         headers = self._build_headers(address_id=None, delivery_id=delivery_id, endpoint=endpoint, payload=test_payload)
         return await self._attempt_delivery(
@@ -241,6 +287,7 @@ class WebhookDispatcher:
     async def resume_pending_retries(self, *, limit: int = 100) -> int:
         if self._delivery_storage is None:
             return 0
+        await self.recover_pending_settlements()
         deliveries = await self._delivery_storage.list_retryable_http_deliveries(limit=limit)
         resumed = 0
         for delivery in deliveries:
@@ -452,6 +499,40 @@ class WebhookDispatcher:
             "invoice_event_id": event.id,
             "request_log_id": event.request_log_id,
         }
+        invoice = details.get("invoice")
+        if (
+            isinstance(invoice, dict)
+            and not details.get("forwarded")
+            and details.get("settlement_source") in (None, "local_lnd")
+        ):
+            stored = invoice.get("settlement_proof")
+            if (
+                isinstance(stored, dict)
+                and type(stored.get("version")) is int
+                and stored["version"] == 1
+                and stored.get("settlement_source") == "local_lnd"
+            ):
+                proof = proof_from_snapshot({
+                    "state": invoice.get("state"),
+                    "settled": invoice.get("settled"),
+                    "amt_paid_msat": stored.get("amount_paid_msat"),
+                    "settle_date": stored.get("settle_date"),
+                })
+                if proof is not None:
+                    payload["settlement_proof"] = proof
+        binding = details.get("client_invoice")
+        if (
+            "settlement_proof" in payload and isinstance(binding, dict)
+            and type(binding.get("version")) is int and binding["version"] == 1
+            and binding.get("address_id") == address.get("id")
+            and isinstance(binding.get("client_id"), str)
+            and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", binding["client_id"])
+            and isinstance(binding.get("quote_id"), str)
+            and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", binding["quote_id"])
+        ):
+            payload["invoice_binding"] = {key: binding[key] for key in (
+                "version", "client_id", "address_id", "quote_id",
+            )}
         if details.get("forwarded") is not None:
             payload["forwarded"] = bool(details.get("forwarded"))
         if details.get("forward_to"):

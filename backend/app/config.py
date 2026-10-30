@@ -149,6 +149,9 @@ class Settings(BaseSettings):
         default="127.0.0.1",
     )
     service_port: int = _env_field(env="SERVICE_PORT", default=22121)
+    client_api_enabled: bool = _env_field(env="CLIENT_API_ENABLED", default=False)
+    client_api_host: str = _env_field(env="CLIENT_API_HOST", default="127.0.0.1")
+    client_api_port: int = _env_field(env="CLIENT_API_PORT", default=22122, ge=1, le=65535)
     public_service_host: str = _env_field(
         env=("PUBLIC_SERVICE_HOST", "LNSWITCHBOARD_PUBLIC_BIND_ADDRESS"),
         default="127.0.0.1",

@@ -966,6 +966,14 @@ async def lnurl_verify(
     if tag:
         details["tag"] = tag
 
+    event = await storage.get_invoice_event_by_hash(payment_hash)
+    if (
+        event is None or event.username != username_clean or event.domain != domain
+        or (event.details or {}).get("username_raw", raw_username) != raw_username
+        or isinstance((event.details or {}).get("client_invoice"), dict)
+    ):
+        return {"status": "ERROR", "reason": "Not found"}
+
     try:
         invoice_info = await ln_client.lookup_invoice(hash_bytes)
     except MacaroonNotConfiguredError:
@@ -1011,8 +1019,8 @@ async def lnurl_verify(
         )
         return {"status": "ERROR", "reason": "Lookup failed"}
 
-    settled = bool(invoice_info.get("settled"))
-    preimage_bytes = invoice_info.get("r_preimage") or b""
+    settled = invoice_info.get("settled") is True
+    preimage_bytes = (invoice_info.get("r_preimage") or b"") if settled else b""
     if isinstance(preimage_bytes, str):
         # If backend already returned hex string, normalize.
         try:

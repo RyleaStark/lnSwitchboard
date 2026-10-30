@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from .ln_client import LNClient
 from .lnurl_forwarding import fetch_forwarding_verify
 from .log_storage import InvoiceEvent, RequestLogStorage
+from .settlement_evidence import proof_from_snapshot
 from .webhook_dispatcher import WebhookDispatcher
 
 LOGGER = logging.getLogger("lnswitchboard.invoice_worker")
@@ -59,6 +60,11 @@ def _merge_invoice_snapshot(
         invoice_details = {}
         details["invoice"] = invoice_details
     invoice_details["settled"] = settled
+    proof = proof_from_snapshot(snapshot)
+    if proof is not None and not details.get("forwarded") and details.get("settlement_source") in (
+        None, "local_lnd",
+    ):
+        invoice_details["settlement_proof"] = proof
     if "state" in snapshot and snapshot["state"] is not None:
         invoice_details["state"] = snapshot["state"]
     if "creation_date" in snapshot and snapshot["creation_date"] is not None:
@@ -316,6 +322,17 @@ async def refresh_invoice_statuses(
         try:
             snapshot = await ln_client.lookup_invoice(payment_hash_bytes)
         except LookupError:
+            binding = (event.details or {}).get("client_invoice")
+            if isinstance(binding, dict) and binding.get("creation_pending") is True:
+                # The hash is registered before AddInvoice so a subscription
+                # cannot miss immediate settlement. A racing poll must not
+                # retire that planned event before LND has seen its invoice.
+                await storage.apply_invoice_event_update(
+                    event=event, details=event.details, settled=False, expired=False,
+                    next_check=now + quick_interval, expires_at=_parse_iso8601(event.expires_at),
+                    interval_seconds=int(quick_interval.total_seconds()), settled_at=None,
+                )
+                continue
             logger.info("Invoice lookup returned not found for invoice event %s", event.id)
             await storage.apply_invoice_event_update(
                 event=event,
@@ -611,6 +628,8 @@ class InvoiceFullRefreshWorker:
             self._task = None
 
     async def run_once(self) -> int:
+        if self._webhook_dispatcher is not None and hasattr(self._webhook_dispatcher, "recover_pending_settlements"):
+            await self._webhook_dispatcher.recover_pending_settlements()
         return await refresh_all_pending_invoices(
             self._storage,
             self._ln_client,

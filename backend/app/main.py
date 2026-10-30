@@ -44,6 +44,7 @@ from .public_proxy import (
     sanitize_hop_by_hop_headers,
 )
 from .request_utils import get_public_domain, get_public_host
+from .routers import client_api as client_api_router
 from .routers import connections as connections_router
 from .routers import cloudflare_oauth as cloudflare_oauth_router
 from .routers import ln_addresses as ln_addresses_router
@@ -251,6 +252,30 @@ async def _start_public_backend(
     raise RuntimeError("Public backend socket did not become ready")
 
 
+async def _start_client_backend(*, host: str, port: int) -> tuple[uvicorn.Server, asyncio.Task[None]]:
+    server = uvicorn.Server(uvicorn.Config(
+        app=client_only_app, host=host, port=port, proxy_headers=False,
+        access_log=False, lifespan="off", timeout_graceful_shutdown=2,
+    ))
+    task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(500):
+            if server.started:
+                return server, task
+            if task.done():
+                await task
+                raise RuntimeError("Client API listener stopped before readiness")
+            await asyncio.sleep(0.01)
+        raise RuntimeError("Client API listener did not become ready")
+    except BaseException:
+        # Ownership transfers only on successful return. Cancellation during
+        # readiness must not leave a listener serving closed dependencies.
+        server.should_exit = True
+        with suppress(asyncio.CancelledError):
+            await task
+        raise
+
+
 def _get_admin_proxy_client(request: Request, cidrs: str) -> str | None:
     """Resolve X-Forwarded-For from right to left across local trusted proxies."""
 
@@ -357,26 +382,40 @@ async def lifespan(app: FastAPI):
         )
     public_backend_server: uvicorn.Server | None = None
     public_backend_task: asyncio.Task[None] | None = None
-    if settings.listener_mode == "admin":
-        public_backend_server, public_backend_task = await _start_public_backend(
-            settings.public_backend_socket_path
-        )
-    log_cleanup_task = asyncio.create_task(_periodic_log_cleanup(storage))
-    yield
-    log_cleanup_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await log_cleanup_task
-    if cloudflare_authorization_cleanup_task is not None:
-        cloudflare_authorization_cleanup_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await cloudflare_authorization_cleanup_task
-    if public_backend_server is not None and public_backend_task is not None:
-        public_backend_server.should_exit = True
-        with suppress(asyncio.CancelledError):
-            await public_backend_task
-    await invoice_full_refresh_worker.stop()
-    await invoice_subscription_worker.stop()
-    await ln_client.close()
+    client_backend_server: uvicorn.Server | None = None
+    client_backend_task: asyncio.Task[None] | None = None
+    log_cleanup_task: asyncio.Task[None] | None = None
+    try:
+        if settings.listener_mode == "admin":
+            public_backend_server, public_backend_task = await _start_public_backend(
+                settings.public_backend_socket_path
+            )
+        if settings.client_api_enabled:
+            client_backend_server, client_backend_task = await _start_client_backend(
+                host=settings.client_api_host, port=settings.client_api_port,
+            )
+        log_cleanup_task = asyncio.create_task(_periodic_log_cleanup(storage))
+        yield
+    finally:
+        if log_cleanup_task is not None:
+            log_cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await log_cleanup_task
+        if cloudflare_authorization_cleanup_task is not None:
+            cloudflare_authorization_cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cloudflare_authorization_cleanup_task
+        if client_backend_server is not None and client_backend_task is not None:
+            client_backend_server.should_exit = True
+            with suppress(asyncio.CancelledError):
+                await client_backend_task
+        if public_backend_server is not None and public_backend_task is not None:
+            public_backend_server.should_exit = True
+            with suppress(asyncio.CancelledError):
+                await public_backend_task
+        await invoice_full_refresh_worker.stop()
+        await invoice_subscription_worker.stop()
+        await ln_client.close()
 
 
 def _add_request_security(target_app: FastAPI) -> None:
@@ -505,6 +544,8 @@ def _add_provider_response_privacy(target_app: FastAPI) -> None:
                 "/api/connections/cloudflare",
                 "/api/cloudflare/oauth",
                 "/api/connections/zrok",
+                "/api/client/",
+                "/api/client-credentials",
             )
         )
         try:
@@ -514,7 +555,9 @@ def _add_provider_response_privacy(target_app: FastAPI) -> None:
                 raise
             LOGGER.error("Unhandled provider administration request failure")
             detail = (
-                "Cloudflare operation failed"
+                "Client operation failed"
+                if request.url.path.startswith(("/api/client/", "/api/client-credentials"))
+                else "Cloudflare operation failed"
                 if request.url.path.startswith(
                     ("/api/connections/cloudflare", "/api/cloudflare/oauth")
                 )
@@ -579,6 +622,8 @@ async def sanitize_provider_validation(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"detail": "Invalid zrok request"},
         )
+    if request.url.path.startswith(("/api/client/", "/api/client-credentials")):
+        return JSONResponse(status_code=422, content={"detail": "Invalid client request"})
     return await request_validation_exception_handler(request, exc)
 
 
@@ -587,6 +632,23 @@ _add_request_security(admin_app)
 _add_provider_response_privacy(admin_app)
 _add_request_security(public_app)
 
+client_only_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+client_only_app.add_exception_handler(RequestValidationError, sanitize_provider_validation)
+_add_request_security(client_only_app)
+_add_provider_response_privacy(client_only_app)
+
+
+@client_only_app.middleware("http")
+async def require_direct_private_client(request: Request, call_next):
+    # This listener has no proxy login or forwarding-header trust boundary.
+    if request.client is None or not _is_lan_address(request.client.host):
+        return PlainTextResponse("Forbidden", status_code=403)
+    return await call_next(request)
+
+
+client_only_app.include_router(client_api_router.client_router)
+admin_app.include_router(client_api_router.router)
+admin_app.include_router(client_api_router.client_router)
 admin_app.include_router(ui_router.router)
 admin_app.include_router(cloudflare_oauth_router.router)
 admin_app.include_router(connections_router.router)
