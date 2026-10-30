@@ -71,6 +71,18 @@ class WebhookDispatcher:
 
     async def dispatch_payment_settled(self, *, event: InvoiceEvent, details: Dict[str, Any],
                                        settled_at: Optional[datetime]) -> bool:
+        if self._delivery_storage is not None:
+            committed = await self._delivery_storage.get_invoice_event_by_id(event.id)
+            if committed is not None and committed.settled:
+                live_invoice = details.get("invoice") or {}
+                live_preimage = live_invoice.get("r_preimage") if isinstance(live_invoice, dict) else None
+                event = committed
+                details = dict(committed.details or {})
+                if live_preimage and isinstance(details.get("invoice"), dict):
+                    # Nostr receipt generation may use this live-only field;
+                    # never persist it or include it in the HTTP proof projection.
+                    details["invoice"] = {**details["invoice"], "r_preimage": live_preimage}
+                settled_at = datetime.fromisoformat(committed.settled_at) if committed.settled_at else settled_at
         result = await self._dispatch_payment_settled(event=event, details=details, settled_at=settled_at)
         if self._delivery_storage is not None:
             await self._delivery_storage.complete_settlement_notification(event.id)

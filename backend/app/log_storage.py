@@ -1838,6 +1838,12 @@ class RequestLogStorage:
         async with self._lock:
             try:
                 with self._connect() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    current = conn.execute("SELECT settled FROM invoice_events WHERE id=?", (event.id,)).fetchone()
+                    if current is None or current["settled"]:
+                        # Paid state and its proof are terminal. A poll may have
+                        # fetched an OPEN/error snapshot before subscription settlement.
+                        return
                     if settled:
                         # The notification obligation and settled state commit
                         # together. Re-observation never recreates an acked one.
@@ -1888,7 +1894,10 @@ class RequestLogStorage:
         async with self._lock:
             with self._connect() as conn:
                 ids = [row[0] for row in conn.execute(
-                    "SELECT invoice_event_id FROM settlement_outbox WHERE invoice_event_id>? ORDER BY invoice_event_id LIMIT ?",
+                    """SELECT o.invoice_event_id FROM settlement_outbox o
+                        JOIN invoice_events e ON e.id=o.invoice_event_id
+                        WHERE o.invoice_event_id>? AND e.settled=1
+                        ORDER BY o.invoice_event_id LIMIT ?""",
                     (min_id, limit),
                 )]
         events = []
