@@ -17,6 +17,7 @@ from .ln_address_store import AddressNotFoundError, LNAddressStore
 from .log_storage import InvoiceEvent, RequestLogStorage
 from .nostr_zaps import NostrZapPublisher
 from .outbound_security import OutboundHTTPStatusError, ensure_public_endpoint, post_to_pinned_endpoint
+from .settlement_evidence import proof_from_snapshot
 from .version import get_version
 
 Sender = Callable[[str, Dict[str, Any], Dict[str, str]], Awaitable[None]]
@@ -173,6 +174,8 @@ class WebhookDispatcher:
         # Test payloads have no authoritative invoice/address record from which
         # they can be safely reconstructed after restart. Keep them transient
         # rather than creating an unreplayable payload-less history row.
+        test_payload = dict(test_payload)
+        test_payload.pop("settlement_proof", None)
         delivery_id = 0
         headers = self._build_headers(address_id=None, delivery_id=delivery_id, endpoint=endpoint, payload=test_payload)
         return await self._attempt_delivery(
@@ -452,6 +455,27 @@ class WebhookDispatcher:
             "invoice_event_id": event.id,
             "request_log_id": event.request_log_id,
         }
+        invoice = details.get("invoice")
+        if (
+            isinstance(invoice, dict)
+            and not details.get("forwarded")
+            and details.get("settlement_source") in (None, "local_lnd")
+        ):
+            stored = invoice.get("settlement_proof")
+            if (
+                isinstance(stored, dict)
+                and type(stored.get("version")) is int
+                and stored["version"] == 1
+                and stored.get("settlement_source") == "local_lnd"
+            ):
+                proof = proof_from_snapshot({
+                    "state": invoice.get("state"),
+                    "settled": invoice.get("settled"),
+                    "amt_paid_msat": stored.get("amount_paid_msat"),
+                    "settle_date": stored.get("settle_date"),
+                })
+                if proof is not None:
+                    payload["settlement_proof"] = proof
         if details.get("forwarded") is not None:
             payload["forwarded"] = bool(details.get("forwarded"))
         if details.get("forward_to"):

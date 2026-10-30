@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from .ln_client import LNClient
 from .lnurl_forwarding import fetch_forwarding_verify
 from .log_storage import InvoiceEvent, RequestLogStorage
+from .settlement_evidence import proof_from_snapshot
 from .webhook_dispatcher import WebhookDispatcher
 
 LOGGER = logging.getLogger("lnswitchboard.invoice_worker")
@@ -59,6 +60,11 @@ def _merge_invoice_snapshot(
         invoice_details = {}
         details["invoice"] = invoice_details
     invoice_details["settled"] = settled
+    proof = proof_from_snapshot(snapshot)
+    if proof is not None and not details.get("forwarded") and details.get("settlement_source") in (
+        None, "local_lnd",
+    ):
+        invoice_details["settlement_proof"] = proof
     if "state" in snapshot and snapshot["state"] is not None:
         invoice_details["state"] = snapshot["state"]
     if "creation_date" in snapshot and snapshot["creation_date"] is not None:

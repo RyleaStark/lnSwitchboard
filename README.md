@@ -38,6 +38,8 @@ Think of your Lightning node as a call center. Every time someone zaps `yourname
 | **Webhook observability** | Persist redacted HTTP webhook and Nostr relay attempt summaries without destinations, payloads, response bodies, or signature headers, and send signed test payloads from the Webhooks reference. |
 | **Env + macaroon management** | Update `.env` safely via the UI, use LND's mounted `invoice.macaroon`, or manually paste/upload a macaroon when no file path is configured. |
 
+Local settled webhooks can include additive, signed [authoritative LND settlement evidence](docs/settlement-evidence.md). The legacy amount fields remain invoice face values, not proof of actual funds received.
+
 ---
 
 ## Getting Started
