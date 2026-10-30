@@ -450,6 +450,9 @@ class RequestLogStorage:
                 )
                 """
             )
+            conn.execute("""CREATE TABLE IF NOT EXISTS settlement_outbox (
+                invoice_event_id INTEGER PRIMARY KEY
+            )""")
             self._ensure_invoice_event_columns(conn)
             self._ensure_webhook_delivery_columns(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp)")
@@ -503,11 +506,14 @@ class RequestLogStorage:
             (cutoff_iso,),
         )
         conn.execute(
-            f"""
+            """
             DELETE FROM invoice_events
-            WHERE created_at < ?
+            WHERE COALESCE(settled_at, created_at) < ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM settlement_outbox WHERE invoice_event_id = invoice_events.id
+              )
               AND NOT (
-                  settled = 0 AND expired = 0 AND COALESCE(expires_at > ?, 0)
+                  settled = 0 AND expired = 0
                   AND COALESCE(CASE WHEN json_valid(details)
                       THEN json_type(details, '$.client_invoice') END, '') = 'object'
               )
@@ -515,10 +521,9 @@ class RequestLogStorage:
                   SELECT 1
                   FROM webhook_deliveries
                   WHERE webhook_deliveries.invoice_event_id = invoice_events.id
-                    AND webhook_deliveries.status NOT IN ({terminal_statuses})
               )
             """,
-            (cutoff_iso, datetime.now(tz=timezone.utc).isoformat()),
+            (cutoff_iso,),
         )
 
     def _redact_legacy_webhook_history(self, conn: sqlite3.Connection) -> None:
@@ -1833,6 +1838,11 @@ class RequestLogStorage:
         async with self._lock:
             try:
                 with self._connect() as conn:
+                    if settled:
+                        # The notification obligation and settled state commit
+                        # together. Re-observation never recreates an acked one.
+                        conn.execute("""INSERT OR IGNORE INTO settlement_outbox (invoice_event_id)
+                            SELECT id FROM invoice_events WHERE id=? AND settled=0""", (event.id,))
                     conn.execute(
                         """
                         UPDATE invoice_events
@@ -1869,9 +1879,29 @@ class RequestLogStorage:
                             (serialized_request_details, event.request_log_id),
                         )
             except sqlite3.Error:
-                return
+                # Never dispatch an uncommitted settlement or lose its outbox obligation.
+                raise
             if event.request_log_id is not None and isinstance(details, dict):
                 self._update_recent_entry(event.request_log_id, details=details)
+
+    async def get_pending_settlement_events(self, *, min_id: int = 0, limit: int = 50) -> List[InvoiceEvent]:
+        async with self._lock:
+            with self._connect() as conn:
+                ids = [row[0] for row in conn.execute(
+                    "SELECT invoice_event_id FROM settlement_outbox WHERE invoice_event_id>? ORDER BY invoice_event_id LIMIT ?",
+                    (min_id, limit),
+                )]
+        events = []
+        for event_id in ids:
+            event = await self.get_invoice_event_by_id(event_id)
+            if event is not None and event.settled:
+                events.append(event)
+        return events
+
+    async def complete_settlement_notification(self, event_id: int) -> None:
+        async with self._lock:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM settlement_outbox WHERE invoice_event_id=?", (event_id,))
 
     async def list_invoice_events(
         self,

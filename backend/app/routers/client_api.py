@@ -23,6 +23,7 @@ from ..connection_secret_store import ConnectionSecretStore
 from ..ln_address_store import AddressConflictError, AddressNotFoundError, LNAddressStore
 
 router = APIRouter(tags=["private_clients"])
+client_router = APIRouter(tags=["private_clients"])
 Scope = Literal["addresses:create", "addresses:read_own", "invoices:create"]
 
 
@@ -99,7 +100,7 @@ async def revoke(client_id: str, store: ClientStore = Depends(store_dep)):
     return Response(status_code=204)
 
 
-@router.post("/api/client/v1/addresses", status_code=201)
+@client_router.post("/api/client/v1/addresses", status_code=201)
 async def create_address(payload: AddressPayload, client: dict = Depends(require_scope("addresses:create")),
                          key: str | None = Header(default=None, alias="Idempotency-Key"),
                          store: ClientStore = Depends(store_dep),
@@ -134,7 +135,7 @@ async def create_address(payload: AddressPayload, client: dict = Depends(require
         store.release(request)
 
 
-@router.get("/api/client/v1/addresses/{address_id}")
+@client_router.get("/api/client/v1/addresses/{address_id}")
 async def read_address(address_id: str, client: dict = Depends(require_scope("addresses:read_own")),
                        store: ClientStore = Depends(store_dep),
                        addresses: LNAddressStore = Depends(get_ln_address_store_dep)):
@@ -158,7 +159,7 @@ class InvoicePayload(StrictPayload):
         return value
 
 
-@router.post("/api/client/v1/addresses/{address_id}/invoices", status_code=201)
+@client_router.post("/api/client/v1/addresses/{address_id}/invoices", status_code=201)
 async def create_invoice(address_id: str, payload: InvoicePayload,
                          client: dict = Depends(require_scope("invoices:create")),
                          key: str | None = Header(default=None, alias="Idempotency-Key"),

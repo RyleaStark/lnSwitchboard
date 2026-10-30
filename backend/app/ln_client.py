@@ -276,7 +276,7 @@ class LNClient:
         result: Dict[str, Any] = {
             "settled": settled,
             "payment_request": payment_request,
-            "r_preimage": bytes(r_preimage) if r_preimage else b"",
+            "r_preimage": bytes(r_preimage) if r_preimage and settled and state_name == "SETTLED" else b"",
             "r_hash": bytes(r_hash) if r_hash else b"",
         }
         if state_name is not None:

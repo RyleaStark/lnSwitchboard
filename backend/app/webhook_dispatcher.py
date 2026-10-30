@@ -69,7 +69,34 @@ class WebhookDispatcher:
         self._retry_tasks_by_delivery: Dict[int, Set[asyncio.Task[Any]]] = {}
         self._delivery_locks: Dict[int, asyncio.Lock] = {}
 
-    async def dispatch_payment_settled(
+    async def dispatch_payment_settled(self, *, event: InvoiceEvent, details: Dict[str, Any],
+                                       settled_at: Optional[datetime]) -> bool:
+        result = await self._dispatch_payment_settled(event=event, details=details, settled_at=settled_at)
+        if self._delivery_storage is not None:
+            await self._delivery_storage.complete_settlement_notification(event.id)
+        return result
+
+    async def recover_pending_settlements(self) -> int:
+        if self._delivery_storage is None:
+            return 0
+        last_id = 0
+        recovered = 0
+        while True:
+            events = await self._delivery_storage.get_pending_settlement_events(min_id=last_id)
+            if not events:
+                break
+            for event in events:
+                last_id = event.id
+                try:
+                    settled_at = datetime.fromisoformat(event.settled_at) if event.settled_at else None
+                    await self.dispatch_payment_settled(event=event, details=event.details or {}, settled_at=settled_at)
+                    recovered += 1
+                except Exception as exc:
+                    self._logger.warning("Settlement outbox recovery failed for invoice event %s (error_type=%s)",
+                                         event.id, type(exc).__name__)
+        return recovered
+
+    async def _dispatch_payment_settled(
         self,
         *,
         event: InvoiceEvent,
@@ -113,6 +140,8 @@ class WebhookDispatcher:
                 event=event,
                 address_id=record.get("id"),
             )
+            if self._delivery_storage is not None and delivery_id <= 0:
+                raise RuntimeError("Settlement delivery could not be persisted")
             headers = self._build_headers(
                 address_id=record.get("id"),
                 delivery_id=delivery_id,
@@ -246,6 +275,7 @@ class WebhookDispatcher:
     async def resume_pending_retries(self, *, limit: int = 100) -> int:
         if self._delivery_storage is None:
             return 0
+        await self.recover_pending_settlements()
         deliveries = await self._delivery_storage.list_retryable_http_deliveries(limit=limit)
         resumed = 0
         for delivery in deliveries:

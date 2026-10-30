@@ -113,6 +113,15 @@ def test_fixed_invoice_timeout_reconciliation_and_authoritative_dates(monkeypatc
         event = asyncio.run(_get_log_storage().get_invoice_event_by_hash(calls[0]))
         assert event.payment_request == result["bolt11"]
         assert event.details["client_invoice"]["creation_pending"] is False
+        from starlette.requests import Request
+        from backend.app.routers.lnurl import lnurl_verify
+        verify_request = Request({"type": "http", "method": "GET", "scheme": "http",
+            "path": "/.well-known/lnurlp/pay/verify/" + calls[0], "query_string": b"",
+            "headers": [(b"host", b"pay.example.com")], "client": ("127.0.0.1", 1234),
+            "server": ("pay.example.com", 80)})
+        public_verify = asyncio.run(lnurl_verify(verify_request,
+            address["ln_address"].split("@")[0], calls[0], ln_client=object(), storage=_get_log_storage()))
+        assert public_verify == {"status": "ERROR", "reason": "Not found"}
 
         from backend.app.invoice_worker import InvoiceSubscriptionWorker
         from backend.app.webhook_dispatcher import WebhookDispatcher

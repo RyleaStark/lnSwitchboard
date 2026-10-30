@@ -628,6 +628,8 @@ class InvoiceFullRefreshWorker:
             self._task = None
 
     async def run_once(self) -> int:
+        if self._webhook_dispatcher is not None and hasattr(self._webhook_dispatcher, "recover_pending_settlements"):
+            await self._webhook_dispatcher.recover_pending_settlements()
         return await refresh_all_pending_invoices(
             self._storage,
             self._ln_client,
