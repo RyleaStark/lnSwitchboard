@@ -258,7 +258,13 @@ class LNClient:
                 return None
 
         settled = bool(getattr(response, "settled", False))
-        state_name = response_dict.get("state")
+        # Proto3 omits the zero-valued OPEN enum from MessageToDict. Preserve
+        # the actual enum instead of treating absence as an unknown state.
+        state_value = getattr(response, "state", None)
+        try:
+            state_name = Invoice.InvoiceState.Name(state_value)
+        except (TypeError, ValueError):
+            state_name = None
         creation_date = _int_or_none(response_dict.get("creation_date"))
         expiry = _int_or_none(response_dict.get("expiry"))
         expires_at_ts: int | None = None
@@ -275,6 +281,7 @@ class LNClient:
         r_hash = getattr(response, "r_hash", b"")
         result: Dict[str, Any] = {
             "settled": settled,
+            "value_msat": int(response.value_msat),
             "payment_request": payment_request,
             "r_preimage": bytes(r_preimage) if r_preimage and settled and state_name == "SETTLED" else b"",
             "r_hash": bytes(r_hash) if r_hash else b"",

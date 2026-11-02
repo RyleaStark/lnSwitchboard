@@ -155,6 +155,33 @@ class ClientStore:
             result["lease_owner"] = owner
             return result
 
+    def invoice_result(self, client_id: str, address_id: str, payment_hash: str) -> dict:
+        """Read an issued invoice without claiming a lease or allocating recovery material."""
+        with sqlite_connection(self.path) as db:
+            rows = db.execute("""SELECT * FROM api_client_requests
+                WHERE client_id=? AND resource_id=? AND payment_hash=? AND kind='invoice'""",
+                (client_id, address_id, payment_hash)).fetchall()
+        if len(rows) != 1 or not rows[0]["result"]:
+            raise HTTPException(404, "Not Found")
+        try:
+            result = json.loads(rows[0]["result"])
+            quote = result["quote_id"]
+            days, remainder = divmod(result["expires_at"] - result["created_at"], 86400)
+            body = {"quote_id": quote, "amount_msat": result["amount_msat"],
+                    "expiry_days": days, "address_id": address_id}
+            fingerprint = digest(json.dumps({"kind": "invoice", "body": body}, sort_keys=True, separators=(",", ":")))
+            if (not isinstance(quote, str) or not quote or len(quote) > 128
+                    or result["address_id"] != address_id or result["payment_hash"] != payment_hash
+                    or rows[0]["logical_id"] != digest(quote) or rows[0]["fingerprint"] != fingerprint
+                    or remainder or days not in (14, 30)
+                    or any(type(result[k]) is not int for k in ("amount_msat", "created_at", "expires_at"))
+                    or not 0 < result["amount_msat"] <= 9007199254740991
+                    or not 0 < result["created_at"] < result["expires_at"] <= 253402300799):
+                raise ValueError("Invalid binding")
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(503, "Invoice tracking unavailable") from None
+        return result
+
     def confirm_invoice(self, payment_hash: str, payment_request: str, expires_at: str) -> None:
         with sqlite_connection(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
