@@ -191,7 +191,7 @@
             "allowTernary": false
           }
         ],
-        "no-unused-vars": "error",
+        "no-unused-vars": ["error", {"reportVarsOnlyUsedAsTypes": true}],
         "typescript/no-wrapper-object-types": "error",
         "typescript/prefer-as-const": "error",
         "typescript/prefer-namespace-keyword": "error",

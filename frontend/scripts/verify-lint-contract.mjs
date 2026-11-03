@@ -44,6 +44,9 @@ test('supported native lint toolchain replaces vulnerable ESLint graph', () => {
 
 const probes = [
   ['legacy octal', 'export const x = 010', 'ParsingError|parser|octal'],
+  ['underscore local', 'export function f() { const _unused = 1; return 2 }', 'no-unused-vars'],
+  ['underscore argument', 'export function f(_unused: number) { return 2 }', 'no-unused-vars'],
+  ['type-only value', 'const value = 1; export type Value = typeof value', 'no-unused-vars'],
   ['unused variable', 'export const x = 1; const unused = 2', 'no-unused-vars'],
   ['explicit any', 'export function f(x: any) { return x }', 'no-explicit-any'],
   ['empty object type', 'export type Empty = {}', 'no-empty-object-type'],

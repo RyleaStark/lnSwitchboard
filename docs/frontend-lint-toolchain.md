@@ -14,7 +14,7 @@ This replaces the ESLint graph whose current parent releases require minimatch v
 
 The existing deliberate exceptions remain: synchronous set-state-in-effect and only-export-components are **not enabled**. Existing warning-level checks stay warnings. Source selection remains `**/*.{ts,tsx}`, with browser globals and Vitest test globals; generated `dist`, `static` and `coverage` directories remain excluded. TypeScript compile/build is unchanged.
 
-Effective options are retained where configurable. Oxlint's preserve-caught-error schema has no `errorClassNames` option; the old value was the empty list, so none were excluded from validation. Its existing `requireCatchParameter: false` is retained.
+Effective options are retained where configurable. `no-unused-vars` uses an explicit options object with `reportVarsOnlyUsedAsTypes: true`: this also disables Oxlint's otherwise implicit underscore-ignore defaults, preserving the former TypeScript-ESLint checks for underscore-prefixed unused locals/arguments and values used only as types. All three have negative CLI fixtures. Oxlint's preserve-caught-error schema has no `errorClassNames` option; the old value was the empty list, so none were excluded from validation. Its existing `requireCatchParameter: false` is retained.
 
 The automatic migration tool skips nested ESLint AND file patterns. The final config is built from the **effective baseline policy**, not accepted blindly from the generated config; in particular no-var, prefer-const, prefer-rest-params and prefer-spread are preserved explicitly.
 
