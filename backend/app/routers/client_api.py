@@ -156,6 +156,78 @@ async def read_address(address_id: str, client: dict = Depends(require_scope("ad
         raise HTTPException(404, "Not Found") from None
 
 
+@client_router.get("/api/client/v1/addresses/{address_id}/invoices/{payment_hash}")
+async def read_invoice(address_id: str, payment_hash: str,
+                       client: dict = Depends(require_scope("invoices:create")),
+                       store: ClientStore = Depends(store_dep),
+                       addresses: LNAddressStore = Depends(get_ln_address_store_dep),
+                       lnd: LNClient = Depends(get_ln_client_dep),
+                       logs: RequestLogStorage = Depends(get_log_storage_dep)):
+    """Authoritative, secret-free read of an already issued client invoice."""
+    if not re.fullmatch(r"[0-9a-f]{64}", payment_hash):
+        raise HTTPException(404, "Not Found")
+    owned = store.own_address(client["id"], address_id)
+
+    async def checked_address():
+        try:
+            address = await addresses.get_address(address_id)
+        except AddressNotFoundError:
+            raise HTTPException(404, "Not Found") from None
+        if (address["routing_mode"] != "local" or address["domain"] != client["domain"]
+                or address["domain"] != owned["domain"] or address["local_part"] != owned["local_part"]):
+            raise HTTPException(409, "Address routing changed")
+        return address
+
+    address = await checked_address()
+    issued = store.invoice_result(client["id"], address_id, payment_hash)
+    event = await logs.get_invoice_event_by_hash(payment_hash)
+    details = event.details if event is not None and isinstance(event.details, dict) else {}
+    binding = details.get("client_invoice")
+    expected = {"version": 1, "client_id": client["id"], "address_id": address_id,
+                "quote_id": issued["quote_id"], "creation_pending": False}
+    if (event is None or not isinstance(binding, dict) or any(type(binding.get(k)) is not type(v) or binding.get(k) != v
+                                            for k, v in expected.items())
+            or not isinstance(details.get("address_override"), dict)
+            or details["address_override"].get("id") != address_id
+            or event.username != address["local_part"] or event.domain != address["domain"]
+            or type(event.amount_msat) is not int or event.amount_msat != issued["amount_msat"]):
+        raise HTTPException(404, "Not Found")
+    try:
+        snapshot = await asyncio.wait_for(lnd.lookup_invoice(bytes.fromhex(payment_hash)), timeout=20)
+        returned_hash = snapshot.get("r_hash")
+        if isinstance(returned_hash, bytes):
+            returned_hash = returned_hash.hex()
+        if (returned_hash != payment_hash
+                or any(type(snapshot.get(k)) is not int for k in ("value_msat", "creation_date", "expiry"))
+                or snapshot["value_msat"] != issued["amount_msat"]
+                or snapshot["creation_date"] != issued["created_at"]
+                or snapshot["expiry"] != issued["expires_at"] - issued["created_at"]):
+            raise ValueError("Invalid snapshot")
+        state = snapshot.get("state")
+        settled = snapshot.get("settled")
+        if state == "CANCELED":
+            raise HTTPException(409, "Invoice canceled")
+        if state not in ("OPEN", "ACCEPTED", "SETTLED") or type(settled) is not bool or settled != (state == "SETTLED"):
+            raise ValueError("Invalid state")
+        paid = snapshot.get("amt_paid_msat", 0)
+        date = snapshot.get("settle_date", 0)
+        if (type(paid) is not int or type(date) is not int
+                or (settled and not (0 < paid <= 9007199254740991 and issued["created_at"] <= date <= 253402300799))
+                or (not settled and (paid != 0 or date != 0))):
+            raise ValueError("Invalid settlement")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(503, "Authoritative invoice details unavailable") from None
+    store.require_active(client["id"])
+    await checked_address()
+    return {"payment_hash": payment_hash, "address_id": address_id,
+            "ln_address": address_result(address)["ln_address"], "client_id": client["id"],
+            "quote_id": issued["quote_id"], "amount_msat": issued["amount_msat"],
+            "created_at": issued["created_at"], "expires_at": issued["expires_at"],
+            "settled": settled, "paid_msat": paid, "settled_at": date}
+
+
 class InvoicePayload(StrictPayload):
     quote_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     amount_msat: int = Field(ge=1, le=9007199254740991)
