@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 import re
-from uuid import uuid4
+from uuid import UUID, uuid4
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -62,6 +62,17 @@ class AddressPayload(StrictPayload):
     external_user_ref: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
 
 
+class AdoptAddressPayload(AddressPayload):
+    address_id: str
+
+    @field_validator("address_id")
+    @classmethod
+    def canonical_uuid(cls, value: str) -> str:
+        if str(UUID(value)) != value:
+            raise ValueError("Canonical UUID required")
+        return value
+
+
 async def store_dep(secrets: ConnectionSecretStore = Depends(get_connection_secret_store_dep)) -> ClientStore:
     return ClientStore(get_settings().data_store_path, secrets)
 
@@ -110,6 +121,12 @@ async def revoke(client_id: str, store: ClientStore = Depends(store_dep)):
     return Response(status_code=204)
 
 
+@router.post("/api/client-credentials/{client_id}/addresses/adopt", status_code=201)
+async def adopt_address(client_id: str, payload: AdoptAddressPayload,
+                        store: ClientStore = Depends(store_dep)):
+    return address_result(store.adopt_address(client_id, payload.address_id, payload.external_user_ref))
+
+
 @client_router.post("/api/client/v1/addresses", status_code=201)
 async def create_address(payload: AddressPayload, client: dict = Depends(require_scope("addresses:create")),
                          key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -146,10 +163,13 @@ async def create_address(payload: AddressPayload, client: dict = Depends(require
 
 
 @client_router.get("/api/client/v1/addresses/{address_id}")
-async def read_address(address_id: str, client: dict = Depends(require_scope("addresses:read_own")),
+async def read_address(address_id: str, user_ref_hash: str | None = None,
+                       client: dict = Depends(require_scope("addresses:read_own")),
                        store: ClientStore = Depends(store_dep),
                        addresses: LNAddressStore = Depends(get_ln_address_store_dep)):
-    store.own_address(client["id"], address_id)
+    if user_ref_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", user_ref_hash):
+        raise HTTPException(404, "Not Found")
+    store.own_address(client["id"], address_id, user_ref_hash)
     try:
         return address_result(await addresses.get_address(address_id))
     except AddressNotFoundError:

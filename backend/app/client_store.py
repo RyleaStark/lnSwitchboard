@@ -81,13 +81,49 @@ class ClientStore:
             if not db.execute("UPDATE api_clients SET revoked=1 WHERE id=?", (client_id,)).rowcount:
                 raise HTTPException(404, "Not Found")
 
-    def own_address(self, client_id: str, address_id: str) -> dict:
+    def own_address(self, client_id: str, address_id: str, user_ref_hash: str | None = None) -> dict:
         with sqlite_connection(self.path) as db:
-            row = db.execute("SELECT * FROM api_owned_addresses WHERE client_id=? AND id=?",
-                             (client_id, address_id)).fetchone()
+            if user_ref_hash is None:
+                row = db.execute("SELECT * FROM api_owned_addresses WHERE client_id=? AND id=?",
+                                 (client_id, address_id)).fetchone()
+            else:
+                row = db.execute("SELECT * FROM api_owned_addresses WHERE client_id=? AND id=? AND user_ref_hash=?",
+                                 (client_id, address_id, user_ref_hash)).fetchone()
         if row is None:
             raise HTTPException(404, "Not Found")
         return dict(row)
+
+    def adopt_address(self, client_id: str, address_id: str, user_ref: str) -> dict:
+        """Bind an existing local address, serialized with revocation and other claims."""
+        ref = digest(user_ref)
+        with sqlite_connection(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            client = db.execute("SELECT domain,revoked FROM api_clients WHERE id=?", (client_id,)).fetchone()
+            if client is None:
+                raise HTTPException(404, "Not Found")
+            if client["revoked"]:
+                raise HTTPException(409, "Client credential revoked")
+            address = db.execute(
+                "SELECT id,local_part,domain,routing_mode FROM ln_addresses WHERE id=?", (address_id,)
+            ).fetchone()
+            if address is None:
+                raise HTTPException(404, "Not Found")
+            if address["domain"] != client["domain"] or address["routing_mode"] != "local":
+                raise HTTPException(409, "Address domain or routing conflict")
+            owned = db.execute("SELECT * FROM api_owned_addresses WHERE id=?", (address_id,)).fetchone()
+            by_ref = db.execute("SELECT id FROM api_owned_addresses WHERE client_id=? AND user_ref_hash=?",
+                                (client_id, ref)).fetchone()
+            if owned is not None:
+                if (owned["client_id"] != client_id or owned["user_ref_hash"] != ref
+                        or owned["local_part"] != address["local_part"] or owned["domain"] != address["domain"]):
+                    raise HTTPException(409, "Address ownership conflict")
+                return dict(owned)
+            if by_ref is not None:
+                raise HTTPException(409, "User reference already owns an address")
+            db.execute("INSERT INTO api_owned_addresses VALUES (?,?,?,?,?)",
+                       (address_id, client_id, ref, address["local_part"], address["domain"]))
+            return {"id": address_id, "client_id": client_id, "user_ref_hash": ref,
+                    "local_part": address["local_part"], "domain": address["domain"]}
 
     def reserve_address(self, client: dict, user_ref: str, resource_id: str) -> dict:
         ref = digest(user_ref)
