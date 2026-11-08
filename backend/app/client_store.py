@@ -81,10 +81,14 @@ class ClientStore:
             if not db.execute("UPDATE api_clients SET revoked=1 WHERE id=?", (client_id,)).rowcount:
                 raise HTTPException(404, "Not Found")
 
-    def own_address(self, client_id: str, address_id: str) -> dict:
+    def own_address(self, client_id: str, address_id: str, user_ref_hash: str | None = None) -> dict:
         with sqlite_connection(self.path) as db:
-            row = db.execute("SELECT * FROM api_owned_addresses WHERE client_id=? AND id=?",
-                             (client_id, address_id)).fetchone()
+            if user_ref_hash is None:
+                row = db.execute("SELECT * FROM api_owned_addresses WHERE client_id=? AND id=?",
+                                 (client_id, address_id)).fetchone()
+            else:
+                row = db.execute("SELECT * FROM api_owned_addresses WHERE client_id=? AND id=? AND user_ref_hash=?",
+                                 (client_id, address_id, user_ref_hash)).fetchone()
         if row is None:
             raise HTTPException(404, "Not Found")
         return dict(row)

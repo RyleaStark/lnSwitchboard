@@ -39,6 +39,10 @@ def test_client_provisioning_auth_scope_ownership_and_revocation():
         assert changed.status_code == 409
         own = client.get(f'/api/client/v1/addresses/{address["address_id"]}', headers=headers)
         assert own.json() == address
+        verified = client.get(f'/api/client/v1/addresses/{address["address_id"]}', headers=headers,
+                              params={"user_ref_hash": hashlib.sha256(b"opaque-user-00000001").hexdigest()})
+        assert verified.status_code == 200
+        assert verified.json() == address
         listed = client.get("/api/client-credentials")
         assert issued["token"] not in listed.text
         assert "synthetic-webhook-secret" not in listed.text

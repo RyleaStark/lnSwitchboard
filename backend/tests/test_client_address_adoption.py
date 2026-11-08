@@ -1,5 +1,6 @@
 """Operator adoption of existing LN addresses, using only disposable local state."""
 import asyncio
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
@@ -38,6 +39,65 @@ def snapshot():
     with sqlite_connection(get_settings().data_store_path) as db:
         return {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY rowid")]
                 for table in ("ln_addresses", "invoice_events", "webhook_deliveries", "api_client_requests")}
+
+
+def test_scoped_get_verifies_adopted_user_ref_hash_without_mutating_state():
+    with SimpleTestClient() as client:
+        issued = provision(client)
+        original = address()
+        ref = "opaque-user-00000012"
+        adopted = client.post(f'/api/client-credentials/{issued["client_id"]}/addresses/adopt',
+                              json={"address_id": original["id"], "external_user_ref": ref})
+        assert adopted.status_code == 201
+        path = f'/api/client/v1/addresses/{original["id"]}'
+        headers = {"Authorization": f'Bearer {issued["token"]}'}
+        before = snapshot()
+        with sqlite_connection(get_settings().data_store_path) as db:
+            owners_before = [tuple(row) for row in db.execute("SELECT * FROM api_owned_addresses")]
+        result = client.get(path, params={"user_ref_hash": hashlib.sha256(ref.encode()).hexdigest()}, headers=headers)
+        assert result.status_code == 200
+        assert result.json() == adopted.json() == {"address_id": original["id"],
+                                                    "ln_address": "paycf@pay.example.com"}
+        assert result.headers["cache-control"] == "no-store, private"
+        assert client.get(path, headers=headers).json() == adopted.json()
+        with sqlite_connection(get_settings().data_store_path) as db:
+            assert [tuple(row) for row in db.execute("SELECT * FROM api_owned_addresses")] == owners_before
+        assert snapshot() == before
+
+
+def test_scoped_get_rejects_wrong_and_malformed_user_ref_hash_with_generic_404():
+    with SimpleTestClient() as client:
+        issued = provision(client)
+        original = address()
+        assert client.post(f'/api/client-credentials/{issued["client_id"]}/addresses/adopt',
+                           json={"address_id": original["id"],
+                                 "external_user_ref": "opaque-user-00000012"}).status_code == 201
+        path = f'/api/client/v1/addresses/{original["id"]}'
+        headers = {"Authorization": f'Bearer {issued["token"]}'}
+        before = snapshot()
+        with sqlite_connection(get_settings().data_store_path) as db:
+            owners_before = [tuple(row) for row in db.execute("SELECT * FROM api_owned_addresses")]
+        for value in ("0" * 64, "", "a" * 63, "A" * 64, "g" * 64, "a" * 65):
+            result = client.get(path, params={"user_ref_hash": value}, headers=headers)
+            assert result.status_code == 404
+            assert result.json() == {"detail": "Not Found"}
+        with sqlite_connection(get_settings().data_store_path) as db:
+            assert [tuple(row) for row in db.execute("SELECT * FROM api_owned_addresses")] == owners_before
+        assert snapshot() == before
+
+
+def test_scoped_get_cannot_verify_foreign_client_even_with_matching_user_ref_hash():
+    with SimpleTestClient() as client:
+        owner, foreign = provision(client), provision(client)
+        original = address()
+        ref = "opaque-user-00000012"
+        assert client.post(f'/api/client-credentials/{owner["client_id"]}/addresses/adopt',
+                           json={"address_id": original["id"], "external_user_ref": ref}).status_code == 201
+        result = client.get(f'/api/client/v1/addresses/{original["id"]}',
+                            params={"user_ref_hash": hashlib.sha256(ref.encode()).hexdigest()},
+                            headers={"Authorization": f'Bearer {foreign["token"]}'})
+        assert result.status_code == 404
+        assert result.json() == {"detail": "Not Found"}
 
 
 def test_operator_adopts_existing_address_without_mutating_history_and_machine_gets_exact_address():

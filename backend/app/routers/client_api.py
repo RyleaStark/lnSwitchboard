@@ -163,10 +163,13 @@ async def create_address(payload: AddressPayload, client: dict = Depends(require
 
 
 @client_router.get("/api/client/v1/addresses/{address_id}")
-async def read_address(address_id: str, client: dict = Depends(require_scope("addresses:read_own")),
+async def read_address(address_id: str, user_ref_hash: str | None = None,
+                       client: dict = Depends(require_scope("addresses:read_own")),
                        store: ClientStore = Depends(store_dep),
                        addresses: LNAddressStore = Depends(get_ln_address_store_dep)):
-    store.own_address(client["id"], address_id)
+    if user_ref_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", user_ref_hash):
+        raise HTTPException(404, "Not Found")
+    store.own_address(client["id"], address_id, user_ref_hash)
     try:
         return address_result(await addresses.get_address(address_id))
     except AddressNotFoundError:
