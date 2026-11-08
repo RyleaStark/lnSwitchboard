@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 import re
-from uuid import uuid4
+from uuid import UUID, uuid4
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -62,6 +62,17 @@ class AddressPayload(StrictPayload):
     external_user_ref: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
 
 
+class AdoptAddressPayload(AddressPayload):
+    address_id: str
+
+    @field_validator("address_id")
+    @classmethod
+    def canonical_uuid(cls, value: str) -> str:
+        if str(UUID(value)) != value:
+            raise ValueError("Canonical UUID required")
+        return value
+
+
 async def store_dep(secrets: ConnectionSecretStore = Depends(get_connection_secret_store_dep)) -> ClientStore:
     return ClientStore(get_settings().data_store_path, secrets)
 
@@ -108,6 +119,12 @@ async def list_clients(store: ClientStore = Depends(store_dep)):
 async def revoke(client_id: str, store: ClientStore = Depends(store_dep)):
     store.revoke(client_id)
     return Response(status_code=204)
+
+
+@router.post("/api/client-credentials/{client_id}/addresses/adopt", status_code=201)
+async def adopt_address(client_id: str, payload: AdoptAddressPayload,
+                        store: ClientStore = Depends(store_dep)):
+    return address_result(store.adopt_address(client_id, payload.address_id, payload.external_user_ref))
 
 
 @client_router.post("/api/client/v1/addresses", status_code=201)

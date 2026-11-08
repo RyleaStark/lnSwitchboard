@@ -24,6 +24,18 @@ These are explicit operator endpoints, not client scopes. Open **Settings → Ma
 
 The existing optional `ALLOW_PRIVATE_WEBHOOKS` opt-in is now available under **Settings → Environment → Security → Allow private webhooks**. It remains disabled by default and applies to all webhook delivery. Enabling it permits HTTP/private destinations; restart to apply. Do not enable it for ordinary public HTTPS receivers. Settlement proof is automatic; no new proof toggle or global fixed-invoice expiry setting is introduced. Authorized clients still choose amount and 14/30-day expiry per request.
 
+### Adopt an existing address (operator only)
+
+`POST /api/client-credentials/{client_id}/addresses/adopt` is available **only on the private administration listener**, under the same network-trusted operator access control as credential provisioning. It is not a bearer-token permission, not mounted on the client-only listener or public listener, and requires no new client scope. The operator sends exactly:
+
+```json
+{"address_id":"e755de8b-943a-40ce-8a12-975d6d61dcef","external_user_ref":"opaque-random-user-000012"}
+```
+
+`address_id` must be a canonical lowercase hyphenated UUID of an already-existing address; `external_user_ref` follows the same 16–128-character opaque syntax as client allocation. Use a random identifier, never an email or user name. The path client must exist, remain active, and have the address's exact domain; the address must be locally routed. The address cannot already belong to another client, or to this client under a different reference; a reference cannot already identify another address. A repeat of the identical adoption returns the same 201 body, even without an idempotency key. Missing client/address returns 404; revoked client, domain/routing mismatch and ownership/reference conflicts return 409; invalid body returns 422. The response is `Cache-Control: no-store, private` and contains exactly `address_id` and `ln_address`, matching ordinary address GET.
+
+Only a binding in `api_owned_addresses` is added transactionally; adoption does not allocate or modify the LN address, webhook destinations/secrets, invoice records or settlement/replay history. The operator performs adoption **first**; the Silo machine token then verifies with `GET /api/client/v1/addresses/{address_id}` using its existing `addresses:read_own` scope and checks the returned UUID and LN address. Neither Silo nor another client must call an adoption/grant endpoint. Existing `POST /api/client/v1/addresses` allocation behavior and its idempotency key remain unchanged. This contract does not migrate any live address or change a deployed installation by itself.
+
 ## Client requests
 
 Every `/api/client/v1` request requires `Authorization: Bearer <token>`, including LAN requests. Missing, malformed, unknown and revoked credentials return 401. Missing scopes return 403. Foreign and missing address IDs both return 404.
